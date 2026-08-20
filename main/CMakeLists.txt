@@ -1,2 +1,4 @@
 idf_component_register(SRCS "app_main.cpp"
-                       INCLUDE_DIRS ".")
+                            "../driver/uart0_driver.cpp"
+                       INCLUDE_DIRS "."
+                                    "../driver")
