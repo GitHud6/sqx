@@ -4,7 +4,8 @@ ESP-IDF 5.5.1 learning workspace for migrating the command-parser and motion-pla
 
 ## Current milestone
 
-The project is an ESP32-S3 Hello World baseline. `app_main()` logs once per second.
+The project is an ESP32-S3 UART0 echo baseline. `uart0_rx_task` puts received
+data into a queue and `protocol_task` writes the same bytes back to UART0 TX.
 
 ## Build
 
