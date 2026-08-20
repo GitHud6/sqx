@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "ESP-IDF 5.5.1 ESP32-S3",
+            "compilerPath": "C:/ESPIDF/ESP551/Espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119/xtensa-esp-elf/bin/xtensa-esp32s3-elf-g++.exe",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/main",
+                "${workspaceFolder}/driver",
+                "${workspaceFolder}/protocol",
+                "${workspaceFolder}/build/config",
+                "C:/ESPIDF/ESP551/Espressif/frameworks/esp-idf-v5.5.1/components/**"
+            ],
+            "defines": [
+                "ESP_PLATFORM"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-gcc-x64"
+        }
+    ],
+    "version": 4
+}
