@@ -4,6 +4,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "command_dispatch.hpp"
+#include "line_assembler.hpp"
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -12,22 +14,56 @@ namespace {
 
 TaskHandle_t s_protocol_task = nullptr;
 
+bool protocol_write_all(const std::uint8_t* data, std::size_t length) {
+    std::size_t offset = 0;
+    while (offset < length) {
+        const int written = ray2::driver::uart0_write(data + offset, length - offset);
+        if (written <= 0) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+bool protocol_handle_ready_line(LineAssembler& assembler) {
+    const bool dispatched = command_dispatch(assembler.line(), assembler.length());
+    assembler.reset_line();
+    return dispatched;
+}
+
+bool protocol_handle_overflow() {
+    static constexpr std::uint8_t kOverflow[] = "error:overflow\r\n";
+    return protocol_write_all(kOverflow, sizeof(kOverflow) - 1);
+}
+
+bool protocol_process_byte(LineAssembler& assembler, std::uint8_t byte) {
+    switch (assembler.push(byte)) {
+        case LineEvent::Ready:
+            return protocol_handle_ready_line(assembler);
+        case LineEvent::Overflow:
+            return protocol_handle_overflow();
+        case LineEvent::None:
+            return true;
+    }
+
+    return false;
+}
+
 void protocol_task(void*) {
     ray2::driver::Uart0RxChunk chunk = {};
     QueueHandle_t rx_queue = ray2::driver::uart0_rx_queue();
+    LineAssembler assembler;
 
     while (true) {
         if (xQueueReceive(rx_queue, &chunk, portMAX_DELAY) != pdTRUE) {
             continue;
         }
 
-        std::size_t offset = 0;
-        while (offset < chunk.length) {
-            const int written = ray2::driver::uart0_write(chunk.data + offset, chunk.length - offset);
-            if (written <= 0) {
+        for (std::size_t index = 0; index < chunk.length; ++index) {
+            if (!protocol_process_byte(assembler, chunk.data[index])) {
                 break;
             }
-            offset += static_cast<std::size_t>(written);
         }
     }
 }
