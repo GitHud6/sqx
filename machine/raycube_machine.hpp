@@ -18,6 +18,7 @@ struct AxisHardware {
     float steps_per_mm;
     float max_rate_mm_per_min;
     float acceleration_mm_per_sec2;
+    float max_travel_mm;
 };
 
 constexpr std::size_t kAxisCount = 2;

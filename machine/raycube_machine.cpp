@@ -13,6 +13,7 @@ constexpr AxisHardware kAxes[kAxisCount] = {
         .steps_per_mm = 80.0F,
         .max_rate_mm_per_min = 12000.0F,
         .acceleration_mm_per_sec2 = 500.0F,
+        .max_travel_mm = 130.0F,
     },
     {
         .step_pin = 8,
@@ -23,6 +24,7 @@ constexpr AxisHardware kAxes[kAxisCount] = {
         .steps_per_mm = 80.0F,
         .max_rate_mm_per_min = 12000.0F,
         .acceleration_mm_per_sec2 = 500.0F,
+        .max_travel_mm = 110.0F,
     },
 };
 

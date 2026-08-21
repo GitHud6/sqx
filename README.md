@@ -4,8 +4,10 @@ ESP-IDF 5.5.1 learning workspace for migrating the command-parser and motion-pla
 
 ## Current milestone
 
-The project is an ESP32-S3 UART0 echo baseline. `uart0_rx_task` puts received
-data into a queue and `protocol_task` writes the same bytes back to UART0 TX.
+The project accepts basic G0/G1 command lines from UART0, turns them into
+bounded planner blocks, and executes the blocks in a dedicated planner task.
+`motion_submit()` returns after a block is accepted into the queue rather than
+after physical motion finishes.
 
 ## Build
 
@@ -19,4 +21,5 @@ The target is fixed to ESP32-S3 by `sdkconfig.defaults`.
 
 ## Next milestone
 
-Create a persistent `command_parser_task` that consumes a UART0 receive queue.
+Add acceleration planning, realtime command routing, and laser PWM synchronization
+to the planner block lifecycle.
