@@ -8,6 +8,7 @@ idf_component_register(SRCS "app_main.cpp"
                             "../protocol/line_assembler.cpp"
                             "../protocol/protocol_task.cpp"
                             "../stepper/stepper_driver.cpp"
+                            "../stepper/rmt_stepper_driver.cpp"
                        INCLUDE_DIRS "."
                                     "../command"
                                     "../driver"
@@ -15,4 +16,7 @@ idf_component_register(SRCS "app_main.cpp"
                                     "../motion"
                                     "../planner"
                                     "../protocol"
-                                    "../stepper")
+                                    "../stepper"
+                       REQUIRES esp_driver_gpio
+                                esp_driver_rmt
+                                esp_driver_uart)

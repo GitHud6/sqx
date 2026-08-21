@@ -4,6 +4,8 @@
 
 当前已实现 GPIO 初始化、使能/禁用、方向写入和单脉冲输出。正式 `protocol` 与 `command` 尚未连接到 stepper；开机不会初始化或操作电机 GPIO。
 
+RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP GPIO15 和 Y STEP GPIO8 创建两个 1 MHz RMT TX 通道，并建立同步管理器；接口不创建 encoder、不调用 `rmt_transmit()`，不会产生 STEP 脉冲。当前 Planner 仍使用已验证的软件 STEP 路径，RMT 初始化尚未接入启动流程。RMT 阶段二将直接通过单轴 G-code block 进行实机验证，不另建点动测试入口。
+
 后续实现顺序：
 
 1. `stepper_init()`：已实现，配置 RayCube X/Y 三组输出，并立即禁用两轴。
