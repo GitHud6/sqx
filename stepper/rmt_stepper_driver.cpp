@@ -1,10 +1,13 @@
 #include "rmt_stepper_driver.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "raycube_machine.hpp"
 #include "stepper_driver.hpp"
@@ -15,6 +18,7 @@ namespace {
 rmt_channel_handle_t s_rmt_channels[machine::kAxisCount] = {};
 rmt_sync_manager_handle_t s_sync_manager = nullptr;
 rmt_encoder_handle_t s_copy_encoder = nullptr;
+std::atomic<bool> s_feed_hold_requested = false;
 bool s_initialized = false;
 
 esp_err_t release_sync_manager() {
@@ -81,6 +85,12 @@ const rmt_transmit_config_t kTransmitConfig = {
         .queue_nonblocking = 0,
     },
 };
+
+void wait_for_feed_hold_release() {
+    while (s_feed_hold_requested.load()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
 
 void release_rmt_resources() {
     release_sync_manager();
@@ -167,8 +177,7 @@ bool rmt_stepper_is_initialized() {
 }
 
 bool rmt_stepper_can_execute(std::int32_t step_count, std::uint32_t step_interval_us) {
-    return step_count > 0 && static_cast<std::size_t>(step_count) <= kRmtStepMemorySymbols &&
-           step_interval_us > machine::kStepPulseMicroseconds &&
+    return step_count > 0 && step_interval_us > machine::kStepPulseMicroseconds &&
            step_interval_us <= kRmtStepMaxIntervalUs;
 }
 
@@ -199,25 +208,37 @@ esp_err_t rmt_stepper_execute(machine::Axis axis,
         return result;
     }
 
-    rmt_symbol_word_t symbols[kRmtStepMemorySymbols] = {};
+    std::int32_t remaining_steps = step_count;
     const rmt_symbol_word_t step_symbol = make_step_symbol(true, step_interval_us);
-    for (std::int32_t step = 0; step < step_count; ++step) {
-        symbols[step] = step_symbol;
-    }
+    while (remaining_steps > 0) {
+        wait_for_feed_hold_release();
+        const std::int32_t chunk_steps = std::min(
+            remaining_steps, static_cast<std::int32_t>(kRmtStepMemorySymbols));
+        rmt_symbol_word_t symbols[kRmtStepMemorySymbols] = {};
+        for (std::int32_t step = 0; step < chunk_steps; ++step) {
+            symbols[step] = step_symbol;
+        }
 
-    result = rmt_transmit(s_rmt_channels[axis_index], s_copy_encoder, symbols,
-                          static_cast<std::size_t>(step_count) * sizeof(rmt_symbol_word_t),
-                          &kTransmitConfig);
-    if (result != ESP_OK) {
-        return result;
+        result = rmt_transmit(s_rmt_channels[axis_index], s_copy_encoder, symbols,
+                              static_cast<std::size_t>(chunk_steps) * sizeof(rmt_symbol_word_t),
+                              &kTransmitConfig);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = wait_for_tx_done(axis, chunk_steps, step_interval_us);
+        if (result != ESP_OK) {
+            return result;
+        }
+        remaining_steps -= chunk_steps;
     }
-
-    return wait_for_tx_done(axis, step_count, step_interval_us);
+    return ESP_OK;
 }
 
 esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
                                  std::uint32_t step_interval_us) {
-    if (!rmt_stepper_can_execute_xy(steps, step_interval_us)) {
+    if (steps == nullptr || steps[0] <= 0 || steps[1] <= 0 ||
+        step_interval_us <= machine::kStepPulseMicroseconds ||
+        step_interval_us > kRmtStepMaxIntervalUs) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -229,51 +250,91 @@ esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
     if (result != ESP_OK) {
         return result;
     }
-    result = rmt_sync_reset(s_sync_manager);
-    if (result != ESP_OK) {
-        return result;
-    }
-
     const std::int32_t major_steps = std::max(steps[0], steps[1]);
     const std::int32_t minor_steps = std::min(steps[0], steps[1]);
     const bool x_is_major = steps[0] >= steps[1];
-    rmt_symbol_word_t x_symbols[kRmtStepMemorySymbols] = {};
-    rmt_symbol_word_t y_symbols[kRmtStepMemorySymbols] = {};
+    std::int32_t remaining_major_steps = major_steps;
     std::int64_t error = 0;
 
-    for (std::int32_t step = 0; step < major_steps; ++step) {
-        bool x_pulse = x_is_major;
-        bool y_pulse = !x_is_major;
-        error += minor_steps;
-        if (error * 2 >= major_steps) {
-            if (x_is_major) {
-                y_pulse = true;
-            } else {
-                x_pulse = true;
+    while (remaining_major_steps > 0) {
+        wait_for_feed_hold_release();
+        const std::int32_t chunk_steps = std::min(
+            remaining_major_steps, static_cast<std::int32_t>(kRmtStepMemorySymbols));
+        rmt_symbol_word_t x_symbols[kRmtStepMemorySymbols] = {};
+        rmt_symbol_word_t y_symbols[kRmtStepMemorySymbols] = {};
+
+        for (std::int32_t step = 0; step < chunk_steps; ++step) {
+            bool x_pulse = x_is_major;
+            bool y_pulse = !x_is_major;
+            error += minor_steps;
+            if (error * 2 >= major_steps) {
+                if (x_is_major) {
+                    y_pulse = true;
+                } else {
+                    x_pulse = true;
+                }
+                error -= major_steps;
             }
-            error -= major_steps;
+            x_symbols[step] = make_step_symbol(x_pulse, step_interval_us);
+            y_symbols[step] = make_step_symbol(y_pulse, step_interval_us);
         }
-        x_symbols[step] = make_step_symbol(x_pulse, step_interval_us);
-        y_symbols[step] = make_step_symbol(y_pulse, step_interval_us);
+
+        result = rmt_sync_reset(s_sync_manager);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = rmt_transmit(s_rmt_channels[0], s_copy_encoder, x_symbols,
+                              static_cast<std::size_t>(chunk_steps) * sizeof(rmt_symbol_word_t),
+                              &kTransmitConfig);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = rmt_transmit(s_rmt_channels[1], s_copy_encoder, y_symbols,
+                              static_cast<std::size_t>(chunk_steps) * sizeof(rmt_symbol_word_t),
+                              &kTransmitConfig);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = wait_for_tx_done(machine::Axis::X, chunk_steps, step_interval_us);
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = wait_for_tx_done(machine::Axis::Y, chunk_steps, step_interval_us);
+        if (result != ESP_OK) {
+            return result;
+        }
+        remaining_major_steps -= chunk_steps;
+    }
+    return ESP_OK;
+}
+
+void rmt_stepper_request_feed_hold() {
+    s_feed_hold_requested.store(true);
+}
+
+void rmt_stepper_resume() {
+    s_feed_hold_requested.store(false);
+}
+
+esp_err_t rmt_stepper_stop() {
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    result = rmt_transmit(s_rmt_channels[0], s_copy_encoder, x_symbols,
-                          static_cast<std::size_t>(major_steps) * sizeof(rmt_symbol_word_t),
-                          &kTransmitConfig);
-    if (result != ESP_OK) {
-        return result;
+    esp_err_t first_error = ESP_OK;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const esp_err_t result = rmt_disable(s_rmt_channels[axis]);
+        if (result != ESP_OK && first_error == ESP_OK) {
+            first_error = result;
+        }
     }
-    result = rmt_transmit(s_rmt_channels[1], s_copy_encoder, y_symbols,
-                          static_cast<std::size_t>(major_steps) * sizeof(rmt_symbol_word_t),
-                          &kTransmitConfig);
-    if (result != ESP_OK) {
-        return result;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const esp_err_t result = rmt_enable(s_rmt_channels[axis]);
+        if (result != ESP_OK && first_error == ESP_OK) {
+            first_error = result;
+        }
     }
-    result = wait_for_tx_done(machine::Axis::X, major_steps, step_interval_us);
-    if (result != ESP_OK) {
-        return result;
-    }
-    return wait_for_tx_done(machine::Axis::Y, major_steps, step_interval_us);
+    return first_error;
 }
 
 }  // namespace ray2::stepper

@@ -105,6 +105,8 @@ RMT 层必须保持每个 block 的 X/Y 步数比例、方向、周期与 `S` �
 
 ### 阶段四：长 block 分块、队列衔接和异常停止
 
+阶段状态：代码已完成，长线实机验证已通过，控制接口待专项实机验证。
+
 实现内容：
 
 1. 定义每次可编码的最大 symbol 数，长 block 按连续时间轴分块发送或通过 DMA/encoder refill。
@@ -117,6 +119,10 @@ RMT 层必须保持每个 block 的 X/Y 步数比例、方向、周期与 `S` �
 - 连续 block 不丢失、不重排，队列满仍只返回 `Busy`。
 - Hold 后不再输出新的 STEP；Resume 后继续明确的剩余 block 或分块。
 - Reset 后 RMT 停止、待执行队列清空、X/Y 均禁用。
+
+当前实现说明：单轴和 XY block 现按最多 64 个主步时间片循环发送。XY 的 Bresenham 误差在所有分块之间保留，因此分块不会改变最终 X/Y 步数比例；每块结束后再准备下一块，CPU 不会在每个 STEP 周期忙等。Feed Hold 被传递到 RMT 执行器，在当前块结束后阻塞下一块；Resume 继续发送。Reset 会调用 RMT stop、使正在等待的 TX 失败返回、清空 Planner 队列，并由 Planner 执行器关闭已使能轴。当前分块边界存在一次 RMT 重新提交的短暂间隙；无缝 DMA/encoder refill 是后续性能优化，不改变本阶段的步数正确性。
+
+验收记录：长单轴和 XY 命令已实机通过，不再回退到软件 STEP 路径；此前长线触发的 `task_wdt` 未再出现。Feed Hold、Resume、Reset 尚未接入 UART 实时字符，需在后续专项验证。
 
 ### 阶段五：为激光 PWM 同步建立执行回调
 

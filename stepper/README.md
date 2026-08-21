@@ -4,7 +4,7 @@
 
 当前已实现 GPIO 初始化、使能/禁用、方向写入和单脉冲输出。正式 `protocol` 与 `command` 尚未连接到 stepper；开机不会初始化或操作电机 GPIO。
 
-RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP GPIO15 和 Y STEP GPIO8 创建两个 1 MHz RMT TX 通道，并建立同步管理器；初始化不调用 `rmt_transmit()`，不会产生 STEP 脉冲。RMT 阶段二新增 `rmt_stepper_execute()`，由 Planner 的短单轴 block 调用；它使用 copy encoder 和 RMT symbol 输出脉冲，单次限制为 64 步。阶段三新增 `rmt_stepper_execute_xy()`，为两轴生成相同长度的主步时间轴并由同步管理器共同启动；超过该范围的单轴或 XY block 仍回退到已验证的软件路径，直至阶段四完成 RMT 分块。
+RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP GPIO15 和 Y STEP GPIO8 创建两个 1 MHz RMT TX 通道，并建立同步管理器；初始化不调用 `rmt_transmit()`，不会产生 STEP 脉冲。RMT 阶段二新增 `rmt_stepper_execute()`，由 Planner 的单轴 block 调用；它使用 copy encoder 和 RMT symbol 输出脉冲。阶段三新增 `rmt_stepper_execute_xy()`，为两轴生成相同长度的主步时间轴并由同步管理器共同启动。阶段四将长 block 分为每块最多 64 个主步时间片，跨块保留 Bresenham 误差；全部常规单轴和 XY block 现已走 RMT，Feed Hold 在当前分块结束后暂停，Reset 停止活动 TX。
 
 后续实现顺序：
 

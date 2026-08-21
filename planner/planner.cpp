@@ -180,17 +180,21 @@ SubmitResult planner_submit(const MotionBlock& block) {
 
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
+    stepper::rmt_stepper_request_feed_hold();
 }
 
 void planner_resume() {
     if (s_control_state.load() == ControlState::Hold) {
         s_control_state.store(ControlState::Running);
     }
+    stepper::rmt_stepper_resume();
 }
 
 void planner_reset() {
     s_reset_generation.fetch_add(1);
     s_control_state.store(ControlState::Running);
+    stepper::rmt_stepper_stop();
+    stepper::rmt_stepper_resume();
     if (s_block_queue != nullptr) {
         xQueueReset(s_block_queue);
     }

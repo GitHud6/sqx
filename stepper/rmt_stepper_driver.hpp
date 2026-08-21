@@ -25,5 +25,8 @@ esp_err_t rmt_stepper_execute(machine::Axis axis,
                                std::uint32_t step_interval_us);
 esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
                                  std::uint32_t step_interval_us);
+void rmt_stepper_request_feed_hold();
+void rmt_stepper_resume();
+esp_err_t rmt_stepper_stop();
 
 }  // namespace ray2::stepper
