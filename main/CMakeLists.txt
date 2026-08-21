@@ -1,10 +1,14 @@
 idf_component_register(SRCS "app_main.cpp"
                             "../command/command_executor.cpp"
                             "../driver/uart0_driver.cpp"
+                            "../machine/raycube_machine.cpp"
                             "../protocol/command_dispatch.cpp"
                             "../protocol/line_assembler.cpp"
                             "../protocol/protocol_task.cpp"
+                            "../stepper/stepper_driver.cpp"
                        INCLUDE_DIRS "."
                                     "../command"
                                     "../driver"
-                                    "../protocol")
+                                    "../machine"
+                                    "../protocol"
+                                    "../stepper")
