@@ -69,6 +69,49 @@ UART0 是当前唯一启用的片上外设驱动。
 
 目前 `protocol_task` 是队列的唯一消费者，收到数据后原样写回 UART0 TX，用于验证整条链路。
 
+### 当前协议交接模型
+
+UART0 驱动不识别 G-code，也不在接收任务中查找 `\r` 或 `\n`。它只批量读取原始字节块并投递到接收队列：
+
+    UART0 RX
+      -> uart0_rx_task
+      -> uart0_rx_queue
+      -> protocol_task
+
+`protocol_task` 消费队列中的字节块后，逐字节进行行帧化：
+
+    原始字节流
+      -> 查找 \r / \n
+      -> 组装完整命令行
+      -> 去除行结束符
+      -> 原始命令文本 payload
+
+这里的逐字节是内存中扫描一个批量 chunk，不是每个字节都调用一次 UART 驱动。一个 chunk 可以包含多条完整命令，也可以只包含某条命令的一部分；未完成的部分必须保留到下一批数据继续组装。
+
+第一阶段不额外创建 command-parser 任务。`protocol_task` 得到完整行后，直接同步调用命令分发和解析路径：
+
+    protocol_task
+      -> line_assembler
+      -> command_dispatch()
+      -> execute_line()
+      -> ok / error 响应
+
+这样先用最少的任务跑通 UART、行帧化和 `execute_line()`。只有测量到 `execute_line()` 或 Planner 等待导致 UART 原始队列持续积压时，才拆分为独立的 `command_parser_task` 和 `command_queue`：
+
+    protocol_task
+      -> 完整命令行
+      -> command_queue
+      -> command_parser_task
+      -> execute_line()
+
+### 行帧化规则
+
+- `\r`、`\n` 和 `\r\n` 都表示一条命令结束；`\r\n` 只能提交一次。
+- 空行不进入命令语义解析。
+- 实时字符不进入普通行缓存，后续由 protocol 层即时分流。
+- 行缓存满后，丢弃当前行直到下一个行结束符，再报告 overflow；不能把截断命令交给 `execute_line()`。
+- 行帧化后保留的是未解析的原始文本，例如 `G1 X0.05S100`；`G`、`X`、`S` 的语义属于 `execute_line()` 及后续 G-code 解析层。
+
 ### 当前限制
 
 - 队列满时接收任务会阻塞；这适合当前回显原型，但后续需要统计队列等待时间和溢出情况。
