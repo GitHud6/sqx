@@ -4,32 +4,21 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "motion_submit.hpp"
+
 namespace ray2::command {
 
 namespace {
 
 constexpr double kMillimetersPerInch = 25.4;
-
-struct ParsedLine {
-    bool has_motion = false;
-    MotionMode motion_mode = MotionMode::Rapid;
-    bool has_distance_mode = false;
-    DistanceMode distance_mode = DistanceMode::Absolute;
-    bool has_units = false;
-    Units units = Units::Millimeters;
-    bool has_axis[3] = {};
-    double axis_value[3] = {};
-    bool has_feed_rate = false;
-    double feed_rate = 0.0;
-    bool has_spindle_speed = false;
-    double spindle_speed = 0.0;
-};
+constexpr double kMaxFeedRateMmPerMin = 12000.0;
+constexpr double kMaxSpindlePower = 1000.0;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
 }
 
-Error parse_g_word(double value, ParsedLine& parsed) {
+Error parse_g_word(double value, ParsedBlock& parsed) {
     if (std::floor(value) != value) {
         return Error::UnsupportedCommand;
     }
@@ -57,7 +46,32 @@ Error parse_g_word(double value, ParsedLine& parsed) {
     }
 }
 
-Error parse_line(const char* line, std::size_t length, ParsedLine& parsed) {
+Error parse_m_word(double value, ParsedBlock& parsed) {
+    if (std::floor(value) != value) {
+        return Error::UnsupportedCommand;
+    }
+    if (parsed.has_spindle_mode) {
+        return Error::ModalGroupViolation;
+    }
+
+    switch (static_cast<int>(value)) {
+        case 3:
+            parsed.spindle_mode = SpindleMode::Clockwise;
+            break;
+        case 4:
+            parsed.spindle_mode = SpindleMode::CounterClockwise;
+            break;
+        case 5:
+            parsed.spindle_mode = SpindleMode::Off;
+            break;
+        default:
+            return Error::UnsupportedCommand;
+    }
+    parsed.has_spindle_mode = true;
+    return Error::Ok;
+}
+
+Error parse_line(const char* line, std::size_t length, ParsedBlock& parsed) {
     const char* cursor = line;
     const char* const end = line + length;
     bool in_comment = false;
@@ -93,21 +107,29 @@ Error parse_line(const char* line, std::size_t length, ParsedLine& parsed) {
             if (result != Error::Ok) return result;
             continue;
         }
+        if (letter == 'M') {
+            const Error result = parse_m_word(value, parsed);
+            if (result != Error::Ok) return result;
+            continue;
+        }
         const int axis = axis_index(letter);
         if (axis >= 0) {
             if (parsed.has_axis[axis]) return Error::WordRepeated;
+            if (axis == 2) return Error::UnsupportedCommand;
             parsed.has_axis[axis] = true;
             parsed.axis_value[axis] = value;
             continue;
         }
         if (letter == 'F') {
             if (parsed.has_feed_rate) return Error::WordRepeated;
+            if (value < 0.0) return Error::NegativeValue;
             parsed.has_feed_rate = true;
             parsed.feed_rate = value;
             continue;
         }
         if (letter == 'S') {
             if (parsed.has_spindle_speed) return Error::WordRepeated;
+            if (value < 0.0) return Error::NegativeValue;
             parsed.has_spindle_speed = true;
             parsed.spindle_speed = value;
             continue;
@@ -117,6 +139,46 @@ Error parse_line(const char* line, std::size_t length, ParsedLine& parsed) {
     return in_comment ? Error::BadNumberFormat : Error::Ok;
 }
 
+motion::MotionType motion_type(MotionMode mode) {
+    return mode == MotionMode::Linear ? motion::MotionType::Linear : motion::MotionType::Rapid;
+}
+
+motion::SpindleMode spindle_mode(SpindleMode mode) {
+    switch (mode) {
+        case SpindleMode::Off: return motion::SpindleMode::Off;
+        case SpindleMode::Clockwise: return motion::SpindleMode::Clockwise;
+        case SpindleMode::CounterClockwise: return motion::SpindleMode::CounterClockwise;
+    }
+    return motion::SpindleMode::Off;
+}
+
+Error submit_motion_request(motion::MotionRequest& request) {
+    request.has_motion = true;
+    const motion::MotionSubmitResult result = motion::motion_submit(request);
+    switch (result) {
+        case motion::MotionSubmitResult::Accepted:
+            return Error::Ok;
+        case motion::MotionSubmitResult::Busy:
+            return Error::MotionBusy;
+        case motion::MotionSubmitResult::Rejected:
+            return Error::MotionRejected;
+    }
+    return Error::MotionRejected;
+}
+
+void commit_parser_state(ParserState& state,
+                         const ParserState& next_state,
+                         const motion::MotionRequest& request,
+                         bool has_motion) {
+    ParserState committed_state = next_state;
+    if (has_motion) {
+        for (int axis = 0; axis < 3; ++axis) {
+            committed_state.position_mm[axis] = request.target_mm[axis];
+        }
+    }
+    state = committed_state;
+}
+
 }  // namespace
 
 Error execute_line(const char* line, std::size_t length, ParserState& state) {
@@ -124,28 +186,52 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (line[0] == '$' || line[0] == '[') return Error::SystemCommandUnsupported;
     if (state.system_state == SystemState::Alarm || state.system_state == SystemState::Jog) return Error::SystemGcLock;
 
-    ParsedLine parsed = {};
+    ParsedBlock parsed = {};
     const Error result = parse_line(line, length, parsed);
     if (result != Error::Ok) return result;
 
-    if (parsed.has_units) state.units = parsed.units;
-    if (parsed.has_distance_mode) state.distance_mode = parsed.distance_mode;
-    if (parsed.has_motion) state.motion_mode = parsed.motion_mode;
+    ParserState next_state = state;
+    if (parsed.has_units) next_state.units = parsed.units;
+    if (parsed.has_distance_mode) next_state.distance_mode = parsed.distance_mode;
+    if (parsed.has_motion) next_state.motion_mode = parsed.motion_mode;
+    if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
 
-    const double unit_scale = state.units == Units::Inches ? kMillimetersPerInch : 1.0;
-    if (parsed.has_feed_rate) state.feed_rate_mm_per_min = parsed.feed_rate * unit_scale;
-    if (parsed.has_spindle_speed) state.spindle_speed = parsed.spindle_speed;
+    const double unit_scale = next_state.units == Units::Inches ? kMillimetersPerInch : 1.0;
+    if (parsed.has_feed_rate) {
+        next_state.feed_rate_mm_per_min = parsed.feed_rate * unit_scale;
+        if (next_state.feed_rate_mm_per_min > kMaxFeedRateMmPerMin) return Error::ValueOutOfRange;
+    }
+    if (parsed.has_spindle_speed) next_state.spindle_speed = parsed.spindle_speed;
+    if (next_state.spindle_speed > kMaxSpindlePower) return Error::ValueOutOfRange;
 
     bool has_axis = false;
+    motion::MotionRequest request = {};
+    request.motion_mode = motion_type(next_state.motion_mode);
+    request.feed_rate_mm_per_min = next_state.feed_rate_mm_per_min;
+    request.spindle_power = next_state.spindle_speed;
+    request.spindle_mode = spindle_mode(next_state.spindle_mode);
+    for (int axis = 0; axis < 3; ++axis) {
+        request.start_mm[axis] = state.position_mm[axis];
+        request.target_mm[axis] = state.position_mm[axis];
+    }
+
     for (int axis = 0; axis < 3; ++axis) {
         if (!parsed.has_axis[axis]) continue;
         has_axis = true;
         const double value_mm = parsed.axis_value[axis] * unit_scale;
-        state.position_mm[axis] = state.distance_mode == DistanceMode::Absolute
+        request.target_mm[axis] = next_state.distance_mode == DistanceMode::Absolute
                                       ? value_mm
                                       : state.position_mm[axis] + value_mm;
     }
-    return parsed.has_motion && !has_axis ? Error::NoAxisWords : Error::Ok;
+
+    if (parsed.has_motion && !has_axis) return Error::NoAxisWords;
+    if (has_axis) {
+        const Error submit_error = submit_motion_request(request);
+        if (submit_error != Error::Ok) return submit_error;
+    }
+
+    commit_parser_state(state, next_state, request, has_axis);
+    return Error::Ok;
 }
 
 const char* error_text(Error error) {
@@ -155,10 +241,14 @@ const char* error_text(Error error) {
         case Error::SystemGcLock: return "system-gc-lock";
         case Error::ExpectedCommandLetter: return "expected-command-letter";
         case Error::BadNumberFormat: return "bad-number-format";
+        case Error::NegativeValue: return "negative-value";
+        case Error::ValueOutOfRange: return "value-out-of-range";
         case Error::UnsupportedCommand: return "unsupported-command";
         case Error::ModalGroupViolation: return "modal-group-violation";
         case Error::WordRepeated: return "word-repeated";
         case Error::NoAxisWords: return "no-axis-words";
+        case Error::MotionBusy: return "motion-busy";
+        case Error::MotionRejected: return "motion-rejected";
     }
     return "unknown";
 }
