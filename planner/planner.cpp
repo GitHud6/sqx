@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "raycube_machine.hpp"
+#include "rmt_stepper_driver.hpp"
 #include "stepper_driver.hpp"
 
 namespace ray2::planner {
@@ -72,6 +73,24 @@ bool execute_block(const MotionBlock& block) {
     bool enabled[machine::kAxisCount] = {};
     if (!configure_axes(block, enabled)) {
         return false;
+    }
+
+    std::size_t active_axis_count = 0;
+    machine::Axis active_axis = machine::Axis::X;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (block.plan.steps[axis] > 0) {
+            active_axis = static_cast<machine::Axis>(axis);
+            ++active_axis_count;
+        }
+    }
+    if (active_axis_count == 1 && stepper::rmt_stepper_can_execute(
+                                      block.plan.steps[static_cast<std::size_t>(active_axis)],
+                                      block.plan.step_interval_us)) {
+        const auto axis_index = static_cast<std::size_t>(active_axis);
+        const bool completed = stepper::rmt_stepper_execute(
+            active_axis, block.plan.steps[axis_index], block.plan.step_interval_us) == ESP_OK;
+        disable_axes(enabled);
+        return completed;
     }
 
     const std::int32_t minor_steps = std::min(block.plan.steps[0], block.plan.steps[1]);
