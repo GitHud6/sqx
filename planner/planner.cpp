@@ -92,6 +92,13 @@ bool execute_block(const MotionBlock& block) {
         disable_axes(enabled);
         return completed;
     }
+    if (active_axis_count == 2 &&
+        stepper::rmt_stepper_can_execute_xy(block.plan.steps, block.plan.step_interval_us)) {
+        const bool completed = stepper::rmt_stepper_execute_xy(
+            block.plan.steps, block.plan.step_interval_us) == ESP_OK;
+        disable_axes(enabled);
+        return completed;
+    }
 
     const std::int32_t minor_steps = std::min(block.plan.steps[0], block.plan.steps[1]);
     const bool x_is_major = block.plan.steps[0] >= block.plan.steps[1];
