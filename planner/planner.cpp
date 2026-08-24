@@ -85,6 +85,19 @@ void report_queue_drained() {
     }
 }
 
+SubmitResult submit_block(MotionBlock block) {
+    if (s_block_queue == nullptr) {
+        return SubmitResult::Rejected;
+    }
+    block.reset_generation = s_reset_generation.load();
+    block.execution_id = s_next_execution_id.fetch_add(1);
+    s_queue_drain_reported.store(false);
+    if (xQueueSend(s_block_queue, &block, 0) != pdTRUE) {
+        return SubmitResult::Full;
+    }
+    return SubmitResult::Accepted;
+}
+
 void disable_axes(const bool enabled[]) {
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         if (enabled[axis]) {
@@ -205,7 +218,7 @@ void planner_task(void*) {
         }
         set_active_block(block);
         emit_execution_event(ExecutionEventType::BlockStarted, &block);
-        const bool completed = execute_block(block);
+        const bool completed = block.type == MotionBlockType::SpindleDisable || execute_block(block);
         clear_active_block();
         if (completed) {
             ++s_completed_block_count;
@@ -239,17 +252,17 @@ esp_err_t planner_start() {
 }
 
 SubmitResult planner_submit(const MotionBlock& block) {
-    if (s_block_queue == nullptr || block.plan.step_interval_us == 0) {
+    if (block.type != MotionBlockType::Motion || block.plan.step_interval_us == 0) {
         return SubmitResult::Rejected;
     }
-    MotionBlock queued_block = block;
-    queued_block.reset_generation = s_reset_generation.load();
-    queued_block.execution_id = s_next_execution_id.fetch_add(1);
-    s_queue_drain_reported.store(false);
-    if (xQueueSend(s_block_queue, &queued_block, 0) != pdTRUE) {
-        return SubmitResult::Full;
-    }
-    return SubmitResult::Accepted;
+    return submit_block(block);
+}
+
+SubmitResult planner_submit_spindle_disable() {
+    MotionBlock block = {};
+    block.type = MotionBlockType::SpindleDisable;
+    block.request.spindle_mode = motion::SpindleMode::Off;
+    return submit_block(block);
 }
 
 void planner_set_execution_callback(ExecutionCallback callback, void* user_data) {

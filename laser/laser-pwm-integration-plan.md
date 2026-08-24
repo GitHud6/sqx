@@ -108,7 +108,13 @@ timer/channel 0、10 bit 分辨率初始化 PWM，先将 GPIO5 拉低，最后�
 可重复调用：先把 GPIO5 写为低电平，再调用 `ledc_stop()` 使 GPIO4 保持低电平，同时清除
 输出状态和 duty 记录。本阶段没有调用这些接口，因此不会改变现有机械运动。
 
+实现修正：ESP-IDF 5.5.1 的 `ledc_set_duty_and_update()` 会要求安装 fade service，
+而本模块使用静态 PWM，不应引入 fade。功率更新改为 `ledc_set_duty()` 后调用
+`ledc_update_duty()`；该组合不依赖 fade service，新的 duty 在下一 PWM 周期生效。
+
 ### 阶段三：将 Planner 生命周期事件接入激光输出
+
+阶段状态：代码已完成，待构建与实机 PWM/STEP 同步验收。
 
 实现内容：
 
@@ -130,6 +136,15 @@ timer/channel 0、10 bit 分辨率初始化 PWM，先将 GPIO5 拉低，最后�
 - 激光回调不会阻塞 planner task；连续串口输入仍按既有语义返回 `ok` 或
   `error:motion-busy`。
 - 仅接入激光时，关闭激光的同一测试轨迹与接入前具有相同步数和终点。
+
+当前实现说明：新增 `laser_planner_adapter`，它在 Planner 启动后注册唯一的
+`ExecutionCallback`。仅当 `BlockStarted` 的请求是 Linear、激光模式非 Off 且 `S > 0`
+时调用 `laser_set_power()`，并保存对应 `execution_id`；Rapid、`S0`、M5 的停止 block
+或功率设置失败均保持关闭。`FeedHoldRequested`、完成、取消、失败和队列排空都调用
+`laser_disable()`；`Resumed` 不会直接恢复出光，而是等待下一 block 开始。无位移的 `M5`
+会通过 `planner_submit_spindle_disable()` 入队为 `SpindleDisable` block，因此它按既有
+运动 block 的队列顺序关闭激光，而不会让已接受的灰度行提前失去功率。`M3/M4 S...`
+无位移时仍只更新 G-code 模态，直到后续 Linear block 执行才实际出光。
 
 ### 阶段四：灰度行实机测量与边界行为验证
 

@@ -11,7 +11,13 @@ namespace ray2::planner {
 
 constexpr std::size_t kPlannerQueueLength = 32;
 
+enum class MotionBlockType {
+    Motion,
+    SpindleDisable,
+};
+
 struct MotionBlock {
+    MotionBlockType type = MotionBlockType::Motion;
     motion::MotionRequest request = {};
     motion::MotionExecutionPlan plan = {};
     std::uint32_t reset_generation = 0;
@@ -46,6 +52,7 @@ using ExecutionCallback = void (*)(const ExecutionEvent& event, void* user_data)
 
 esp_err_t planner_start();
 SubmitResult planner_submit(const MotionBlock& block);
+SubmitResult planner_submit_spindle_disable();
 void planner_set_execution_callback(ExecutionCallback callback, void* user_data);
 void planner_request_feed_hold();
 void planner_resume();

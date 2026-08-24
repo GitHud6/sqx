@@ -130,7 +130,10 @@ esp_err_t laser_set_power(double power) {
     }
 
     const std::uint32_t duty = duty_for_power(power);
-    esp_err_t result = ledc_set_duty_and_update(kLedcMode, kLedcChannel, duty, 0);
+    esp_err_t result = ledc_set_duty(kLedcMode, kLedcChannel, duty);
+    if (result == ESP_OK) {
+        result = ledc_update_duty(kLedcMode, kLedcChannel);
+    }
     if (result != ESP_OK) {
         laser_disable();
         return result;

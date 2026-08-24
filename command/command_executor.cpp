@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "motion_submit.hpp"
+#include "planner.hpp"
 
 namespace ray2::command {
 
@@ -166,6 +167,18 @@ Error submit_motion_request(motion::MotionRequest& request) {
     return Error::MotionRejected;
 }
 
+Error submit_spindle_disable() {
+    switch (planner::planner_submit_spindle_disable()) {
+        case planner::SubmitResult::Accepted:
+            return Error::Ok;
+        case planner::SubmitResult::Full:
+            return Error::MotionBusy;
+        case planner::SubmitResult::Rejected:
+            return Error::MotionRejected;
+    }
+    return Error::MotionRejected;
+}
+
 void commit_parser_state(ParserState& state,
                          const ParserState& next_state,
                          const motion::MotionRequest& request,
@@ -227,6 +240,9 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (parsed.has_motion && !has_axis) return Error::NoAxisWords;
     if (has_axis) {
         const Error submit_error = submit_motion_request(request);
+        if (submit_error != Error::Ok) return submit_error;
+    } else if (parsed.has_spindle_mode && parsed.spindle_mode == SpindleMode::Off) {
+        const Error submit_error = submit_spindle_disable();
         if (submit_error != Error::Ok) return submit_error;
     }
 

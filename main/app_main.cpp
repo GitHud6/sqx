@@ -1,6 +1,7 @@
 #include "esp_log.h"
 
 #include "laser_driver.hpp"
+#include "laser_planner_adapter.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "uart0_driver.hpp"
@@ -11,6 +12,7 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ray2::laser::laser_init());
     ESP_ERROR_CHECK(ray2::driver::uart0_start());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
+    ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());
     ESP_LOGI(tag,
              "UART0 protocol and planner ready: tx=%d, rx=%d, baud=%d",
