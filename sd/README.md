@@ -4,7 +4,7 @@
 
 `sd` 模块负责把已挂载的 SD 卡文件转换为可供控制器执行的 G-code 行。
 它位于 SD 硬件驱动和命令执行链之间，目标是支持当前普通 `.gc` 灰度雕刻文件，
-并为后续接入 gzip 压缩文件保留稳定的读取接口。
+并支持通过统一读取接口接入 gzip 压缩文件。
 
 模块边界如下：
 
@@ -80,16 +80,17 @@ SD 任务不能与 UART 任务同时直接修改同一个 `ParserState`。当前
 Planner 满载时，SD 文件行不能丢失或重复执行，应等待空间释放后再提交。文件 EOF 后，
 还必须等待 Planner、Segment 和 RMT 排空，再结束作业并关闭激光。
 
-## gzip 扩展预留
+## gzip 文件读取
 
-当前不实现 gzip 解压库，只预留替换点：
+当前已通过 `GzipFileReader` 实现 gzip 文件的流式读取。它使用 ESP-IDF
+提供的 `tinfl` 底层解压接口，不把整个压缩文件加载到内存：
 
 ```text
 普通 .gc      -> PlainFileReader
-压缩 .gc.gz   -> GzipFileReader -> 解压后的 G-code 行
+压缩 .gz      -> GzipFileReader -> 解压后的 G-code 行
 ```
 
-gzip 实现应自行维护压缩输入缓冲、解压状态和错误状态，不能让压缩库对象直接泄漏到
+gzip 实现自行维护压缩输入缓冲、解压状态、CRC32 和原始长度校验，不能让压缩库对象直接泄漏到
 `execute_line()`、Planner 或激光模块。
 
 ## 实现步骤与验收标准
@@ -148,6 +149,10 @@ gzip 实现应自行维护压缩输入缓冲、解压状态和错误状态，不
 3. Planner 满载时形成背压，不丢失文件行。
 4. 实现作业开始、运行、EOF 排空、完成、取消和错误状态。
 5. 作业结束时关闭激光，并确认运动输出已经安全停止。
+6. 通过 `$SD/RUN=<path>` 启动作业，通过 `$SD/STATUS` 查询 `starting`、`running`、
+   `draining`、`completed` 或 `faulted` 状态。
+7. `$SD/STATUS` 必须输出当前读取行号、作业故障类别和底层 G-code 错误，避免只返回
+   `accepted` 后无法判断任务为什么停止。
 
 验收标准：
 
@@ -158,6 +163,10 @@ gzip 实现应自行维护压缩输入缓冲、解压状态和错误状态，不
 - 取消、读取错误和复位路径都能关闭激光。
 - `$SD/RUN=<path>` 能通过串口提交一个普通 `.gc` 文件，返回一次“已接受”响应，
   并能查询到作业处于待执行或运行状态；在本阶段结束前不把“已接受”当作“已雕刻完成”。
+- `$SD/RUN=<path>` 启动后，`$SD/STATUS` 能观察到作业状态变化；文件读取失败或命令执行失败时进入
+  `faulted`，正常 EOF 且 Planner 排空后进入 `completed`。
+- 作业故障后，`$SD/STATUS` 能定位到失败行号，并区分 `open-failed`、`read-failed` 和
+  `command-rejected`；后者还必须输出 `execute_line()` 的具体错误文本。
 
 结束改动标准：
 
@@ -171,6 +180,8 @@ gzip 实现应自行维护压缩输入缓冲、解压状态和错误状态，不
 2. 复用 `FileReader` 的逐行输出语义。
 3. 区分压缩文件损坏、底层读卡失败和正常 EOF。
 4. 保持普通 `.gc` 路径不受影响。
+5. `$SD/RUN=<path>` 根据 `.gz` 后缀选择 `GzipFileReader`，其他路径保持使用
+   `PlainFileReader`。
 
 验收标准：
 
@@ -178,6 +189,16 @@ gzip 实现应自行维护压缩输入缓冲、解压状态和错误状态，不
 - 解压错误不会被误报为正常作业完成。
 - gzip 缓冲区不会阻塞 UART 实时控制和运动执行。
 - 普通 `.gc` 和 `.gc.gz` 使用相同的作业调度接口。
+- gzip header、deflate 数据、CRC32 或原始长度校验失败时，作业进入 `faulted/read-failed`，
+  不允许误报为正常 EOF。
+
+实机验收：
+
+1. 使用 `$SD/LIST` 确认卡上的 `.gz` 文件名。
+2. 发送 `$SD/RUN=/实际文件名.gz`，确认只返回一次 `accepted` 和 `ok`。
+3. 轮询 `$SD/STATUS`，确认行号递增，且作业进入 `running` 或 `draining`。
+4. 对包含当前已支持 G-code 的压缩测试文件，确认最终状态为 `completed`；如果文件包含尚未迁移的
+   LightBurn 命令，应进入 `faulted|fault=command-rejected`，这仍能证明 gzip 已成功读到该行。
 
 结束改动标准：
 
@@ -205,12 +226,12 @@ $SD/RUN=/gray_test.gc
 
 阶段一中，`$SD/STATUS` 只报告当前挂载状态，`$SD/LIST` 返回
 `error:sd-list-not-ready`，`$SD/RUN=<path>` 只返回路径已登记的保留响应；
-这些响应不代表已经读取文件或完成雕刻。
+这些响应不代表已经读取文件或完成雕刻。阶段三开始后，`$SD/RUN` 才会启动普通 `.gc` 作业。
 
 推荐响应示例：
 
 ```text
-[SD:mounted path=/sd]
+[SD:mounted path=/sd|job=idle]
 ok
 ```
 
@@ -231,6 +252,6 @@ ok
 ## 当前非目标
 
 - 不在本模块实现 SD 卡硬件挂载；由 `driver/sdcard_driver` 负责。
-- 不在第一阶段实现 gzip 解压。
+- 不在阶段一实现 gzip 解压；当前 gzip 功能属于阶段四。
 - 不实现 WebUI 文件管理、上传、删除和文件列表。
 - 不复制 `ray2-main` 的 Arduino 全局对象和完整多客户端系统。

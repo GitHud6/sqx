@@ -12,7 +12,9 @@ idf_component_register(SRCS "app_main.cpp"
                             "../protocol/protocol_task.cpp"
                             "../sd/sd_command_handler.cpp"
                             "../sd/plain_file_reader.cpp"
+                            "../sd/gzip_file_reader.cpp"
                             "../sd/sd_file_service.cpp"
+                            "../sd/sd_job_service.cpp"
                             "../stepper/stepper_driver.cpp"
                             "../stepper/stepper_prep.cpp"
                             "../stepper/rmt_stepper_driver.cpp"
@@ -31,4 +33,5 @@ idf_component_register(SRCS "app_main.cpp"
                                 esp_driver_rmt
                                 esp_driver_uart
                                 fatfs
-                                sdmmc)
+                                sdmmc
+                                esp_rom)

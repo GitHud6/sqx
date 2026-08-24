@@ -4,19 +4,18 @@
 #include <cstdint>
 #include <cstring>
 
-#include "esp_log.h"
-
 #include "command_executor.hpp"
 #include "sd_command_handler.hpp"
 #include "sd_file_service.hpp"
+#include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
 #include "uart0_driver.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 namespace ray2::protocol {
 
 namespace {
-
-constexpr char kProtocolTag[] = "protocol";
 
 bool write_all(const std::uint8_t* data, std::size_t length) {
     std::size_t offset = 0;
@@ -44,6 +43,7 @@ bool report_status(command::Error error) {
 }
 
 command::ParserState s_parser_state = {};
+SemaphoreHandle_t s_parser_mutex = nullptr;
 
 struct SdListResponseContext {
     bool write_failed = false;
@@ -66,13 +66,11 @@ bool write_sd_list_entry(const char* path, std::uintmax_t size, bool is_director
 }  // namespace
 
 bool command_dispatch(const char* line, std::size_t length) {
-    if (line != nullptr && length > 0 && line[0] == '$') {
-        ESP_LOGI(kProtocolTag,
-                 "system command length=%u text='%.*s'",
-                 static_cast<unsigned>(length),
-                 static_cast<int>(length),
-                 line);
-        ESP_LOG_BUFFER_HEXDUMP(kProtocolTag, line, length, ESP_LOG_INFO);
+    if (s_parser_mutex == nullptr) {
+        s_parser_mutex = xSemaphoreCreateMutex();
+        if (s_parser_mutex == nullptr) {
+            return write_text("error:protocol-no-mem\r\n");
+        }
     }
 
     ray2::sd::SystemCommand sd_command = {};
@@ -82,7 +80,19 @@ bool command_dispatch(const char* line, std::size_t length) {
                 if (!ray2::driver::sdcard_is_mounted()) {
                     return write_text("error:sd-not-mounted\r\n");
                 }
-                return write_text("[SD:mounted path=/sd]\r\nok\r\n");
+                {
+                    char response[192] = {};
+                    const int response_length = std::snprintf(
+                        response, sizeof(response),
+                        "[SD:mounted path=/sd|job=%s|line=%u|fault=%s|error=%s]\r\nok\r\n",
+                        ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
+                        static_cast<unsigned>(ray2::sd::sd_job_current_line()),
+                        ray2::sd::sd_job_fault_text(ray2::sd::sd_job_fault()),
+                        command::error_text(ray2::sd::sd_job_command_error()));
+                    return response_length > 0 && static_cast<std::size_t>(response_length) < sizeof(response) &&
+                           write_all(reinterpret_cast<const std::uint8_t*>(response),
+                                     static_cast<std::size_t>(response_length));
+                }
             case ray2::sd::SystemCommandType::List:
                 if (!ray2::driver::sdcard_is_mounted()) {
                     return write_text("error:sd-not-mounted\r\n");
@@ -95,9 +105,19 @@ bool command_dispatch(const char* line, std::size_t length) {
                     return write_text("ok\r\n");
                 }
             case ray2::sd::SystemCommandType::Run: {
+                const esp_err_t result = ray2::sd::sd_job_start(sd_command.path);
+                if (result == ESP_ERR_INVALID_STATE) {
+                    if (!ray2::driver::sdcard_is_mounted()) {
+                        return write_text("error:sd-not-mounted\r\n");
+                    }
+                    return write_text("error:sd-job-active\r\n");
+                }
+                if (result != ESP_OK) {
+                    return write_text("error:sd-run-failed\r\n");
+                }
                 char response[192] = {};
                 const int response_length = std::snprintf(
-                    response, sizeof(response), "[SD:run reserved path=%s]\r\nok\r\n", sd_command.path);
+                    response, sizeof(response), "[SD:run accepted path=%s]\r\nok\r\n", sd_command.path);
                 return response_length > 0 && static_cast<std::size_t>(response_length) < sizeof(response) &&
                        write_all(reinterpret_cast<const std::uint8_t*>(response),
                                  static_cast<std::size_t>(response_length));
@@ -107,7 +127,24 @@ bool command_dispatch(const char* line, std::size_t length) {
     if (ray2::sd::is_system_command(line, length)) {
         return write_text("error:sd-invalid-command\r\n");
     }
-    return report_status(command::execute_line(line, length, s_parser_state));
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const command::Error result = command::execute_line(line, length, s_parser_state);
+    xSemaphoreGive(s_parser_mutex);
+    return report_status(result);
+}
+
+command::Error command_dispatch_external(const char* line, std::size_t length) {
+    if (s_parser_mutex == nullptr) {
+        s_parser_mutex = xSemaphoreCreateMutex();
+        if (s_parser_mutex == nullptr) {
+            return command::Error::MotionRejected;
+        }
+    }
+
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const command::Error result = command::execute_line(line, length, s_parser_state);
+    xSemaphoreGive(s_parser_mutex);
+    return result;
 }
 
 }  // namespace ray2::protocol
