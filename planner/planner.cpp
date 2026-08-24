@@ -480,6 +480,7 @@ void planner_task(void*) {
         }
 
         if (!wait_for_run_permission(block.reset_generation)) {
+            stepper::stepper_invalidate_position();
             emit_execution_event(ExecutionEventType::BlockCancelled, &block);
             report_queue_drained();
             continue;
@@ -495,8 +496,10 @@ void planner_task(void*) {
             }
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
         } else if (s_reset_generation.load() != block.reset_generation) {
+            stepper::stepper_invalidate_position();
             emit_execution_event(ExecutionEventType::BlockCancelled, &block);
         } else {
+            stepper::stepper_invalidate_position();
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
         }
         discard_current_block(block);

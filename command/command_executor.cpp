@@ -314,7 +314,7 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
         has_axis = true;
         const double value_mm = parsed.axis_value[axis] * unit_scale;
         request.target_mm[axis] = next_state.distance_mode == DistanceMode::Absolute
-                                      ? value_mm
+                                      ? value_mm + next_state.work_offset_mm[axis]
                                       : state.planned_machine_position_mm[axis] + value_mm;
     }
 
@@ -324,8 +324,7 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (parsed.has_motion && !has_axis && parsed.motion_mode != MotionMode::Rapid) {
         return Error::NoAxisWords;
     }
-    if (has_axis && next_state.distance_mode == DistanceMode::Absolute &&
-        stepper::machine_position_state() != stepper::PositionState::Known) {
+    if (has_axis && stepper::machine_position_state() != stepper::PositionState::Known) {
         return Error::PositionUnknown;
     }
     if (has_axis) {

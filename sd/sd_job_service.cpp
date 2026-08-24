@@ -52,12 +52,34 @@ bool has_gzip_suffix(const char* path) {
            (path[length - 1] == 'z' || path[length - 1] == 'Z');
 }
 
+const char* position_state_text(stepper::PositionState state) {
+    switch (state) {
+        case stepper::PositionState::Unknown: return "unknown";
+        case stepper::PositionState::Known: return "known";
+        case stepper::PositionState::Invalidated: return "invalidated";
+    }
+    return "invalid";
+}
+
+void log_position(const char* lifecycle) {
+    const stepper::MachinePosition position = stepper::machine_position();
+    ESP_LOGI(kLogTag,
+             "SD-POSITION lifecycle=%s state=%s steps=(%lld,%lld) mm=(%.4f,%.4f)",
+             lifecycle,
+             position_state_text(position.state),
+             static_cast<long long>(position.steps[0]),
+             static_cast<long long>(position.steps[1]),
+             position.millimeters[0],
+             position.millimeters[1]);
+}
+
 void finish_job(JobState state,
                 JobFault fault = JobFault::None,
                 command::Error command_error = command::Error::Ok) {
     if (state == JobState::Faulted) {
         ray2::planner::planner_reset();
     }
+    log_position(state == JobState::Completed ? "completed" : "faulted");
     s_job_fault.store(fault);
     s_job_command_error.store(command_error);
     s_job_state.store(state);
@@ -75,12 +97,14 @@ void sd_job_task(void*) {
                              ? static_cast<FileReader*>(&s_gzip_reader)
                              : static_cast<FileReader*>(&s_plain_reader);
     s_job_state.store(JobState::Starting);
+    log_position("starting");
     if (!reader->open(path)) {
         finish_job(JobState::Faulted, JobFault::OpenFailed);
         return;
     }
 
     s_job_state.store(JobState::Running);
+    log_position("running");
     char line[kGcodeLineCapacity] = {};
     while (true) {
         if (reader->read_line(line, sizeof(line))) {
@@ -122,6 +146,7 @@ void sd_job_task(void*) {
 
     reader->close();
     s_job_state.store(JobState::Draining);
+    log_position("draining");
     while (ray2::planner::planner_free_blocks() != ray2::planner::kPlannerQueueLength) {
         vTaskDelay(pdMS_TO_TICKS(2));
     }
