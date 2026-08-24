@@ -41,6 +41,11 @@ Error parse_g_word(double value, ParsedBlock& parsed) {
             parsed.has_plane = true;
             parsed.plane = PlaneMode::XY;
             return Error::Ok;
+        case 40:
+            if (parsed.has_cutter_compensation) return Error::ModalGroupViolation;
+            parsed.has_cutter_compensation = true;
+            parsed.cutter_compensation = CutterCompensation::Disabled;
+            return Error::Ok;
         case 90:
         case 91:
             if (parsed.has_distance_mode) return Error::ModalGroupViolation;
@@ -213,6 +218,9 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (parsed.has_distance_mode) next_state.distance_mode = parsed.distance_mode;
     if (parsed.has_motion) next_state.motion_mode = parsed.motion_mode;
     if (parsed.has_plane) next_state.plane = parsed.plane;
+    if (parsed.has_cutter_compensation) {
+        next_state.cutter_compensation = parsed.cutter_compensation;
+    }
     if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
 
     const double unit_scale = next_state.units == Units::Inches ? kMillimetersPerInch : 1.0;
