@@ -328,6 +328,17 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
         return Error::PositionUnknown;
     }
     if (has_axis) {
+        request.has_motion = true;
+        motion::MotionExecutionPlan validation_plan = {};
+        if (!motion::build_execution_plan(request, validation_plan)) {
+            return Error::MotionRejected;
+        }
+        if (validation_plan.steps[0] == 0 && validation_plan.steps[1] == 0) {
+            // No STEP pulse will be emitted. Keep the planned machine position
+            // unchanged while committing modal words.
+            commit_parser_state(state, next_state, request, false);
+            return Error::Ok;
+        }
         const Error submit_error = submit_motion_request(request);
         if (submit_error != Error::Ok) return submit_error;
     } else if (parsed.has_spindle_mode && parsed.spindle_mode == SpindleMode::Off) {

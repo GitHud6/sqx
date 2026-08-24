@@ -273,9 +273,6 @@ SubmitResult submit_block(MotionBlock block) {
     block.execution_id = s_next_execution_id.fetch_add(1);
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count == kPlannerQueueLength) {
-        ESP_LOGE(kLogTag, "PLANNER-BUSY reason=queue-full count=%u capacity=%u",
-                 static_cast<unsigned>(s_block_count),
-                 static_cast<unsigned>(kPlannerQueueLength));
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return SubmitResult::Full;
     }
