@@ -26,9 +26,14 @@ segment 保存来源 `execution_id`、X/Y 步数、起止速度、持续时间�
 分段时按主步边界计算各轴累计步数，保证一个来源 block 的所有 segment 合计后仍严格等于原始
 X/Y 步数。
 
-当前状态：profile 与 segment ring 已实现并加入构建目标，但尚未接入 RMT 消费者，不能驱动
-实际 STEP。阶段四将由 RMT 后端消费 segment；在此之前，现有 block 级 RMT 路径继续作为默认
-回退执行器。
+阶段三状态：profile 与 segment ring 已实现并加入构建目标；当时尚未接入 RMT 消费者，不能驱动
+实际 STEP。
+
+阶段四状态：`rmt_stepper_execute_segments()` 已接入 Planner 默认直线路径。它将单个来源
+block 的 segment payload 保存于静态缓冲，并排入 64 深度的 RMT TX transaction queue；同一批
+segment 只在全部入队后等待完成，不在每个 segment 间调用同步等待。RMT 无法表达的首批低频
+segment 会在未出 STEP 前回退到原 block 级执行路径。跨来源 block 的连续供给和激光功率边界仍
+由后续阶段完成。
 
 ## 单轴硬件打通计划
 

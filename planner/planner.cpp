@@ -13,6 +13,7 @@
 #include "raycube_machine.hpp"
 #include "rmt_stepper_driver.hpp"
 #include "stepper_driver.hpp"
+#include "stepper_prep.hpp"
 
 namespace ray2::planner {
 namespace {
@@ -39,6 +40,7 @@ ExecutionCallback s_execution_callback = nullptr;
 void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
+std::array<stepper::StepSegment, stepper::kStepSegmentBufferLength> s_segment_batch = {};
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
@@ -314,6 +316,44 @@ bool execute_block(const MotionBlock& block) {
     bool enabled[machine::kAxisCount] = {};
     if (!configure_axes(block, enabled)) {
         return false;
+    }
+
+    stepper::stepper_prep_reset();
+    if (stepper::stepper_prep_start_block(block)) {
+        bool segmented_result = true;
+        bool segmented_started = false;
+        while (true) {
+            if (!wait_for_run_permission(block.reset_generation)) {
+                segmented_result = false;
+                break;
+            }
+            const std::size_t generated_count = stepper::stepper_prep_fill();
+            if (generated_count == 0) {
+                break;
+            }
+            std::size_t segment_count = 0;
+            while (segment_count < generated_count && stepper::stepper_segment_pop(s_segment_batch[segment_count])) {
+                ++segment_count;
+            }
+            if (segment_count != generated_count ||
+                !stepper::rmt_stepper_can_execute_segments(s_segment_batch.data(), segment_count)) {
+                if (!segmented_started) {
+                    stepper::stepper_prep_reset();
+                    break;
+                }
+                segmented_result = false;
+                break;
+            }
+            if (stepper::rmt_stepper_execute_segments(s_segment_batch.data(), segment_count) != ESP_OK) {
+                segmented_result = false;
+                break;
+            }
+            segmented_started = true;
+        }
+        if (segmented_started || !segmented_result) {
+            disable_axes(enabled);
+            return segmented_result;
+        }
     }
 
     std::size_t active_axis_count = 0;

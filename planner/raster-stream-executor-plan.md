@@ -177,6 +177,8 @@ laser_planner_adapter: block 生命周期 -> segment 实际执行边界
 - 普通单轴及 XY 直线的终点步数、方向和 ENABLE 行为正确。
 - 旧 block 执行回退接口仍可完成已验证的单条直线；segment 默认路径只在对应实机验收后启用。
 
+阶段状态：代码已完成，待构建与实机验收。
+
 ### 阶段五：将激光功率同步到 segment
 
 实现内容：

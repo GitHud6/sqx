@@ -6,11 +6,13 @@
 #include "esp_err.h"
 
 #include "raycube_machine.hpp"
+#include "stepper_prep.hpp"
 
 namespace ray2::stepper {
 
 constexpr unsigned int kRmtStepResolutionHz = 1000000;
 constexpr std::size_t kRmtStepMemorySymbols = 64;
+constexpr std::size_t kRmtSegmentTransactionDepth = 64;
 constexpr std::uint32_t kRmtStepMaxIntervalUs = 32767;
 
 // This only allocates and enables RMT TX channels. It never transmits STEP pulses.
@@ -25,6 +27,8 @@ esp_err_t rmt_stepper_execute(machine::Axis axis,
                                std::uint32_t step_interval_us);
 esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
                                  std::uint32_t step_interval_us);
+bool rmt_stepper_can_execute_segments(const StepSegment* segments, std::size_t segment_count);
+esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t segment_count);
 void rmt_stepper_request_feed_hold();
 void rmt_stepper_resume();
 esp_err_t rmt_stepper_stop();

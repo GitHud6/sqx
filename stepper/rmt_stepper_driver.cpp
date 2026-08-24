@@ -1,6 +1,7 @@
 #include "rmt_stepper_driver.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <limits>
 
@@ -20,6 +21,13 @@ rmt_sync_manager_handle_t s_sync_manager = nullptr;
 rmt_encoder_handle_t s_copy_encoder = nullptr;
 std::atomic<bool> s_feed_hold_requested = false;
 bool s_initialized = false;
+
+struct SegmentPayload {
+    rmt_symbol_word_t symbols[machine::kAxisCount][kRmtStepMemorySymbols] = {};
+    std::size_t symbol_count = 0;
+};
+
+std::array<SegmentPayload, kRmtSegmentTransactionDepth> s_segment_payloads = {};
 
 esp_err_t release_sync_manager() {
     if (s_sync_manager == nullptr) {
@@ -86,6 +94,14 @@ const rmt_transmit_config_t kTransmitConfig = {
     },
 };
 
+const rmt_transmit_config_t kQueuedTransmitConfig = {
+    .loop_count = 0,
+    .flags = {
+        .eot_level = 0,
+        .queue_nonblocking = 1,
+    },
+};
+
 void wait_for_feed_hold_release() {
     while (s_feed_hold_requested.load()) {
         vTaskDelay(pdMS_TO_TICKS(1));
@@ -109,6 +125,40 @@ void release_rmt_resources() {
     }
 }
 
+bool segment_interval(const StepSegment& segment, std::uint32_t& interval_us) {
+    if (segment.major_steps <= 0 || segment.duration_us == 0) {
+        return false;
+    }
+    interval_us = segment.duration_us / static_cast<std::uint32_t>(segment.major_steps);
+    return interval_us > machine::kStepPulseMicroseconds && interval_us <= kRmtStepMaxIntervalUs;
+}
+
+void build_segment_payload(const StepSegment& segment, SegmentPayload& payload) {
+    std::uint32_t interval_us = 0;
+    segment_interval(segment, interval_us);
+    payload.symbol_count = static_cast<std::size_t>(segment.major_steps);
+    const std::int32_t x_steps = segment.axis_steps[0];
+    const std::int32_t y_steps = segment.axis_steps[1];
+    const bool x_is_major = x_steps >= y_steps;
+    const std::int32_t minor_steps = x_is_major ? y_steps : x_steps;
+    std::int64_t error = 0;
+    for (std::int32_t step = 0; step < segment.major_steps; ++step) {
+        bool x_pulse = x_is_major;
+        bool y_pulse = !x_is_major;
+        error += minor_steps;
+        if (error * 2 >= segment.major_steps) {
+            if (x_is_major) {
+                y_pulse = true;
+            } else {
+                x_pulse = true;
+            }
+            error -= segment.major_steps;
+        }
+        payload.symbols[0][step] = make_step_symbol(x_pulse, interval_us);
+        payload.symbols[1][step] = make_step_symbol(y_pulse, interval_us);
+    }
+}
+
 }  // namespace
 
 esp_err_t rmt_stepper_init() {
@@ -128,7 +178,7 @@ esp_err_t rmt_stepper_init() {
             .clk_src = RMT_CLK_SRC_DEFAULT,
             .resolution_hz = kRmtStepResolutionHz,
             .mem_block_symbols = kRmtStepMemorySymbols,
-            .trans_queue_depth = 1,
+            .trans_queue_depth = kRmtSegmentTransactionDepth,
             .intr_priority = 0,
             .flags = {},
         };
@@ -185,6 +235,94 @@ bool rmt_stepper_can_execute_xy(const std::int32_t steps[machine::kAxisCount],
                                 std::uint32_t step_interval_us) {
     return steps != nullptr && rmt_stepper_can_execute(steps[0], step_interval_us) &&
            rmt_stepper_can_execute(steps[1], step_interval_us);
+}
+
+bool rmt_stepper_can_execute_segments(const StepSegment* segments, std::size_t segment_count) {
+    if (segments == nullptr || segment_count == 0 ||
+        segment_count > kRmtSegmentTransactionDepth) {
+        return false;
+    }
+    for (std::size_t index = 0; index < segment_count; ++index) {
+        std::uint32_t interval_us = 0;
+        if (!segment_interval(segments[index], interval_us) ||
+            segments[index].major_steps > static_cast<std::int32_t>(kRmtStepMemorySymbols) ||
+            segments[index].axis_steps[0] < 0 || segments[index].axis_steps[1] < 0 ||
+            std::max(segments[index].axis_steps[0], segments[index].axis_steps[1]) !=
+                segments[index].major_steps) {
+            return false;
+        }
+    }
+    return true;
+}
+
+esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t segment_count) {
+    if (!rmt_stepper_can_execute_segments(segments, segment_count)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t result = rmt_stepper_init();
+    if (result != ESP_OK) {
+        return result;
+    }
+    wait_for_feed_hold_release();
+
+    bool x_active = false;
+    bool y_active = false;
+    for (std::size_t index = 0; index < segment_count; ++index) {
+        x_active = x_active || segments[index].axis_steps[0] > 0;
+        y_active = y_active || segments[index].axis_steps[1] > 0;
+        build_segment_payload(segments[index], s_segment_payloads[index]);
+    }
+
+    if (!x_active && !y_active) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (x_active && y_active) {
+        result = ensure_sync_manager();
+        if (result != ESP_OK) {
+            return result;
+        }
+        result = rmt_sync_reset(s_sync_manager);
+        if (result != ESP_OK) {
+            return result;
+        }
+    } else {
+        result = release_sync_manager();
+        if (result != ESP_OK) {
+            return result;
+        }
+    }
+
+    for (std::size_t index = 0; index < segment_count; ++index) {
+        SegmentPayload& payload = s_segment_payloads[index];
+        if (x_active) {
+            result = rmt_transmit(s_rmt_channels[0], s_copy_encoder, payload.symbols[0],
+                                  payload.symbol_count * sizeof(rmt_symbol_word_t),
+                                  &kQueuedTransmitConfig);
+            if (result != ESP_OK) {
+                return result;
+            }
+        }
+        if (y_active) {
+            result = rmt_transmit(s_rmt_channels[1], s_copy_encoder, payload.symbols[1],
+                                  payload.symbol_count * sizeof(rmt_symbol_word_t),
+                                  &kQueuedTransmitConfig);
+            if (result != ESP_OK) {
+                return result;
+            }
+        }
+    }
+
+    if (x_active) {
+        result = rmt_tx_wait_all_done(s_rmt_channels[0], -1);
+        if (result != ESP_OK) {
+            return result;
+        }
+    }
+    if (y_active) {
+        result = rmt_tx_wait_all_done(s_rmt_channels[1], -1);
+    }
+    return result;
 }
 
 esp_err_t rmt_stepper_execute(machine::Axis axis,
