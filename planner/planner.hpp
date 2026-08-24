@@ -82,6 +82,7 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
 void planner_request_feed_hold();
 void planner_resume();
 void planner_reset();
+bool planner_is_idle();
 std::size_t planner_free_blocks();
 std::uint64_t planner_completed_block_count();
 

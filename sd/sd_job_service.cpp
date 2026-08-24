@@ -12,6 +12,7 @@
 #include "plain_file_reader.hpp"
 #include "gzip_file_reader.hpp"
 #include "sdcard_driver.hpp"
+#include "stepper_driver.hpp"
 
 namespace ray2::sd {
 namespace {
@@ -131,6 +132,9 @@ void sd_job_task(void*) {
 
 esp_err_t sd_job_start(const char* path) {
     if (!ray2::driver::sdcard_is_mounted()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (ray2::stepper::machine_position_state() != ray2::stepper::PositionState::Known) {
         return ESP_ERR_INVALID_STATE;
     }
     if (sd_job_is_active()) {

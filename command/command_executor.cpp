@@ -7,6 +7,7 @@
 
 #include "motion_submit.hpp"
 #include "planner.hpp"
+#include "stepper_driver.hpp"
 
 namespace ray2::command {
 
@@ -254,7 +255,7 @@ void commit_parser_state(ParserState& state,
     ParserState committed_state = next_state;
     if (has_motion) {
         for (int axis = 0; axis < 3; ++axis) {
-            committed_state.position_mm[axis] = request.target_mm[axis];
+            committed_state.planned_machine_position_mm[axis] = request.target_mm[axis];
         }
     }
     state = committed_state;
@@ -304,8 +305,8 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     request.spindle_power = next_state.spindle_speed;
     request.spindle_mode = spindle_mode(next_state.spindle_mode);
     for (int axis = 0; axis < 3; ++axis) {
-        request.start_mm[axis] = state.position_mm[axis];
-        request.target_mm[axis] = state.position_mm[axis];
+        request.start_mm[axis] = state.planned_machine_position_mm[axis];
+        request.target_mm[axis] = state.planned_machine_position_mm[axis];
     }
 
     for (int axis = 0; axis < 3; ++axis) {
@@ -314,7 +315,7 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
         const double value_mm = parsed.axis_value[axis] * unit_scale;
         request.target_mm[axis] = next_state.distance_mode == DistanceMode::Absolute
                                       ? value_mm
-                                      : state.position_mm[axis] + value_mm;
+                                      : state.planned_machine_position_mm[axis] + value_mm;
     }
 
     // A standalone rapid-mode word is a modal update in Grbl. It must not
@@ -322,6 +323,10 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     // axis words. Linear G1 remains strict until its file behavior is known.
     if (parsed.has_motion && !has_axis && parsed.motion_mode != MotionMode::Rapid) {
         return Error::NoAxisWords;
+    }
+    if (has_axis && next_state.distance_mode == DistanceMode::Absolute &&
+        stepper::machine_position_state() != stepper::PositionState::Known) {
+        return Error::PositionUnknown;
     }
     if (has_axis) {
         const Error submit_error = submit_motion_request(request);
@@ -332,6 +337,18 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     }
 
     commit_parser_state(state, next_state, request, has_axis);
+    return Error::Ok;
+}
+
+Error sync_parser_position_from_machine(ParserState& state) {
+    const stepper::MachinePosition position = stepper::machine_position();
+    if (position.state != stepper::PositionState::Known) {
+        return Error::PositionUnknown;
+    }
+
+    state.planned_machine_position_mm[0] = position.millimeters[0];
+    state.planned_machine_position_mm[1] = position.millimeters[1];
+    state.planned_machine_position_mm[2] = 0.0;
     return Error::Ok;
 }
 
@@ -350,6 +367,7 @@ const char* error_text(Error error) {
         case Error::NoAxisWords: return "no-axis-words";
         case Error::MotionBusy: return "motion-busy";
         case Error::MotionRejected: return "motion-rejected";
+        case Error::PositionUnknown: return "position-unknown";
     }
     return "unknown";
 }

@@ -18,6 +18,7 @@ enum class Error {
     NoAxisWords,
     MotionBusy,
     MotionRejected,
+    PositionUnknown,
 };
 
 enum class SystemState { Idle, Alarm, Jog };
@@ -38,7 +39,7 @@ struct ParserState {
     CutterCompensation cutter_compensation = CutterCompensation::Disabled;
     WorkCoordinateSystem work_coordinate_system = WorkCoordinateSystem::G54;
     double work_offset_mm[3] = {};
-    double position_mm[3] = {};
+    double planned_machine_position_mm[3] = {};
     double feed_rate_mm_per_min = 0.0;
     double spindle_speed = 0.0;
     SpindleMode spindle_mode = SpindleMode::Off;
@@ -68,6 +69,7 @@ struct ParsedBlock {
 };
 
 Error execute_line(const char* line, std::size_t length, ParserState& state);
+Error sync_parser_position_from_machine(ParserState& state);
 const char* error_text(Error error);
 
 }  // namespace ray2::command

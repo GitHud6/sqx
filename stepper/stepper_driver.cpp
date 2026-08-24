@@ -1,6 +1,8 @@
 #include "stepper_driver.hpp"
 
 #include <array>
+#include <cmath>
+#include <limits>
 
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
@@ -193,6 +195,35 @@ PositionState machine_position_state() {
     const PositionState state = s_position_state;
     portEXIT_CRITICAL(&s_position_lock);
     return state;
+}
+
+esp_err_t stepper_set_machine_position_mm(const double position_mm[machine::kAxisCount]) {
+    if (position_mm == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    std::array<std::int64_t, machine::kAxisCount> steps = {};
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const auto current_axis = static_cast<machine::Axis>(axis);
+        const auto& hardware = machine::raycube_axis(current_axis);
+        if (!std::isfinite(position_mm[axis]) || position_mm[axis] < 0.0 ||
+            position_mm[axis] > hardware.max_travel_mm || hardware.steps_per_mm <= 0.0F) {
+            return ESP_ERR_INVALID_ARG;
+        }
+
+        const double requested_steps = position_mm[axis] * hardware.steps_per_mm;
+        if (!std::isfinite(requested_steps) ||
+            requested_steps > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        steps[axis] = std::llround(requested_steps);
+    }
+
+    portENTER_CRITICAL(&s_position_lock);
+    s_machine_position_steps = steps;
+    s_position_state = PositionState::Known;
+    portEXIT_CRITICAL(&s_position_lock);
+    return ESP_OK;
 }
 
 void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count) {

@@ -574,6 +574,7 @@ void planner_reset() {
     s_control_state.store(ControlState::Running);
     stepper::rmt_stepper_stop();
     stepper::rmt_stepper_resume();
+    stepper::stepper_invalidate_position();
     portENTER_CRITICAL(&s_block_buffer_lock);
     s_block_head = 0;
     s_block_tail = 0;
@@ -584,6 +585,16 @@ void planner_reset() {
         xTaskNotifyGive(s_planner_task);
     }
     report_queue_drained();
+}
+
+bool planner_is_idle() {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool queue_is_empty = s_block_count == 0;
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    portENTER_CRITICAL(&s_execution_event_lock);
+    const bool has_active_block = s_has_active_block;
+    portEXIT_CRITICAL(&s_execution_event_lock);
+    return queue_is_empty && !has_active_block;
 }
 
 std::size_t planner_free_blocks() {

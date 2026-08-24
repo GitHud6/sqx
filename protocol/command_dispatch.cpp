@@ -1,7 +1,10 @@
 #include "command_dispatch.hpp"
 
+#include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include "command_executor.hpp"
@@ -9,6 +12,8 @@
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
+#include "planner.hpp"
+#include "stepper_driver.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -45,6 +50,126 @@ bool report_status(command::Error error) {
 command::ParserState s_parser_state = {};
 SemaphoreHandle_t s_parser_mutex = nullptr;
 
+enum class PositionCommandType {
+    Status,
+    Set,
+};
+
+struct PositionCommand {
+    PositionCommandType type = PositionCommandType::Status;
+    double machine_position_mm[machine::kAxisCount] = {};
+};
+
+bool equals_ignore_case(const char* text, std::size_t length, const char* expected) {
+    const std::size_t expected_length = std::strlen(expected);
+    if (length != expected_length) {
+        return false;
+    }
+    for (std::size_t index = 0; index < length; ++index) {
+        if (std::toupper(static_cast<unsigned char>(text[index])) !=
+            std::toupper(static_cast<unsigned char>(expected[index]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool is_position_command(const char* line, std::size_t length) {
+    return line != nullptr && length >= 5 && line[0] == '$' &&
+           std::toupper(static_cast<unsigned char>(line[1])) == 'P' &&
+           std::toupper(static_cast<unsigned char>(line[2])) == 'O' &&
+           std::toupper(static_cast<unsigned char>(line[3])) == 'S' && line[4] == '/';
+}
+
+bool parse_position_command(const char* line, std::size_t length, PositionCommand& command) {
+    if (!is_position_command(line, length)) {
+        return false;
+    }
+
+    const char* const payload = line + 5;
+    const std::size_t payload_length = length - 5;
+    if (equals_ignore_case(payload, payload_length, "STATUS")) {
+        command = {};
+        command.type = PositionCommandType::Status;
+        return true;
+    }
+
+    constexpr char kSetPrefix[] = "SET=";
+    if (payload_length <= sizeof(kSetPrefix) - 1 ||
+        !equals_ignore_case(payload, sizeof(kSetPrefix) - 1, kSetPrefix)) {
+        return false;
+    }
+
+    const char* const coordinates = payload + sizeof(kSetPrefix) - 1;
+    const std::size_t coordinates_length = payload_length - (sizeof(kSetPrefix) - 1);
+    if (coordinates_length == 0 || coordinates_length >= 64) {
+        return false;
+    }
+
+    char buffer[64] = {};
+    std::memcpy(buffer, coordinates, coordinates_length);
+    char* value_end = nullptr;
+    const double x = std::strtod(buffer, &value_end);
+    if (value_end == buffer || *value_end != ',') {
+        return false;
+    }
+    const double y = std::strtod(value_end + 1, &value_end);
+    if (*value_end != '\0' || !std::isfinite(x) || !std::isfinite(y)) {
+        return false;
+    }
+
+    command = {};
+    command.type = PositionCommandType::Set;
+    command.machine_position_mm[0] = x;
+    command.machine_position_mm[1] = y;
+    return true;
+}
+
+const char* position_state_text(stepper::PositionState state) {
+    switch (state) {
+        case stepper::PositionState::Unknown: return "unknown";
+        case stepper::PositionState::Known: return "known";
+        case stepper::PositionState::Invalidated: return "invalidated";
+    }
+    return "invalid";
+}
+
+bool report_position_status() {
+    const stepper::MachinePosition position = stepper::machine_position();
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const double planned_x = s_parser_state.planned_machine_position_mm[0];
+    const double planned_y = s_parser_state.planned_machine_position_mm[1];
+    xSemaphoreGive(s_parser_mutex);
+
+    char response[256] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "[POS:state=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)]\r\nok\r\n",
+        position_state_text(position.state),
+        static_cast<long long>(position.steps[0]),
+        static_cast<long long>(position.steps[1]),
+        position.millimeters[0], position.millimeters[1], planned_x, planned_y);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
+bool set_known_position(const PositionCommand& command) {
+    if (!planner::planner_is_idle() || sd::sd_job_is_active()) {
+        return write_text("error:position-busy\r\n");
+    }
+    if (stepper::stepper_set_machine_position_mm(command.machine_position_mm) != ESP_OK) {
+        return write_text("error:position-invalid\r\n");
+    }
+
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const command::Error sync_result = command::sync_parser_position_from_machine(s_parser_state);
+    xSemaphoreGive(s_parser_mutex);
+    if (sync_result != command::Error::Ok) {
+        return report_status(sync_result);
+    }
+    return report_position_status();
+}
+
 struct SdListResponseContext {
     bool write_failed = false;
 };
@@ -71,6 +196,16 @@ bool command_dispatch(const char* line, std::size_t length) {
         if (s_parser_mutex == nullptr) {
             return write_text("error:protocol-no-mem\r\n");
         }
+    }
+
+    PositionCommand position_command = {};
+    if (parse_position_command(line, length, position_command)) {
+        return position_command.type == PositionCommandType::Status
+                   ? report_position_status()
+                   : set_known_position(position_command);
+    }
+    if (is_position_command(line, length)) {
+        return write_text("error:position-invalid-command\r\n");
     }
 
     ray2::sd::SystemCommand sd_command = {};
@@ -105,6 +240,9 @@ bool command_dispatch(const char* line, std::size_t length) {
                     return write_text("ok\r\n");
                 }
             case ray2::sd::SystemCommandType::Run: {
+                if (ray2::stepper::machine_position_state() != ray2::stepper::PositionState::Known) {
+                    return write_text("error:position-unknown\r\n");
+                }
                 const esp_err_t result = ray2::sd::sd_job_start(sd_command.path);
                 if (result == ESP_ERR_INVALID_STATE) {
                     if (!ray2::driver::sdcard_is_mounted()) {
