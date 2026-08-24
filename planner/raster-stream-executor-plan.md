@@ -131,6 +131,8 @@ laser_planner_adapter: block 生命周期 -> segment 实际执行边界
 - 方向改变或折角时，junction speed 被限制在安全值；首 block 和末 block 保持从/到零速的边界。
 - 改变队列深度不会改变已确定的步数、方向、命令顺序或最终坐标。
 
+阶段状态：代码已完成，待构建与实机验收。
+
 ### 阶段三：生成加减速 profile 与 step segment
 
 实现内容：

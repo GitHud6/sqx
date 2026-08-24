@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <limits>
 
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
@@ -37,6 +39,122 @@ ExecutionCallback s_execution_callback = nullptr;
 void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
+
+constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
+constexpr double kJunctionDeviationMm = 0.01;
+
+std::size_t block_index_after(const std::size_t index) {
+    return (index + 1) % kPlannerQueueLength;
+}
+
+bool is_plannable_motion(const MotionBlock& block) {
+    return block.type == MotionBlockType::Motion && block.step_event_count > 0 &&
+           std::isfinite(block.millimeters) && block.millimeters > 0.0 &&
+           std::isfinite(block.programmed_rate_mm_per_min) &&
+           block.programmed_rate_mm_per_min > 0.0 &&
+           std::isfinite(block.acceleration_mm_per_sec2) &&
+           block.acceleration_mm_per_sec2 > 0.0;
+}
+
+double nominal_speed_sqr(const MotionBlock& block) {
+    return block.programmed_rate_mm_per_min * block.programmed_rate_mm_per_min;
+}
+
+double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& current) {
+    const double minimum_speed_sqr =
+        kMinimumJunctionSpeedMmPerMin * kMinimumJunctionSpeedMmPerMin;
+    if (!is_plannable_motion(previous) || !is_plannable_motion(current)) {
+        return 0.0;
+    }
+
+    const double junction_cos_theta =
+        -(previous.unit_vector[0] * current.unit_vector[0] +
+          previous.unit_vector[1] * current.unit_vector[1]);
+    if (junction_cos_theta > 0.999999) {
+        return minimum_speed_sqr;
+    }
+    if (junction_cos_theta < -0.999999) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double sin_theta_d2 = std::sqrt(0.5 * (1.0 - junction_cos_theta));
+    if (sin_theta_d2 >= 1.0) {
+        return minimum_speed_sqr;
+    }
+    const double junction_acceleration =
+        std::min(previous.acceleration_mm_per_sec2, current.acceleration_mm_per_sec2) * 60.0 * 60.0;
+    return std::max(minimum_speed_sqr,
+                    (junction_acceleration * kJunctionDeviationMm * sin_theta_d2) /
+                        (1.0 - sin_theta_d2));
+}
+
+void planner_recalculate_locked() {
+    if (s_block_count == 0) {
+        s_block_planned = s_block_tail;
+        return;
+    }
+
+    std::size_t index = s_block_tail;
+    MotionBlock* previous = nullptr;
+    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+        MotionBlock& block = s_block_buffer[index];
+        block.entry_speed_sqr = 0.0;
+        block.max_entry_speed_sqr = 0.0;
+        block.max_junction_speed_sqr = 0.0;
+        if (is_plannable_motion(block)) {
+            const double nominal_sqr = nominal_speed_sqr(block);
+            if (previous != nullptr && is_plannable_motion(*previous)) {
+                block.max_junction_speed_sqr = junction_speed_sqr(*previous, block);
+                block.max_entry_speed_sqr = std::min(
+                    std::min(nominal_sqr, nominal_speed_sqr(*previous)),
+                    block.max_junction_speed_sqr);
+            }
+        }
+        previous = &block;
+        index = block_index_after(index);
+    }
+
+    // Reverse pass: every block must be able to decelerate to the next entry speed.
+    double next_entry_speed_sqr = 0.0;
+    index = (s_block_head + kPlannerQueueLength - 1) % kPlannerQueueLength;
+    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+        MotionBlock& block = s_block_buffer[index];
+        if (is_plannable_motion(block)) {
+            const double deceleration_limit = next_entry_speed_sqr +
+                2.0 * block.acceleration_mm_per_sec2 * 60.0 * 60.0 * block.millimeters;
+            block.entry_speed_sqr = std::min(block.max_entry_speed_sqr, deceleration_limit);
+            next_entry_speed_sqr = block.entry_speed_sqr;
+        } else {
+            next_entry_speed_sqr = 0.0;
+        }
+        index = (index + kPlannerQueueLength - 1) % kPlannerQueueLength;
+    }
+
+    // Forward pass: an entry speed must also be reachable from the prior block.
+    double previous_entry_speed_sqr = 0.0;
+    double previous_acceleration_mm_per_sec2 = 0.0;
+    double previous_millimeters = 0.0;
+    index = s_block_tail;
+    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+        MotionBlock& block = s_block_buffer[index];
+        if (is_plannable_motion(block)) {
+            if (offset != 0) {
+                const double acceleration_limit = previous_entry_speed_sqr +
+                    2.0 * previous_acceleration_mm_per_sec2 * 60.0 * 60.0 * previous_millimeters;
+                block.entry_speed_sqr = std::min(block.entry_speed_sqr, acceleration_limit);
+            }
+            previous_entry_speed_sqr = block.entry_speed_sqr;
+            previous_acceleration_mm_per_sec2 = block.acceleration_mm_per_sec2;
+            previous_millimeters = block.millimeters;
+        } else {
+            previous_entry_speed_sqr = 0.0;
+            previous_acceleration_mm_per_sec2 = 0.0;
+            previous_millimeters = 0.0;
+        }
+        index = block_index_after(index);
+    }
+    s_block_planned = s_block_head;
+}
 
 void emit_execution_event(ExecutionEventType type, const MotionBlock* block = nullptr) {
     ExecutionCallback callback = nullptr;
@@ -106,26 +224,36 @@ SubmitResult submit_block(MotionBlock block) {
     s_block_buffer[s_block_head] = block;
     s_block_head = (s_block_head + 1) % kPlannerQueueLength;
     ++s_block_count;
+    planner_recalculate_locked();
     s_queue_drain_reported.store(false);
     portEXIT_CRITICAL(&s_block_buffer_lock);
     xTaskNotifyGive(s_planner_task);
     return SubmitResult::Accepted;
 }
 
-bool pop_block(MotionBlock& block) {
+bool current_block_snapshot(MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count == 0) {
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return false;
     }
     block = s_block_buffer[s_block_tail];
-    s_block_tail = (s_block_tail + 1) % kPlannerQueueLength;
-    --s_block_count;
-    // No look-ahead pass exists yet. Keep this explicit marker at the first
-    // unconsumed block so phase two can introduce forward/reverse planning.
-    s_block_planned = s_block_tail;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     return true;
+}
+
+void discard_current_block(const MotionBlock& block) {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    if (s_block_count != 0) {
+        const MotionBlock& current = s_block_buffer[s_block_tail];
+        if (current.execution_id == block.execution_id &&
+            current.reset_generation == block.reset_generation) {
+            s_block_tail = block_index_after(s_block_tail);
+            --s_block_count;
+            planner_recalculate_locked();
+        }
+    }
+    portEXIT_CRITICAL(&s_block_buffer_lock);
 }
 
 void disable_axes(const bool enabled[]) {
@@ -237,7 +365,7 @@ void planner_task(void*) {
     MotionBlock block = {};
 
     while (true) {
-        if (!pop_block(block)) {
+        if (!current_block_snapshot(block)) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
@@ -259,6 +387,7 @@ void planner_task(void*) {
         } else {
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
         }
+        discard_current_block(block);
         report_queue_drained();
     }
 }
@@ -300,6 +429,9 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
     stepper::rmt_stepper_request_feed_hold();
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate_locked();
+    portEXIT_CRITICAL(&s_block_buffer_lock);
     MotionBlock block = {};
     if (active_block_snapshot(block)) {
         emit_execution_event(ExecutionEventType::FeedHoldRequested, &block);

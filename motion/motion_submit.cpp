@@ -122,7 +122,9 @@ MotionSubmitResult motion_submit(const MotionRequest& request) {
     const double delta_x = request.target_mm[0] - request.start_mm[0];
     const double delta_y = request.target_mm[1] - request.start_mm[1];
     block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
-    block.programmed_rate_mm_per_min = request.feed_rate_mm_per_min;
+    block.programmed_rate_mm_per_min = request.motion_mode == MotionType::Rapid
+                                            ? kRapidRateMmPerMin
+                                            : request.feed_rate_mm_per_min;
     if (block.millimeters > 0.0) {
         block.unit_vector[0] = delta_x / block.millimeters;
         block.unit_vector[1] = delta_y / block.millimeters;
