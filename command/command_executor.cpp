@@ -36,6 +36,11 @@ Error parse_g_word(double value, ParsedBlock& parsed) {
             parsed.has_units = true;
             parsed.units = value == 20.0 ? Units::Inches : Units::Millimeters;
             return Error::Ok;
+        case 17:
+            if (parsed.has_plane) return Error::ModalGroupViolation;
+            parsed.has_plane = true;
+            parsed.plane = PlaneMode::XY;
+            return Error::Ok;
         case 90:
         case 91:
             if (parsed.has_distance_mode) return Error::ModalGroupViolation;
@@ -207,6 +212,7 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (parsed.has_units) next_state.units = parsed.units;
     if (parsed.has_distance_mode) next_state.distance_mode = parsed.distance_mode;
     if (parsed.has_motion) next_state.motion_mode = parsed.motion_mode;
+    if (parsed.has_plane) next_state.plane = parsed.plane;
     if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
 
     const double unit_scale = next_state.units == Units::Inches ? kMillimetersPerInch : 1.0;

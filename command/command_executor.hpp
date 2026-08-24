@@ -24,6 +24,7 @@ enum class SystemState { Idle, Alarm, Jog };
 enum class DistanceMode { Absolute, Incremental };
 enum class Units { Millimeters, Inches };
 enum class MotionMode { Rapid, Linear };
+enum class PlaneMode { XY };
 enum class SpindleMode { Off, Clockwise, CounterClockwise };
 
 struct ParserState {
@@ -31,6 +32,7 @@ struct ParserState {
     DistanceMode distance_mode = DistanceMode::Absolute;
     Units units = Units::Millimeters;
     MotionMode motion_mode = MotionMode::Rapid;
+    PlaneMode plane = PlaneMode::XY;
     double position_mm[3] = {};
     double feed_rate_mm_per_min = 0.0;
     double spindle_speed = 0.0;
@@ -44,6 +46,8 @@ struct ParsedBlock {
     DistanceMode distance_mode = DistanceMode::Absolute;
     bool has_units = false;
     Units units = Units::Millimeters;
+    bool has_plane = false;
+    PlaneMode plane = PlaneMode::XY;
     bool has_axis[3] = {};
     double axis_value[3] = {};
     bool has_feed_rate = false;
