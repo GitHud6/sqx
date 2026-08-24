@@ -153,6 +153,8 @@ laser_planner_adapter: block 生命周期 -> segment 实际执行边界
 - 单条长线可观测到加速、匀速、减速；同向短线跨 block 时速度连续。
 - Planner task 不再因同步等待单条长运动而触发 watchdog。
 
+阶段状态：代码已完成，待构建与实机验收。
+
 ### 阶段四：将 RMT 改为 segment 执行后端
 
 实现内容：

@@ -99,6 +99,7 @@ void planner_recalculate_locked() {
     for (std::size_t offset = 0; offset < s_block_count; ++offset) {
         MotionBlock& block = s_block_buffer[index];
         block.entry_speed_sqr = 0.0;
+        block.exit_speed_sqr = 0.0;
         block.max_entry_speed_sqr = 0.0;
         block.max_junction_speed_sqr = 0.0;
         if (is_plannable_motion(block)) {
@@ -152,6 +153,16 @@ void planner_recalculate_locked() {
             previous_millimeters = 0.0;
         }
         index = block_index_after(index);
+    }
+
+    index = s_block_tail;
+    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+        MotionBlock& block = s_block_buffer[index];
+        const std::size_t next_index = block_index_after(index);
+        if (offset + 1 < s_block_count && is_plannable_motion(s_block_buffer[next_index])) {
+            block.exit_speed_sqr = s_block_buffer[next_index].entry_speed_sqr;
+        }
+        index = next_index;
     }
     s_block_planned = s_block_head;
 }

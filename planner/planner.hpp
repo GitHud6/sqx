@@ -28,6 +28,7 @@ struct PlannerBlock {
     double acceleration_mm_per_sec2 = 0.0;
     double unit_vector[2] = {};
     double entry_speed_sqr = 0.0;
+    double exit_speed_sqr = 0.0;
     double max_entry_speed_sqr = 0.0;
     double max_junction_speed_sqr = 0.0;
     std::uint32_t reset_generation = 0;
