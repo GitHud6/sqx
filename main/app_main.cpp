@@ -4,12 +4,17 @@
 #include "laser_planner_adapter.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
+#include "sdcard_driver.hpp"
 #include "uart0_driver.hpp"
 
 extern "C" void app_main(void) {
     static const char* tag = "ray2-idf";
 
     ESP_ERROR_CHECK(ray2::laser::laser_init());
+    const esp_err_t sd_result = ray2::driver::sdcard_start();
+    if (sd_result != ESP_OK) {
+        ESP_LOGW(tag, "SD card mount unavailable: %s", esp_err_to_name(sd_result));
+    }
     ESP_ERROR_CHECK(ray2::driver::uart0_start());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());

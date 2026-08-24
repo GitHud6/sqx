@@ -1,6 +1,7 @@
 idf_component_register(SRCS "app_main.cpp"
                             "../command/command_executor.cpp"
                             "../driver/uart0_driver.cpp"
+                            "../driver/sdcard_driver.cpp"
                             "../laser/laser_driver.cpp"
                             "../laser/laser_planner_adapter.cpp"
                             "../machine/raycube_machine.cpp"
@@ -9,6 +10,9 @@ idf_component_register(SRCS "app_main.cpp"
                             "../protocol/command_dispatch.cpp"
                             "../protocol/line_assembler.cpp"
                             "../protocol/protocol_task.cpp"
+                            "../sd/sd_command_handler.cpp"
+                            "../sd/plain_file_reader.cpp"
+                            "../sd/sd_file_service.cpp"
                             "../stepper/stepper_driver.cpp"
                             "../stepper/stepper_prep.cpp"
                             "../stepper/rmt_stepper_driver.cpp"
@@ -20,8 +24,11 @@ idf_component_register(SRCS "app_main.cpp"
                                     "../motion"
                                     "../planner"
                                     "../protocol"
+                                    "../sd"
                                     "../stepper"
                        REQUIRES esp_driver_gpio
                                 esp_driver_ledc
                                 esp_driver_rmt
-                                esp_driver_uart)
+                                esp_driver_uart
+                                fatfs
+                                sdmmc)
