@@ -126,11 +126,15 @@ RMT 层必须保持每个 block 的 X/Y 步数比例、方向、周期与 `S` �
 
 ### 阶段五：为激光 PWM 同步建立执行回调
 
+阶段状态：代码已完成，待构建与后续 PWM 模块联调验收。
+
 实现内容：
 
 1. 在 RMT block 开始、结束、暂停和取消处定义执行状态回调。
 2. 回调携带当前 block 的 `spindle_mode` 与 `spindle_power`，但本阶段不直接写 PWM。
 3. 定义运动停止时 PWM 应关闭的默认安全语义。
+
+当前实现说明：`planner` 为每个成功入队的 block 分配单调递增的 `execution_id`，并提供 `planner_set_execution_callback()`。回调事件包含该 block 的 `MotionRequest` 和 `MotionExecutionPlan` 副本，因此后续 PWM 层可由 `spindle_mode`、`spindle_power` 与唯一编号关联当前灰度命令。事件包括 block 开始、完成、取消、执行失败和队列排空；Hold/Resume 发出的是请求事件。由于 RMT 当前只在分块边界响应 Hold，`FeedHoldRequested` 不表示脉冲已经立即停止。回调可由 planner 或调用 Hold/Resume/Reset 的任务触发，必须短小、非阻塞，且不得反向调用 Planner API；未来激光模块应只将事件投递到自己的队列。PWM 层应在 `FeedHoldRequested`、`BlockCompleted`、`BlockCancelled`、`BlockFailed` 和 `QueueDrained` 时按默认安全策略关闭输出。本阶段未创建 PWM 外设、未写 GPIO，也未改变 RMT 脉冲执行。
 
 验收标准：
 

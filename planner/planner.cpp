@@ -25,6 +25,65 @@ TaskHandle_t s_planner_task = nullptr;
 std::atomic<ControlState> s_control_state = ControlState::Running;
 std::atomic<std::uint32_t> s_reset_generation = 0;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
+std::atomic<std::uint64_t> s_next_execution_id = 1;
+std::atomic<bool> s_queue_drain_reported = false;
+portMUX_TYPE s_execution_event_lock = portMUX_INITIALIZER_UNLOCKED;
+ExecutionCallback s_execution_callback = nullptr;
+void* s_execution_callback_user_data = nullptr;
+MotionBlock s_active_block = {};
+bool s_has_active_block = false;
+
+void emit_execution_event(ExecutionEventType type, const MotionBlock* block = nullptr) {
+    ExecutionCallback callback = nullptr;
+    void* user_data = nullptr;
+    portENTER_CRITICAL(&s_execution_event_lock);
+    callback = s_execution_callback;
+    user_data = s_execution_callback_user_data;
+    portEXIT_CRITICAL(&s_execution_event_lock);
+
+    if (callback == nullptr) {
+        return;
+    }
+
+    ExecutionEvent event = {};
+    event.type = type;
+    if (block != nullptr) {
+        event.execution_id = block->execution_id;
+        event.request = block->request;
+        event.plan = block->plan;
+    }
+    callback(event, user_data);
+}
+
+bool active_block_snapshot(MotionBlock& block) {
+    portENTER_CRITICAL(&s_execution_event_lock);
+    const bool has_active_block = s_has_active_block;
+    if (has_active_block) {
+        block = s_active_block;
+    }
+    portEXIT_CRITICAL(&s_execution_event_lock);
+    return has_active_block;
+}
+
+void set_active_block(const MotionBlock& block) {
+    portENTER_CRITICAL(&s_execution_event_lock);
+    s_active_block = block;
+    s_has_active_block = true;
+    portEXIT_CRITICAL(&s_execution_event_lock);
+}
+
+void clear_active_block() {
+    portENTER_CRITICAL(&s_execution_event_lock);
+    s_has_active_block = false;
+    portEXIT_CRITICAL(&s_execution_event_lock);
+}
+
+void report_queue_drained() {
+    if (s_block_queue != nullptr && uxQueueMessagesWaiting(s_block_queue) == 0 &&
+        !s_queue_drain_reported.exchange(true)) {
+        emit_execution_event(ExecutionEventType::QueueDrained);
+    }
+}
 
 void disable_axes(const bool enabled[]) {
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
@@ -140,11 +199,23 @@ void planner_task(void*) {
         }
 
         if (!wait_for_run_permission(block.reset_generation)) {
+            emit_execution_event(ExecutionEventType::BlockCancelled, &block);
+            report_queue_drained();
             continue;
         }
-        if (execute_block(block)) {
+        set_active_block(block);
+        emit_execution_event(ExecutionEventType::BlockStarted, &block);
+        const bool completed = execute_block(block);
+        clear_active_block();
+        if (completed) {
             ++s_completed_block_count;
+            emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+        } else if (s_reset_generation.load() != block.reset_generation) {
+            emit_execution_event(ExecutionEventType::BlockCancelled, &block);
+        } else {
+            emit_execution_event(ExecutionEventType::BlockFailed, &block);
         }
+        report_queue_drained();
     }
 }
 
@@ -173,14 +244,30 @@ SubmitResult planner_submit(const MotionBlock& block) {
     }
     MotionBlock queued_block = block;
     queued_block.reset_generation = s_reset_generation.load();
-    return xQueueSend(s_block_queue, &queued_block, 0) == pdTRUE
-               ? SubmitResult::Accepted
-               : SubmitResult::Full;
+    queued_block.execution_id = s_next_execution_id.fetch_add(1);
+    s_queue_drain_reported.store(false);
+    if (xQueueSend(s_block_queue, &queued_block, 0) != pdTRUE) {
+        return SubmitResult::Full;
+    }
+    return SubmitResult::Accepted;
+}
+
+void planner_set_execution_callback(ExecutionCallback callback, void* user_data) {
+    portENTER_CRITICAL(&s_execution_event_lock);
+    s_execution_callback = callback;
+    s_execution_callback_user_data = user_data;
+    portEXIT_CRITICAL(&s_execution_event_lock);
 }
 
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
     stepper::rmt_stepper_request_feed_hold();
+    MotionBlock block = {};
+    if (active_block_snapshot(block)) {
+        emit_execution_event(ExecutionEventType::FeedHoldRequested, &block);
+    } else {
+        emit_execution_event(ExecutionEventType::FeedHoldRequested);
+    }
 }
 
 void planner_resume() {
@@ -188,6 +275,12 @@ void planner_resume() {
         s_control_state.store(ControlState::Running);
     }
     stepper::rmt_stepper_resume();
+    MotionBlock block = {};
+    if (active_block_snapshot(block)) {
+        emit_execution_event(ExecutionEventType::Resumed, &block);
+    } else {
+        emit_execution_event(ExecutionEventType::Resumed);
+    }
 }
 
 void planner_reset() {
@@ -198,6 +291,7 @@ void planner_reset() {
     if (s_block_queue != nullptr) {
         xQueueReset(s_block_queue);
     }
+    report_queue_drained();
 }
 
 std::size_t planner_free_blocks() {
