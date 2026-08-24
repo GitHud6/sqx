@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 
+#include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -44,6 +45,7 @@ std::array<stepper::StepSegment, stepper::kStepSegmentBufferLength> s_segment_ba
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
+constexpr char kLogTag[] = "planner";
 
 std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
@@ -233,12 +235,19 @@ void report_queue_drained() {
 
 SubmitResult submit_block(MotionBlock block) {
     if (s_planner_task == nullptr) {
+        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=task-not-started type=%d steps=%ld interval=%lu",
+                 static_cast<int>(block.type),
+                 static_cast<long>(block.step_event_count),
+                 static_cast<unsigned long>(block.plan.step_interval_us));
         return SubmitResult::Rejected;
     }
     block.reset_generation = s_reset_generation.load();
     block.execution_id = s_next_execution_id.fetch_add(1);
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count == kPlannerQueueLength) {
+        ESP_LOGE(kLogTag, "PLANNER-BUSY reason=queue-full count=%u capacity=%u",
+                 static_cast<unsigned>(s_block_count),
+                 static_cast<unsigned>(kPlannerQueueLength));
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return SubmitResult::Full;
     }
@@ -479,6 +488,10 @@ esp_err_t planner_start() {
 
 SubmitResult planner_submit(const MotionBlock& block) {
     if (block.type != MotionBlockType::Motion || block.plan.step_interval_us == 0) {
+        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=invalid-motion-block type=%d steps=%ld interval=%lu",
+                 static_cast<int>(block.type),
+                 static_cast<long>(block.step_event_count),
+                 static_cast<unsigned long>(block.plan.step_interval_us));
         return SubmitResult::Rejected;
     }
     return submit_block(block);
