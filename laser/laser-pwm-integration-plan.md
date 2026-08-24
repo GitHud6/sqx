@@ -194,6 +194,20 @@ M5
 GPIO4、GPIO5、X STEP，确认 GPIO5 仅在运动窗口有效，GPIO4 为 2 kHz PWM；记录任何固定
 间隔的暗线或亮线，并与当前每 64 个 RMT symbol 的重提交边界对照。
 
+## Segment 同步演进记录
+
+当前 Planner 在 block 被取出时发布 `BlockStarted`，但该事件只表示调度开始，不再直接打开激光。
+在 RMT segment batch 即将提交前，Planner 发布 `SegmentBatchStarted`，其中包含该 batch 首个
+segment 的来源 `execution_id`、功率、起止速度和完成标志；`laser_planner_adapter` 仅在这个事件中调用
+`laser_set_power()`。`BlockCompleted`、Hold、Reset、取消、失败和队列排空仍优先调用
+`laser_disable()`。
+
+`M3` 的 segment 功率保持来源 S 值。`M4` 的 segment 功率按实际平均速度与 programmed rate
+的比例缩放，速度为零或极低时得到相应的低功率。该数据绑定保证来源 block、segment 和功率
+序列可追踪，但不等价于 LEDC 已在任意长 block 的内部 segment 或 `500 us` 像素边界完成硬件更新；该延迟必须通过 GPIO4
+逻辑分析仪测量。若测量不达标，应新增专用激光时序后端，不得在 Planner task 或 RMT ISR 中
+直接假设 LEDC 调用可以无延迟完成。
+
 ## 完成标准
 
 以下条件全部满足时，本模块的静态 PWM 集成完成：

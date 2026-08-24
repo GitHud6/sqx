@@ -51,6 +51,29 @@ StepSegmentPhase phase_at_distance(const double distance_mm) {
     return StepSegmentPhase::Decelerate;
 }
 
+double time_at_distance_us(const double distance_mm) {
+    const double acceleration = s_profile.acceleration_mm_per_min2;
+    const double clamped_distance = std::clamp(distance_mm, 0.0, s_profile.length_mm);
+    const double accelerate_time_us =
+        (s_profile.nominal_speed_mm_per_min - s_profile.entry_speed_mm_per_min) *
+        60000000.0 / acceleration;
+    if (clamped_distance <= s_profile.accelerate_distance_mm) {
+        return (speed_at_distance(clamped_distance) - s_profile.entry_speed_mm_per_min) *
+            60000000.0 / acceleration;
+    }
+    if (clamped_distance <= s_profile.decelerate_after_mm) {
+        return accelerate_time_us +
+            (clamped_distance - s_profile.accelerate_distance_mm) * 60000000.0 /
+                s_profile.nominal_speed_mm_per_min;
+    }
+    const double cruise_time_us =
+        (s_profile.decelerate_after_mm - s_profile.accelerate_distance_mm) * 60000000.0 /
+        s_profile.nominal_speed_mm_per_min;
+    return accelerate_time_us + cruise_time_us +
+        (s_profile.nominal_speed_mm_per_min - speed_at_distance(clamped_distance)) *
+            60000000.0 / acceleration;
+}
+
 StepSegment build_segment(const std::uint32_t segment_index) {
     const std::int32_t total_steps = s_profile.total_major_steps;
     const std::int32_t first_step = static_cast<std::int32_t>(
@@ -61,8 +84,7 @@ StepSegment build_segment(const std::uint32_t segment_index) {
     const double final_distance = s_profile.length_mm * final_step / total_steps;
     const double start_speed = speed_at_distance(start_distance);
     const double final_speed = speed_at_distance(final_distance);
-    const double average_speed = std::max(1.0, 0.5 * (start_speed + final_speed));
-    const double duration_us = (final_distance - start_distance) * 60000000.0 / average_speed;
+    const double duration_us = time_at_distance_us(final_distance) - time_at_distance_us(start_distance);
 
     StepSegment segment = {};
     segment.execution_id = s_profile.execution_id;
@@ -70,6 +92,14 @@ StepSegment build_segment(const std::uint32_t segment_index) {
     segment.duration_us = static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us)));
     segment.start_speed_mm_per_min = start_speed;
     segment.end_speed_mm_per_min = final_speed;
+    if (s_source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
+        const double actual_speed =
+            (final_distance - start_distance) * 60000000.0 / std::max(1.0, duration_us);
+        segment.laser_power = s_source_block.request.spindle_power * std::clamp(
+            actual_speed / s_source_block.programmed_rate_mm_per_min, 0.0, 1.0);
+    } else {
+        segment.laser_power = s_source_block.request.spindle_power;
+    }
     segment.phase = phase_at_distance(start_distance);
     segment.completes_block = segment_index + 1 == s_profile.total_segments;
     for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {

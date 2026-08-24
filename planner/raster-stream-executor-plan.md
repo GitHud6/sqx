@@ -193,9 +193,15 @@ laser_planner_adapter: block 生命周期 -> segment 实际执行边界
 
 验收标准：
 
-- 每个 segment 的实际 PWM 对应其来源 S 值，无提前或滞后一段的问题。
-- M4 在加速、减速和 Feed Hold 恢复时按实际速度调整功率，M3 不发生该补偿。
+- 单 segment 灰度 block 的实际 PWM 对应其来源 S 值，无提前或滞后一像素的问题。
+- M4 的 segment 功率数据按实际平均速度生成，M3 保持来源 S 值；长 block 内每个 segment 的
+  实际 PWM 生效时刻必须由 GPIO4 测量后验收，未测量前不宣称已硬件同步。
 - M5、Hold、Reset、取消和运动结束时，GPIO5 及时禁用且无残留出光。
+
+阶段状态：代码已完成，待构建与实机验收。当前 Planner 会在 RMT segment batch 提交前发布首个
+segment 的功率和实际平均速度；短灰度 block 通常只有一个 segment，因此可按该事件更新 PWM。
+长 block 内每个 segment 的 LEDC 更新不能伪装为硬件同步，必须经 GPIO4 测量后再决定是否需要
+独立激光时序后端。
 
 ### 阶段六：灰度雕刻端到端验收
 

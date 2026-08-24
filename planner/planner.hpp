@@ -46,6 +46,8 @@ enum class SubmitResult {
 
 enum class ExecutionEventType {
     BlockStarted,
+    SegmentBatchStarted,
+    SegmentBatchCompleted,
     FeedHoldRequested,
     Resumed,
     BlockCompleted,
@@ -59,6 +61,10 @@ struct ExecutionEvent {
     std::uint64_t execution_id = 0;
     motion::MotionRequest request = {};
     motion::MotionExecutionPlan plan = {};
+    double segment_power = 0.0;
+    double segment_start_speed_mm_per_min = 0.0;
+    double segment_end_speed_mm_per_min = 0.0;
+    bool segment_completes_block = false;
 };
 
 // Callbacks run in the caller's task and must return quickly without calling planner APIs.

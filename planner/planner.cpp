@@ -169,7 +169,9 @@ void planner_recalculate_locked() {
     s_block_planned = s_block_head;
 }
 
-void emit_execution_event(ExecutionEventType type, const MotionBlock* block = nullptr) {
+void emit_execution_event(ExecutionEventType type,
+                          const MotionBlock* block = nullptr,
+                          const stepper::StepSegment* segment = nullptr) {
     ExecutionCallback callback = nullptr;
     void* user_data = nullptr;
     portENTER_CRITICAL(&s_execution_event_lock);
@@ -187,6 +189,12 @@ void emit_execution_event(ExecutionEventType type, const MotionBlock* block = nu
         event.execution_id = block->execution_id;
         event.request = block->request;
         event.plan = block->plan;
+    }
+    if (segment != nullptr) {
+        event.segment_power = segment->laser_power;
+        event.segment_start_speed_mm_per_min = segment->start_speed_mm_per_min;
+        event.segment_end_speed_mm_per_min = segment->end_speed_mm_per_min;
+        event.segment_completes_block = segment->completes_block;
     }
     callback(event, user_data);
 }
@@ -344,10 +352,13 @@ bool execute_block(const MotionBlock& block) {
                 segmented_result = false;
                 break;
             }
+            emit_execution_event(ExecutionEventType::SegmentBatchStarted, &block, &s_segment_batch[0]);
             if (stepper::rmt_stepper_execute_segments(s_segment_batch.data(), segment_count) != ESP_OK) {
                 segmented_result = false;
                 break;
             }
+            emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block,
+                                 &s_segment_batch[segment_count - 1]);
             segmented_started = true;
         }
         if (segmented_started || !segmented_result) {
@@ -364,12 +375,20 @@ bool execute_block(const MotionBlock& block) {
             ++active_axis_count;
         }
     }
+    stepper::StepSegment fallback_segment = {};
+    fallback_segment.execution_id = block.execution_id;
+    fallback_segment.laser_power = block.request.spindle_power;
+    fallback_segment.start_speed_mm_per_min = block.programmed_rate_mm_per_min;
+    fallback_segment.end_speed_mm_per_min = block.programmed_rate_mm_per_min;
+    fallback_segment.completes_block = true;
+    emit_execution_event(ExecutionEventType::SegmentBatchStarted, &block, &fallback_segment);
     if (active_axis_count == 1 && stepper::rmt_stepper_can_execute(
                                       block.plan.steps[static_cast<std::size_t>(active_axis)],
                                       block.plan.step_interval_us)) {
         const auto axis_index = static_cast<std::size_t>(active_axis);
         const bool completed = stepper::rmt_stepper_execute(
             active_axis, block.plan.steps[axis_index], block.plan.step_interval_us) == ESP_OK;
+        emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
         disable_axes(enabled);
         return completed;
     }
@@ -377,6 +396,7 @@ bool execute_block(const MotionBlock& block) {
         stepper::rmt_stepper_can_execute_xy(block.plan.steps, block.plan.step_interval_us)) {
         const bool completed = stepper::rmt_stepper_execute_xy(
             block.plan.steps, block.plan.step_interval_us) == ESP_OK;
+        emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
         disable_axes(enabled);
         return completed;
     }
@@ -409,6 +429,7 @@ bool execute_block(const MotionBlock& block) {
     }
 
     disable_axes(enabled);
+    emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
     return completed;
 }
 

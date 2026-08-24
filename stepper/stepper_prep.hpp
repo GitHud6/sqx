@@ -24,6 +24,7 @@ struct StepSegment {
     std::uint32_t duration_us = 0;
     double start_speed_mm_per_min = 0.0;
     double end_speed_mm_per_min = 0.0;
+    double laser_power = 0.0;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     bool completes_block = false;
 };

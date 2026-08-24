@@ -22,7 +22,7 @@ RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP G
 再切分为目标时长约 `750 us` 的 `StepSegment`。
 
 segment ring 固定为 64 槽，目标是为后续执行后端提供约 `48 ms` 的连续 STEP 时序预算。每个
-segment 保存来源 `execution_id`、X/Y 步数、起止速度、持续时间、profile 阶段和 block 完成标志。
+segment 保存来源 `execution_id`、X/Y 步数、起止速度、持续时间、按 M3/M4 规则计算的功率、profile 阶段和 block 完成标志。
 分段时按主步边界计算各轴累计步数，保证一个来源 block 的所有 segment 合计后仍严格等于原始
 X/Y 步数。
 
