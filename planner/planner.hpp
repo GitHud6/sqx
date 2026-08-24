@@ -1,11 +1,13 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 #include "esp_err.h"
 
 #include "motion_request.hpp"
+#include "stepper_driver.hpp"
 
 namespace ray2::planner {
 
@@ -22,6 +24,8 @@ struct PlannerBlock {
     MotionBlockType type = MotionBlockType::Motion;
     motion::MotionRequest request = {};
     motion::MotionExecutionPlan plan = {};
+    std::array<double, 2> machine_start_mm = {};
+    std::array<double, 2> machine_target_mm = {};
     std::int32_t step_event_count = 0;
     double millimeters = 0.0;
     double programmed_rate_mm_per_min = 0.0;
@@ -65,6 +69,7 @@ struct ExecutionEvent {
     double segment_start_speed_mm_per_min = 0.0;
     double segment_end_speed_mm_per_min = 0.0;
     bool segment_completes_block = false;
+    stepper::MachinePosition executed_machine_position = {};
 };
 
 // Callbacks run in the caller's task and must return quickly without calling planner APIs.

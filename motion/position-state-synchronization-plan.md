@@ -217,6 +217,9 @@ position_set_machine_mm()
 - 能分别打印或查询 planned position 与 executed position。
 - 一次故意触发的 Planner 拒绝不会污染后续绝对坐标。
 
+阶段状态：已完成并实机验证。每个完成 block 的日志同时输出 Planner 冻结的机床起点、目标和
+Stepper 执行步数快照；连续正反向与 XY 短线的 planned 边界连续，执行步数回到预期 `(0,0)`。
+
 ### 阶段三：实现解析器与机床坐标同步
 
 实现内容：

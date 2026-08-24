@@ -35,7 +35,6 @@ std::int64_t machine_position_steps(machine::Axis axis);
 double machine_position_mm(machine::Axis axis);
 MachinePosition machine_position();
 PositionState machine_position_state();
-void stepper_log_machine_position();
 
 // Stepper execution backends call these only after a STEP pulse or RMT batch
 // has actually completed. Higher layers must not modify executed position.

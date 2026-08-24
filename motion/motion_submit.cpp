@@ -143,6 +143,10 @@ MotionSubmitResult motion_submit(const MotionRequest& request) {
         .request = request,
         .plan = plan,
     };
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        block.machine_start_mm[axis] = request.start_mm[axis];
+        block.machine_target_mm[axis] = request.target_mm[axis];
+    }
     block.step_event_count = std::max(plan.steps[0], plan.steps[1]);
     const double delta_x = request.target_mm[0] - request.start_mm[0];
     const double delta_y = request.target_mm[1] - request.start_mm[1];

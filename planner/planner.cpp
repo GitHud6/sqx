@@ -47,12 +47,39 @@ constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
 constexpr char kLogTag[] = "planner";
 
+const char* position_state_text(stepper::PositionState state) {
+    switch (state) {
+        case stepper::PositionState::Unknown: return "unknown";
+        case stepper::PositionState::Known: return "known";
+        case stepper::PositionState::Invalidated: return "invalidated";
+    }
+    return "invalid";
+}
+
+void log_completed_motion_position(const MotionBlock& block) {
+    const stepper::MachinePosition executed = stepper::machine_position();
+    ESP_LOGI(kLogTag,
+             "POSITION id=%llu planned=(%.4f,%.4f)->(%.4f,%.4f) "
+             "executed=%s steps=(%lld,%lld) mm=(%.4f,%.4f)",
+             static_cast<unsigned long long>(block.execution_id),
+             block.machine_start_mm[0], block.machine_start_mm[1],
+             block.machine_target_mm[0], block.machine_target_mm[1],
+             position_state_text(executed.state),
+             static_cast<long long>(executed.steps[0]),
+             static_cast<long long>(executed.steps[1]),
+             executed.millimeters[0], executed.millimeters[1]);
+}
+
 std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
 }
 
 bool is_plannable_motion(const MotionBlock& block) {
     return block.type == MotionBlockType::Motion && block.step_event_count > 0 &&
+           std::isfinite(block.machine_start_mm[0]) &&
+           std::isfinite(block.machine_start_mm[1]) &&
+           std::isfinite(block.machine_target_mm[0]) &&
+           std::isfinite(block.machine_target_mm[1]) &&
            std::isfinite(block.millimeters) && block.millimeters > 0.0 &&
            std::isfinite(block.programmed_rate_mm_per_min) &&
            block.programmed_rate_mm_per_min > 0.0 &&
@@ -198,6 +225,7 @@ void emit_execution_event(ExecutionEventType type,
         event.segment_end_speed_mm_per_min = segment->end_speed_mm_per_min;
         event.segment_completes_block = segment->completes_block;
     }
+    event.executed_machine_position = stepper::machine_position();
     callback(event, user_data);
 }
 
@@ -463,7 +491,7 @@ void planner_task(void*) {
         if (completed) {
             ++s_completed_block_count;
             if (block.type == MotionBlockType::Motion) {
-                stepper::stepper_log_machine_position();
+                log_completed_motion_position(block);
             }
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
         } else if (s_reset_generation.load() != block.reset_generation) {

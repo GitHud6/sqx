@@ -3,7 +3,6 @@
 #include <array>
 
 #include "driver/gpio.h"
-#include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 
@@ -18,8 +17,6 @@ std::array<Direction, machine::kAxisCount> s_directions = {
 std::array<std::int64_t, machine::kAxisCount> s_machine_position_steps = {};
 PositionState s_position_state = PositionState::Unknown;
 portMUX_TYPE s_position_lock = portMUX_INITIALIZER_UNLOCKED;
-
-constexpr char kLogTag[] = "stepper";
 
 esp_err_t set_output_level(int pin, bool high) {
     return gpio_set_level(static_cast<gpio_num_t>(pin), high ? 1 : 0);
@@ -44,15 +41,6 @@ void record_steps_locked(std::size_t index, std::int32_t step_count) {
                                           ? static_cast<std::int64_t>(step_count)
                                           : -static_cast<std::int64_t>(step_count);
     s_machine_position_steps[index] += signed_steps;
-}
-
-const char* position_state_text(PositionState state) {
-    switch (state) {
-        case PositionState::Unknown: return "unknown";
-        case PositionState::Known: return "known";
-        case PositionState::Invalidated: return "invalidated";
-    }
-    return "invalid";
 }
 
 }  // namespace
@@ -205,17 +193,6 @@ PositionState machine_position_state() {
     const PositionState state = s_position_state;
     portEXIT_CRITICAL(&s_position_lock);
     return state;
-}
-
-void stepper_log_machine_position() {
-    const MachinePosition position = machine_position();
-    ESP_LOGI(kLogTag,
-             "POSITION state=%s steps=(%lld,%lld) mm=(%.4f,%.4f)",
-             position_state_text(position.state),
-             static_cast<long long>(position.steps[0]),
-             static_cast<long long>(position.steps[1]),
-             position.millimeters[0],
-             position.millimeters[1]);
 }
 
 void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count) {
