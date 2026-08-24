@@ -237,7 +237,12 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
                                       : state.position_mm[axis] + value_mm;
     }
 
-    if (parsed.has_motion && !has_axis) return Error::NoAxisWords;
+    // A standalone rapid-mode word is a modal update in Grbl. It must not
+    // create a zero-length planner block when a file header sends G00 without
+    // axis words. Linear G1 remains strict until its file behavior is known.
+    if (parsed.has_motion && !has_axis && parsed.motion_mode != MotionMode::Rapid) {
+        return Error::NoAxisWords;
+    }
     if (has_axis) {
         const Error submit_error = submit_motion_request(request);
         if (submit_error != Error::Ok) return submit_error;

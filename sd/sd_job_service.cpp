@@ -5,6 +5,7 @@
 
 #include "command_dispatch.hpp"
 #include "command_executor.hpp"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "planner.hpp"
@@ -15,6 +16,7 @@
 namespace ray2::sd {
 namespace {
 
+constexpr char kLogTag[] = "sd_job";
 constexpr std::size_t kJobPathCapacity = kFilePathCapacity;
 
 TaskHandle_t s_job_task = nullptr;
@@ -96,6 +98,12 @@ void sd_job_task(void*) {
                     vTaskDelay(pdMS_TO_TICKS(1));
                     continue;
                 }
+                ESP_LOGE(kLogTag,
+                         "SD-GCODE-REJECT line=%u error=%s payload=\"%.*s\"",
+                         static_cast<unsigned>(s_job_current_line.load()),
+                         command::error_text(result),
+                         static_cast<int>(std::strlen(line)),
+                         line);
                 reader->close();
                 finish_job(JobState::Faulted, JobFault::CommandRejected, result);
                 return;
