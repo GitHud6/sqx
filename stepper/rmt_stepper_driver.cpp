@@ -268,9 +268,12 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
 
     bool x_active = false;
     bool y_active = false;
+    std::int32_t emitted_steps[machine::kAxisCount] = {};
     for (std::size_t index = 0; index < segment_count; ++index) {
         x_active = x_active || segments[index].axis_steps[0] > 0;
         y_active = y_active || segments[index].axis_steps[1] > 0;
+        emitted_steps[0] += segments[index].axis_steps[0];
+        emitted_steps[1] += segments[index].axis_steps[1];
         build_segment_payload(segments[index], s_segment_payloads[index]);
     }
 
@@ -316,11 +319,18 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
     if (x_active) {
         result = rmt_tx_wait_all_done(s_rmt_channels[0], -1);
         if (result != ESP_OK) {
+            stepper_invalidate_position();
             return result;
         }
+        stepper_record_executed_steps(machine::Axis::X, emitted_steps[0]);
     }
     if (y_active) {
         result = rmt_tx_wait_all_done(s_rmt_channels[1], -1);
+        if (result != ESP_OK) {
+            stepper_invalidate_position();
+            return result;
+        }
+        stepper_record_executed_steps(machine::Axis::Y, emitted_steps[1]);
     }
     return result;
 }
@@ -365,8 +375,10 @@ esp_err_t rmt_stepper_execute(machine::Axis axis,
         }
         result = wait_for_tx_done(axis, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
+            stepper_invalidate_position();
             return result;
         }
+        stepper_record_executed_steps(axis, chunk_steps);
         remaining_steps -= chunk_steps;
     }
     return ESP_OK;
@@ -400,6 +412,8 @@ esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
             remaining_major_steps, static_cast<std::int32_t>(kRmtStepMemorySymbols));
         rmt_symbol_word_t x_symbols[kRmtStepMemorySymbols] = {};
         rmt_symbol_word_t y_symbols[kRmtStepMemorySymbols] = {};
+        std::int32_t x_emitted_steps = 0;
+        std::int32_t y_emitted_steps = 0;
 
         for (std::int32_t step = 0; step < chunk_steps; ++step) {
             bool x_pulse = x_is_major;
@@ -415,6 +429,8 @@ esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
             }
             x_symbols[step] = make_step_symbol(x_pulse, step_interval_us);
             y_symbols[step] = make_step_symbol(y_pulse, step_interval_us);
+            x_emitted_steps += x_pulse ? 1 : 0;
+            y_emitted_steps += y_pulse ? 1 : 0;
         }
 
         result = rmt_sync_reset(s_sync_manager);
@@ -435,12 +451,16 @@ esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
         }
         result = wait_for_tx_done(machine::Axis::X, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
+            stepper_invalidate_position();
             return result;
         }
+        stepper_record_executed_steps(machine::Axis::X, x_emitted_steps);
         result = wait_for_tx_done(machine::Axis::Y, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
+            stepper_invalidate_position();
             return result;
         }
+        stepper_record_executed_steps(machine::Axis::Y, y_emitted_steps);
         remaining_major_steps -= chunk_steps;
     }
     return ESP_OK;

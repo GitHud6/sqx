@@ -462,6 +462,9 @@ void planner_task(void*) {
         clear_active_block();
         if (completed) {
             ++s_completed_block_count;
+            if (block.type == MotionBlockType::Motion) {
+                stepper::stepper_log_machine_position();
+            }
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
         } else if (s_reset_generation.load() != block.reset_generation) {
             emit_execution_event(ExecutionEventType::BlockCancelled, &block);

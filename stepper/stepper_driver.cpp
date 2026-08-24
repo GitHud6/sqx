@@ -1,12 +1,25 @@
 #include "stepper_driver.hpp"
 
+#include <array>
+
 #include "driver/gpio.h"
+#include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "freertos/FreeRTOS.h"
 
 namespace ray2::stepper {
 namespace {
 
 bool s_initialized = false;
+std::array<Direction, machine::kAxisCount> s_directions = {
+    Direction::Positive,
+    Direction::Positive,
+};
+std::array<std::int64_t, machine::kAxisCount> s_machine_position_steps = {};
+PositionState s_position_state = PositionState::Unknown;
+portMUX_TYPE s_position_lock = portMUX_INITIALIZER_UNLOCKED;
+
+constexpr char kLogTag[] = "stepper";
 
 esp_err_t set_output_level(int pin, bool high) {
     return gpio_set_level(static_cast<gpio_num_t>(pin), high ? 1 : 0);
@@ -19,6 +32,27 @@ const machine::AxisHardware* axis_hardware(machine::Axis axis) {
     }
 
     return &machine::raycube_axis(axis);
+}
+
+bool axis_index(machine::Axis axis, std::size_t& index) {
+    index = static_cast<std::size_t>(axis);
+    return index < machine::kAxisCount;
+}
+
+void record_steps_locked(std::size_t index, std::int32_t step_count) {
+    const std::int64_t signed_steps = s_directions[index] == Direction::Positive
+                                          ? static_cast<std::int64_t>(step_count)
+                                          : -static_cast<std::int64_t>(step_count);
+    s_machine_position_steps[index] += signed_steps;
+}
+
+const char* position_state_text(PositionState state) {
+    switch (state) {
+        case PositionState::Unknown: return "unknown";
+        case PositionState::Known: return "known";
+        case PositionState::Invalidated: return "invalidated";
+    }
+    return "invalid";
 }
 
 }  // namespace
@@ -55,6 +89,7 @@ esp_err_t stepper_init() {
         if (result != ESP_OK) {
             return result;
         }
+        s_directions[index] = Direction::Positive;
 
         result = set_output_level(axis.disable_pin, axis.disable_active_high);
         if (result != ESP_OK) {
@@ -92,7 +127,14 @@ esp_err_t stepper_set_direction(machine::Axis axis, Direction direction) {
 
     const bool direction_level =
         (direction == Direction::Positive) ^ hardware->direction_inverted;
-    return set_output_level(hardware->direction_pin, direction_level);
+    const esp_err_t result = set_output_level(hardware->direction_pin, direction_level);
+    if (result == ESP_OK) {
+        const std::size_t index = static_cast<std::size_t>(axis);
+        portENTER_CRITICAL(&s_position_lock);
+        s_directions[index] = direction;
+        portEXIT_CRITICAL(&s_position_lock);
+    }
+    return result;
 }
 
 esp_err_t stepper_pulse(machine::Axis axis) {
@@ -110,8 +152,87 @@ esp_err_t stepper_pulse(machine::Axis axis) {
         return result;
     }
 
+    stepper_record_executed_steps(axis, 1);
+
     esp_rom_delay_us(machine::kStepPulseMicroseconds);
     return set_output_level(hardware->step_pin, false);
+}
+
+std::int64_t machine_position_steps(machine::Axis axis) {
+    std::size_t index = 0;
+    if (!axis_index(axis, index)) {
+        return 0;
+    }
+
+    portENTER_CRITICAL(&s_position_lock);
+    const std::int64_t steps = s_machine_position_steps[index];
+    portEXIT_CRITICAL(&s_position_lock);
+    return steps;
+}
+
+double machine_position_mm(machine::Axis axis) {
+    std::size_t index = 0;
+    if (!axis_index(axis, index)) {
+        return 0.0;
+    }
+
+    const float steps_per_mm = machine::raycube_axis(axis).steps_per_mm;
+    if (steps_per_mm <= 0.0F) {
+        return 0.0;
+    }
+    return static_cast<double>(machine_position_steps(axis)) / steps_per_mm;
+}
+
+MachinePosition machine_position() {
+    MachinePosition position = {};
+    portENTER_CRITICAL(&s_position_lock);
+    position.steps = s_machine_position_steps;
+    position.state = s_position_state;
+    portEXIT_CRITICAL(&s_position_lock);
+
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const float steps_per_mm =
+            machine::raycube_axis(static_cast<machine::Axis>(axis)).steps_per_mm;
+        if (steps_per_mm > 0.0F) {
+            position.millimeters[axis] = static_cast<double>(position.steps[axis]) / steps_per_mm;
+        }
+    }
+    return position;
+}
+
+PositionState machine_position_state() {
+    portENTER_CRITICAL(&s_position_lock);
+    const PositionState state = s_position_state;
+    portEXIT_CRITICAL(&s_position_lock);
+    return state;
+}
+
+void stepper_log_machine_position() {
+    const MachinePosition position = machine_position();
+    ESP_LOGI(kLogTag,
+             "POSITION state=%s steps=(%lld,%lld) mm=(%.4f,%.4f)",
+             position_state_text(position.state),
+             static_cast<long long>(position.steps[0]),
+             static_cast<long long>(position.steps[1]),
+             position.millimeters[0],
+             position.millimeters[1]);
+}
+
+void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count) {
+    std::size_t index = 0;
+    if (step_count <= 0 || !axis_index(axis, index)) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_position_lock);
+    record_steps_locked(index, step_count);
+    portEXIT_CRITICAL(&s_position_lock);
+}
+
+void stepper_invalidate_position() {
+    portENTER_CRITICAL(&s_position_lock);
+    s_position_state = PositionState::Invalidated;
+    portEXIT_CRITICAL(&s_position_lock);
 }
 
 }  // namespace ray2::stepper
