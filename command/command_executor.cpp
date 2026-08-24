@@ -46,6 +46,11 @@ Error parse_g_word(double value, ParsedBlock& parsed) {
             parsed.has_cutter_compensation = true;
             parsed.cutter_compensation = CutterCompensation::Disabled;
             return Error::Ok;
+        case 54:
+            if (parsed.has_work_coordinate_system) return Error::ModalGroupViolation;
+            parsed.has_work_coordinate_system = true;
+            parsed.work_coordinate_system = WorkCoordinateSystem::G54;
+            return Error::Ok;
         case 90:
         case 91:
             if (parsed.has_distance_mode) return Error::ModalGroupViolation;
@@ -220,6 +225,14 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     if (parsed.has_plane) next_state.plane = parsed.plane;
     if (parsed.has_cutter_compensation) {
         next_state.cutter_compensation = parsed.cutter_compensation;
+    }
+    if (parsed.has_work_coordinate_system) {
+        next_state.work_coordinate_system = parsed.work_coordinate_system;
+        // G54 is currently the machine-origin work coordinate system. Keep
+        // the offset explicit so a persisted work offset can be added later.
+        next_state.work_offset_mm[0] = 0.0;
+        next_state.work_offset_mm[1] = 0.0;
+        next_state.work_offset_mm[2] = 0.0;
     }
     if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
 

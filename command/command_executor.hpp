@@ -26,6 +26,7 @@ enum class Units { Millimeters, Inches };
 enum class MotionMode { Rapid, Linear };
 enum class PlaneMode { XY };
 enum class CutterCompensation { Disabled };
+enum class WorkCoordinateSystem { G54 };
 enum class SpindleMode { Off, Clockwise, CounterClockwise };
 
 struct ParserState {
@@ -35,6 +36,8 @@ struct ParserState {
     MotionMode motion_mode = MotionMode::Rapid;
     PlaneMode plane = PlaneMode::XY;
     CutterCompensation cutter_compensation = CutterCompensation::Disabled;
+    WorkCoordinateSystem work_coordinate_system = WorkCoordinateSystem::G54;
+    double work_offset_mm[3] = {};
     double position_mm[3] = {};
     double feed_rate_mm_per_min = 0.0;
     double spindle_speed = 0.0;
@@ -52,6 +55,8 @@ struct ParsedBlock {
     PlaneMode plane = PlaneMode::XY;
     bool has_cutter_compensation = false;
     CutterCompensation cutter_compensation = CutterCompensation::Disabled;
+    bool has_work_coordinate_system = false;
+    WorkCoordinateSystem work_coordinate_system = WorkCoordinateSystem::G54;
     bool has_axis[3] = {};
     double axis_value[3] = {};
     bool has_feed_rate = false;
