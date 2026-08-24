@@ -84,6 +84,8 @@ timer/channel 0、10 bit 分辨率初始化 PWM，先将 GPIO5 拉低，最后�
 
 ### 阶段二：实现独立 PWM duty 映射和安全关闭接口
 
+阶段状态：代码已完成，待构建和逻辑分析仪验收。
+
 实现内容：
 
 1. 定义 `laser_init()`、`laser_set_power()`、`laser_disable()` 和状态查询接口。
@@ -98,6 +100,13 @@ timer/channel 0、10 bit 分辨率初始化 PWM，先将 GPIO5 拉低，最后�
 - 连续重复设置相同 duty 不引起异常；非法输入不改变当前安全输出状态。
 - 调用 `laser_disable()` 后测得 PWM 关闭，并且重复调用结果一致。
 - 本阶段不改变 X/Y 步数、方向、运动耗时和 Planner 队列顺序。
+
+当前实现说明：新增 `laser_set_power(double)`、`laser_disable()`、
+`laser_is_output_enabled()` 和 `laser_current_duty()`。`laser_set_power()` 仅在
+初始化完成后接受有限的 `0..1000` 功率值，按线性公式映射为 10 bit `0..1023` duty；
+`S0` 直接执行关闭。非法功率或 LEDC/GPIO 更新错误都会请求关闭输出。`laser_disable()`
+可重复调用：先把 GPIO5 写为低电平，再调用 `ledc_stop()` 使 GPIO4 保持低电平，同时清除
+输出状态和 duty 记录。本阶段没有调用这些接口，因此不会改变现有机械运动。
 
 ### 阶段三：将 Planner 生命周期事件接入激光输出
 
