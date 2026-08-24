@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 
 #include "motion_submit.hpp"
 #include "planner.hpp"
@@ -17,6 +18,58 @@ constexpr double kMaxSpindlePower = 1000.0;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
+}
+
+// Scan one G-code decimal number before converting it. Calling strtod() on
+// the original payload would allow a token such as "0X33.3" to be treated as
+// a hexadecimal floating-point literal when the line contains "G0X33.3".
+const char* parse_decimal_number(const char* cursor,
+                                 const char* end,
+                                 double& value) {
+    const char* number_begin = cursor;
+    if (cursor < end && (*cursor == '+' || *cursor == '-')) ++cursor;
+
+    bool has_integer_digits = false;
+    while (cursor < end && std::isdigit(static_cast<unsigned char>(*cursor))) {
+        has_integer_digits = true;
+        ++cursor;
+    }
+
+    bool has_fraction_digits = false;
+    if (cursor < end && *cursor == '.') {
+        ++cursor;
+        while (cursor < end && std::isdigit(static_cast<unsigned char>(*cursor))) {
+            has_fraction_digits = true;
+            ++cursor;
+        }
+    }
+    if (!has_integer_digits && !has_fraction_digits) return nullptr;
+
+    if (cursor < end && (*cursor == 'e' || *cursor == 'E')) {
+        ++cursor;
+        if (cursor < end && (*cursor == '+' || *cursor == '-')) ++cursor;
+        const char* exponent_digits = cursor;
+        while (cursor < end && std::isdigit(static_cast<unsigned char>(*cursor))) {
+            ++cursor;
+        }
+        if (cursor == exponent_digits) {
+            // Do not silently split malformed input such as "X1eY".
+            return nullptr;
+        }
+    }
+
+    constexpr std::size_t kNumberBufferSize = 64;
+    const std::size_t number_length = static_cast<std::size_t>(cursor - number_begin);
+    if (number_length >= kNumberBufferSize) return nullptr;
+
+    char number_buffer[kNumberBufferSize] = {};
+    std::memcpy(number_buffer, number_begin, number_length);
+    char* conversion_end = nullptr;
+    value = std::strtod(number_buffer, &conversion_end);
+    if (conversion_end != number_buffer + number_length || !std::isfinite(value)) {
+        return nullptr;
+    }
+    return cursor;
 }
 
 Error parse_g_word(double value, ParsedBlock& parsed) {
@@ -113,9 +166,9 @@ Error parse_line(const char* line, std::size_t length, ParsedBlock& parsed) {
 
         const char letter = static_cast<char>(std::toupper(raw));
         ++cursor;
-        char* number_end = nullptr;
-        const double value = std::strtod(cursor, &number_end);
-        if (number_end == cursor || number_end > end || !std::isfinite(value)) return Error::BadNumberFormat;
+        double value = 0.0;
+        const char* number_end = parse_decimal_number(cursor, end, value);
+        if (number_end == nullptr) return Error::BadNumberFormat;
         cursor = number_end;
 
         if (letter == 'G') {
