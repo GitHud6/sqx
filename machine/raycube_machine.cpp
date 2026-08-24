@@ -28,10 +28,23 @@ constexpr AxisHardware kAxes[kAxisCount] = {
     },
 };
 
+constexpr LaserHardware kLaser = {
+    .pwm_pin = 4,
+    .enable_pin = 5,
+    .pwm_inverted = false,
+    .enable_active_high = true,
+    .pwm_frequency_hz = 2000,
+    .max_power = 1000,
+};
+
 }  // namespace
 
 const AxisHardware& raycube_axis(Axis axis) {
     return kAxes[static_cast<std::size_t>(axis)];
+}
+
+const LaserHardware& raycube_laser() {
+    return kLaser;
 }
 
 }  // namespace ray2::machine

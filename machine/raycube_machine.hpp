@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace ray2::machine {
 
@@ -21,9 +22,19 @@ struct AxisHardware {
     float max_travel_mm;
 };
 
+struct LaserHardware {
+    int pwm_pin;
+    int enable_pin;
+    bool pwm_inverted;
+    bool enable_active_high;
+    std::uint32_t pwm_frequency_hz;
+    std::uint32_t max_power;
+};
+
 constexpr std::size_t kAxisCount = 2;
 constexpr unsigned int kStepPulseMicroseconds = 3;
 
 const AxisHardware& raycube_axis(Axis axis);
+const LaserHardware& raycube_laser();
 
 }  // namespace ray2::machine

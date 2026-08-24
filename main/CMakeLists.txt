@@ -1,6 +1,7 @@
 idf_component_register(SRCS "app_main.cpp"
                             "../command/command_executor.cpp"
                             "../driver/uart0_driver.cpp"
+                            "../laser/laser_driver.cpp"
                             "../machine/raycube_machine.cpp"
                             "../motion/motion_submit.cpp"
                             "../planner/planner.cpp"
@@ -12,11 +13,13 @@ idf_component_register(SRCS "app_main.cpp"
                        INCLUDE_DIRS "."
                                     "../command"
                                     "../driver"
+                                    "../laser"
                                     "../machine"
                                     "../motion"
                                     "../planner"
                                     "../protocol"
                                     "../stepper"
                        REQUIRES esp_driver_gpio
+                                esp_driver_ledc
                                 esp_driver_rmt
                                 esp_driver_uart)
