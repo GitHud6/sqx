@@ -114,10 +114,36 @@ MotionSubmitResult motion_submit(const MotionRequest& request) {
         return MotionSubmitResult::Rejected;
     }
 
-    const planner::MotionBlock block = {
+    planner::PlannerBlock block = {
         .request = request,
         .plan = plan,
     };
+    block.step_event_count = std::max(plan.steps[0], plan.steps[1]);
+    const double delta_x = request.target_mm[0] - request.start_mm[0];
+    const double delta_y = request.target_mm[1] - request.start_mm[1];
+    block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
+    block.programmed_rate_mm_per_min = request.feed_rate_mm_per_min;
+    if (block.millimeters > 0.0) {
+        block.unit_vector[0] = delta_x / block.millimeters;
+        block.unit_vector[1] = delta_y / block.millimeters;
+    }
+
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (plan.steps[axis] == 0) {
+            continue;
+        }
+        const double axis_component = std::abs(block.unit_vector[axis]);
+        if (axis_component == 0.0) {
+            continue;
+        }
+        const double axis_limited_acceleration =
+            machine::raycube_axis(static_cast<machine::Axis>(axis)).acceleration_mm_per_sec2 /
+            axis_component;
+        if (block.acceleration_mm_per_sec2 == 0.0 ||
+            axis_limited_acceleration < block.acceleration_mm_per_sec2) {
+            block.acceleration_mm_per_sec2 = axis_limited_acceleration;
+        }
+    }
     switch (planner::planner_submit(block)) {
         case planner::SubmitResult::Accepted:
             break;

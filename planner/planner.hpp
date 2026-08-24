@@ -16,13 +16,26 @@ enum class MotionBlockType {
     SpindleDisable,
 };
 
-struct MotionBlock {
+// This is the planner-owned motion representation. The legacy `plan` member remains
+// available to the block-level RMT fallback until the segment executor replaces it.
+struct PlannerBlock {
     MotionBlockType type = MotionBlockType::Motion;
     motion::MotionRequest request = {};
     motion::MotionExecutionPlan plan = {};
+    std::int32_t step_event_count = 0;
+    double millimeters = 0.0;
+    double programmed_rate_mm_per_min = 0.0;
+    double acceleration_mm_per_sec2 = 0.0;
+    double unit_vector[2] = {};
+    double entry_speed_sqr = 0.0;
+    double max_entry_speed_sqr = 0.0;
+    double max_junction_speed_sqr = 0.0;
     std::uint32_t reset_generation = 0;
     std::uint64_t execution_id = 0;
 };
+
+// Kept while callers migrate from the original block name.
+using MotionBlock = PlannerBlock;
 
 enum class SubmitResult {
     Accepted,
