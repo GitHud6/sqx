@@ -13,7 +13,6 @@
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
 #include "planner.hpp"
-#include "rmt_stepper_driver.hpp"
 #include "stepper_driver.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
@@ -152,32 +151,19 @@ bool report_position_status() {
     const double planned_x = s_parser_state.planned_machine_position_mm[0];
     const double planned_y = s_parser_state.planned_machine_position_mm[1];
     xSemaphoreGive(s_parser_mutex);
-    const stepper::RmtStreamDiagnostics rmt = stepper::rmt_stepper_stream_diagnostics();
     const std::size_t queued_blocks = planner::kPlannerQueueLength - planner::planner_free_blocks();
 
-    char response[768] = {};
+    char response[384] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|rmt=(pending=%zu,inflight=%zu,submitted=%llu,started=%llu,completed=%llu,failed=%llu,timeouts=%llu,active=%d,id=%llu,steps=(%ld,%ld),major=%ld,duration=%lu,elapsed=%llu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
         planned_x - position.millimeters[0], planned_y - position.millimeters[1],
-        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()),
-        rmt.pending_segments, rmt.inflight_segments,
-        static_cast<unsigned long long>(rmt.submitted_segments),
-        static_cast<unsigned long long>(rmt.started_segments),
-        static_cast<unsigned long long>(rmt.completed_segments),
-        static_cast<unsigned long long>(rmt.failed_segments),
-        static_cast<unsigned long long>(rmt.timeout_segments),
-        rmt.active_segment ? 1 : 0,
-        static_cast<unsigned long long>(rmt.active_execution_id),
-        static_cast<long>(rmt.active_x_steps), static_cast<long>(rmt.active_y_steps),
-        static_cast<long>(rmt.active_major_steps),
-        static_cast<unsigned long>(rmt.active_duration_us),
-        static_cast<unsigned long long>(rmt.active_elapsed_us));
+        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()));
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }

@@ -1,10 +1,10 @@
 # stepper
 
-本模块将来拥有 STEP、DIR、DISABLE GPIO 的唯一写入权，并向 Planner 提供最小步进执行接口。
+本模块拥有步进执行语义、DIR/DISABLE GPIO 和实际位置累计，并向 Planner 提供最小执行接口；STEP 脉冲由 driver 层的 RMT 外设输出。
 
 当前已实现 GPIO 初始化、使能/禁用、方向写入和单脉冲输出。正式命令经由 `motion` 和 `planner` 调用本模块；`protocol` 与 `command` 不直接写入 STEP、DIR 或 DISABLE GPIO。
 
-RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP GPIO15 和 Y STEP GPIO8 创建两个 1 MHz RMT TX 通道，并建立同步管理器；初始化不调用 `rmt_transmit()`，不会产生 STEP 脉冲。RMT 阶段二新增 `rmt_stepper_execute()`，由 Planner 的单轴 block 调用；它使用 copy encoder 和 RMT symbol 输出脉冲。阶段三新增 `rmt_stepper_execute_xy()`，为两轴生成相同长度的主步时间轴并由同步管理器共同启动。阶段四将长 block 分为每块最多 64 个主步时间片，跨块保留 Bresenham 误差；全部常规单轴和 XY block 现已走 RMT，Feed Hold 在当前分块结束后暂停，Reset 停止活动 TX。
+当前 STEP 时序由 `timer_stepper_executor` 执行：它保存 Bresenham、DIR/ENABLE、实际步数和完成通知；GPTimer 与 RMT 单脉冲外设访问分别由 `driver/step_timer_driver` 和 `driver/rmt_step_pulse_driver` 独占。`stepper` 不再创建 RMT TX 通道、RMT transaction queue 或 RMT stream task。
 
 后续实现顺序：
 
@@ -17,7 +17,7 @@ RMT 迁移阶段一已新增独立 `rmt_stepper_init()` 接口：它为 X STEP G
 
 ## Stepper Prep 与 Segment Buffer
 
-`stepper_prep` 是 Planner 与 RMT 硬件后端之间的预处理层。它只接受已经完成前瞻规划的
+`stepper_prep` 是 Planner 与未来连续 segment 执行器之间的预处理层。它只接受已经完成前瞻规划的
 `PlannerBlock`，基于 entry、nominal、exit speed 和加速度生成加速、匀速、减速 profile，
 再切分为目标时长约 `750 us` 的 `StepSegment`。
 
@@ -26,14 +26,9 @@ segment 保存来源 `execution_id`、X/Y 步数、起止速度、持续时间�
 分段时按主步边界计算各轴累计步数，保证一个来源 block 的所有 segment 合计后仍严格等于原始
 X/Y 步数。
 
-阶段三状态：profile 与 segment ring 已实现并加入构建目标；当时尚未接入 RMT 消费者，不能驱动
-实际 STEP。
-
-阶段四状态：`rmt_stepper_execute_segments()` 已接入 Planner 默认直线路径。它将单个来源
-block 的 segment payload 保存于静态缓冲，并排入 64 深度的 RMT TX transaction queue；同一批
-segment 只在全部入队后等待完成，不在每个 segment 间调用同步等待。RMT 无法表达的首批低频
-segment 会在未出 STEP 前回退到原 block 级执行路径。跨来源 block 的连续供给和激光功率边界仍
-由后续阶段完成。
+当前状态：profile 与 segment ring 已实现并加入构建目标，但旧的“每个 segment 一笔 RMT
+transaction”后端已删除。连续 segment 消费、跨 block 供料和激光功率边界将在后续独立阶段重新
+接入，不能回退到旧 RMT stream 模型。
 
 ## 单轴硬件打通计划
 

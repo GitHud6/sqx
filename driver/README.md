@@ -23,7 +23,7 @@ driver 不应该理解一条字节流是不是 G-code，也不应该决定电机
 | GPIO | 预留 | - | 限位、控制输入、方向和使能输出 |
 | LEDC | 预留 | - | 激光 PWM |
 | GPTimer | 已实现 | `step_timer_driver.hpp/.cpp` | Step event 定时基准；回调运动语义仍由 stepper 提供 |
-| RMT | 迁移中 | `rmt_step_pulse_driver.hpp/.cpp` | 当前产生单个 STEP 脉冲；GPTimer 所有权仍待迁移 |
+| RMT | 已实现，待阶段四实机验收 | `rmt_step_pulse_driver.hpp/.cpp` | 当前产生单个 STEP 脉冲 |
 | SPI / SDMMC | 预留 | - | 后续存储或扩展外设 |
 
 ## UART0
@@ -130,12 +130,8 @@ Stepper 的运动语义与 ESP32-S3 外设所有权正在拆分。当前运行�
 | Y STEP | `driver/rmt_step_pulse_driver.cpp` | GPIO8，RMT channel 1 | 该 driver 运行时独占此 GPIO；旧 RMT stream 不得初始化或重新绑定它 |
 | RMT | `driver/rmt_step_pulse_driver.cpp` | RMT LL 寄存器，单脉冲触发 | `stepper` 只能通过 `rmt_step_pulse_driver_trigger()` 请求发脉冲 |
 | GPTimer | `driver/step_timer_driver.cpp` | 1 MHz，优先级 3 | 该 driver 独占 timer lifecycle；stepper 只能注册固定 ISR 回调并请求启停 |
-| 旧 RMT stream | `stepper/rmt_stepper_driver.cpp` | ESP-IDF RMT high-level TX、transaction queue、stream task | 仅保留为迁移参考；当前不得在启动时初始化、创建任务或绑定 X/Y STEP GPIO |
-
-当前启动路径调用 `timer_stepper_executor_init()`，它再初始化
-`rmt_step_pulse_driver`。因此在迁移完成前，禁止同时启用 `rmt_stepper_init()`、
-`rmt_stepper_stream_start()` 或任何会使旧 RMT stream 获取 X/Y STEP GPIO 的路径。这样保证
-同一 STEP 引脚始终只有一个运行时输出所有者。
+当前启动路径调用 `timer_stepper_executor_init()`，它初始化两个 driver 并注册步进 ISR
+回调。工程中不存在第二套 RMT 后端或会重新绑定 X/Y STEP GPIO 的回退路径。
 
 ### 稳定诊断边界
 
@@ -145,8 +141,7 @@ Stepper 的运动语义与 ESP32-S3 外设所有权正在拆分。当前运行�
 - Stepper：执行中/空闲/故障状态、实际累计步数、实际机床坐标、位置是否可信。
 - Driver：初始化状态和硬件故障结果，仅供 stepper 的停止或失效处理使用。
 
-`rmt_transmit()` 次数、RMT transaction pending/inflight 数、RMT stream task 状态都属于
-旧实现细节，不应继续作为 protocol 的长期状态接口。
+RMT 寄存器状态、单脉冲次数等都属于 driver 实现细节，不应作为 protocol 的长期状态接口。
 
 ## 后续新增外设的规则
 

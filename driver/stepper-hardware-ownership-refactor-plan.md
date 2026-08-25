@@ -154,7 +154,7 @@ planner
   ISR 回调并保留 Bresenham、DIR/ENABLE、实际位置和完成通知。
 - 尚未完成阶段三实机验收，因此不得提交本阶段或进入阶段四。
 
-## 阶段四：清理旧 RMT stream 后端与上层泄漏
+## 阶段四：清理旧 RMT stream 后端与上层泄漏（代码已实现，待实机验收）
 
 实现步骤：
 
@@ -176,6 +176,16 @@ planner
 - 清理后构建通过。
 - 已验证的短线测试与 Reset 安全输出均通过实机验收。
 - 实机验收通过后提交本阶段改动；此后才开始重新处理连续 segment 执行问题。
+
+当前实现状态：
+
+- 已删除 `stepper/rmt_stepper_driver.hpp/.cpp` 及其 ESP-IDF high-level RMT TX、transaction
+  queue、stream task 和回退接口，并从构建目标移除。
+- planner 已删除旧 stream 的预填充、completion queue、RMT 回退和 RMT 专属 Hold/Reset 调用；
+  当前只经 `timer_stepper_executor` 执行 Motion block。
+- protocol 的 `$POS/STATUS` 已移除 RMT transaction 字段，只保留位置、规划位置和 planner
+  队列/完成计数。
+- 尚未完成实机验收，因此不得提交阶段四或开始连续 segment 供料改造。
 
 ## 迁移原则
 

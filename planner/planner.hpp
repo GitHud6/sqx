@@ -18,8 +18,7 @@ enum class MotionBlockType {
     SpindleDisable,
 };
 
-// This is the planner-owned motion representation. The legacy `plan` member remains
-// available to the block-level RMT fallback until the segment executor replaces it.
+// This is the planner-owned motion representation consumed by the stepper executor.
 struct PlannerBlock {
     MotionBlockType type = MotionBlockType::Motion;
     motion::MotionRequest request = {};
@@ -84,6 +83,7 @@ void planner_resume();
 void planner_reset();
 bool planner_is_idle();
 std::size_t planner_free_blocks();
+void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();
 
 }  // namespace ray2::planner

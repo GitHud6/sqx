@@ -19,8 +19,12 @@ void disable_laser() {
 void planner_execution_callback(const planner::ExecutionEvent& event, void*) {
     switch (event.type) {
         case planner::ExecutionEventType::BlockStarted:
-            if (event.request.motion_mode != motion::MotionType::Linear ||
-                event.request.spindle_mode == motion::SpindleMode::Off) {
+            if (event.request.motion_mode == motion::MotionType::Linear &&
+                event.request.spindle_mode != motion::SpindleMode::Off &&
+                event.request.spindle_power > 0.0 &&
+                laser_set_power(event.request.spindle_power) == ESP_OK) {
+                s_active_execution_id.store(event.execution_id);
+            } else {
                 disable_laser();
             }
             return;
