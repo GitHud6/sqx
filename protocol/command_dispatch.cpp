@@ -147,27 +147,55 @@ const char* position_invalidation_reason_text(stepper::PositionInvalidationReaso
     return "unknown";
 }
 
+const char* planner_block_state_text(planner::PlannerBlockState state) {
+    switch (state) {
+        case planner::PlannerBlockState::Executing: return "executing";
+        case planner::PlannerBlockState::Frozen: return "frozen";
+        case planner::PlannerBlockState::Lookahead: return "lookahead";
+    }
+    return "unknown";
+}
+
 bool report_position_status() {
     const stepper::MachinePosition position = stepper::machine_position();
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const double planned_x = s_parser_state.planned_machine_position_mm[0];
     const double planned_y = s_parser_state.planned_machine_position_mm[1];
     xSemaphoreGive(s_parser_mutex);
-    const std::size_t queued_blocks = planner::kPlannerQueueLength - planner::planner_free_blocks();
+    const planner::PlannerDiagnostics planner_diagnostics = planner::planner_diagnostics();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
 
-    char response[768] = {};
+    char response[1280] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
         planned_x - position.millimeters[0], planned_y - position.millimeters[1],
-        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()),
+        planner_diagnostics.queued_blocks, planner_diagnostics.frozen_blocks,
+        static_cast<unsigned long long>(planner::planner_completed_block_count()),
+        planner_block_state_text(planner_diagnostics.blocks[0].state),
+        static_cast<unsigned long long>(planner_diagnostics.blocks[0].execution_id),
+        planner_diagnostics.blocks[0].entry_speed_mm_per_min,
+        planner_diagnostics.blocks[0].exit_speed_mm_per_min,
+        planner_diagnostics.blocks[0].max_junction_speed_mm_per_min,
+        planner_diagnostics.blocks[0].programmed_rate_mm_per_min,
+        planner_block_state_text(planner_diagnostics.blocks[1].state),
+        static_cast<unsigned long long>(planner_diagnostics.blocks[1].execution_id),
+        planner_diagnostics.blocks[1].entry_speed_mm_per_min,
+        planner_diagnostics.blocks[1].exit_speed_mm_per_min,
+        planner_diagnostics.blocks[1].max_junction_speed_mm_per_min,
+        planner_diagnostics.blocks[1].programmed_rate_mm_per_min,
+        planner_block_state_text(planner_diagnostics.blocks[2].state),
+        static_cast<unsigned long long>(planner_diagnostics.blocks[2].execution_id),
+        planner_diagnostics.blocks[2].entry_speed_mm_per_min,
+        planner_diagnostics.blocks[2].exit_speed_mm_per_min,
+        planner_diagnostics.blocks[2].max_junction_speed_mm_per_min,
+        planner_diagnostics.blocks[2].programmed_rate_mm_per_min,
         segment.queued_segments, segment.segment_capacity, segment.high_water_segments,
         static_cast<unsigned long long>(segment.underflow_count), segment.active ? 1 : 0,
         static_cast<unsigned long long>(segment.active_execution_id),

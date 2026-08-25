@@ -12,6 +12,7 @@
 namespace ray2::planner {
 
 constexpr std::size_t kPlannerQueueLength = 32;
+constexpr std::size_t kPlannerDiagnosticBlockCount = 3;
 
 enum class MotionBlockType {
     Motion,
@@ -45,6 +46,28 @@ enum class SubmitResult {
     Accepted,
     Full,
     Rejected,
+};
+
+enum class PlannerBlockState : std::uint8_t {
+    Executing,
+    Frozen,
+    Lookahead,
+};
+
+struct PlannerBlockDiagnostics {
+    bool present = false;
+    PlannerBlockState state = PlannerBlockState::Lookahead;
+    std::uint64_t execution_id = 0;
+    double entry_speed_mm_per_min = 0.0;
+    double exit_speed_mm_per_min = 0.0;
+    double max_junction_speed_mm_per_min = 0.0;
+    double programmed_rate_mm_per_min = 0.0;
+};
+
+struct PlannerDiagnostics {
+    std::size_t queued_blocks = 0;
+    std::size_t frozen_blocks = 0;
+    std::array<PlannerBlockDiagnostics, kPlannerDiagnosticBlockCount> blocks = {};
 };
 
 enum class ExecutionEventType {
@@ -85,5 +108,6 @@ bool planner_is_idle();
 std::size_t planner_free_blocks();
 void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();
+PlannerDiagnostics planner_diagnostics();
 
 }  // namespace ray2::planner

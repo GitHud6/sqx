@@ -616,4 +616,33 @@ std::uint64_t planner_completed_block_count() {
     return s_completed_block_count.load();
 }
 
+PlannerDiagnostics planner_diagnostics() {
+    PlannerDiagnostics diagnostics = {};
+    const bool executor_busy = stepper::timer_stepper_executor_is_busy();
+
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    diagnostics.queued_blocks = s_block_count;
+    diagnostics.frozen_blocks = std::min(
+        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    for (std::size_t offset = 0; offset < diagnostics.blocks.size() && offset < s_block_count; ++offset) {
+        const std::size_t index = (s_block_tail + offset) % kPlannerQueueLength;
+        const MotionBlock& block = s_block_buffer[index];
+        PlannerBlockDiagnostics& snapshot = diagnostics.blocks[offset];
+        snapshot.present = true;
+        snapshot.execution_id = block.execution_id;
+        snapshot.entry_speed_mm_per_min = std::sqrt(std::max(0.0, block.entry_speed_sqr));
+        snapshot.exit_speed_mm_per_min = std::sqrt(std::max(0.0, block.exit_speed_sqr));
+        snapshot.max_junction_speed_mm_per_min =
+            std::sqrt(std::max(0.0, block.max_junction_speed_sqr));
+        snapshot.programmed_rate_mm_per_min = block.programmed_rate_mm_per_min;
+        snapshot.state = offset == 0 && executor_busy
+                             ? PlannerBlockState::Executing
+                             : offset < diagnostics.frozen_blocks
+                                   ? PlannerBlockState::Frozen
+                                   : PlannerBlockState::Lookahead;
+    }
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    return diagnostics;
+}
+
 }  // namespace ray2::planner
