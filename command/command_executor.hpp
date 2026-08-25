@@ -19,6 +19,7 @@ enum class Error {
     MotionBusy,
     MotionRejected,
     PositionUnknown,
+    ProgramEnd,
 };
 
 enum class SystemState { Idle, Alarm, Jog };
@@ -69,6 +70,7 @@ struct ParsedBlock {
     // RayCube has no coolant hardware. This remains separate from M3/M4/M5
     // so a compatibility M9 cannot alter laser state.
     bool has_coolant_off = false;
+    bool has_program_end = false;
 };
 
 Error execute_line(const char* line, std::size_t length, ParserState& state);

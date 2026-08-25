@@ -122,6 +122,10 @@ Error parse_m_word(double value, ParsedBlock& parsed) {
     }
 
     switch (static_cast<int>(value)) {
+        case 2:
+            if (parsed.has_program_end) return Error::ModalGroupViolation;
+            parsed.has_program_end = true;
+            return Error::Ok;
         case 3:
             if (parsed.has_spindle_mode) return Error::ModalGroupViolation;
             parsed.spindle_mode = SpindleMode::Clockwise;
@@ -324,6 +328,16 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
                                       : state.planned_machine_position_mm[axis] + value_mm;
     }
 
+    if (parsed.has_program_end) {
+        if (has_axis) return Error::UnsupportedCommand;
+        const Error submit_error = submit_spindle_disable();
+        if (submit_error != Error::Ok) return submit_error;
+        next_state.spindle_mode = SpindleMode::Off;
+        motion::MotionRequest no_motion_request = {};
+        commit_parser_state(state, next_state, no_motion_request, false);
+        return Error::ProgramEnd;
+    }
+
     // Modal-only G00 is valid in file headers. The observed LightBurn trailer
     // also emits G1 S0 to update laser power without an XY move. Neither form
     // may create a zero-length planner block.
@@ -388,6 +402,7 @@ const char* error_text(Error error) {
         case Error::MotionBusy: return "motion-busy";
         case Error::MotionRejected: return "motion-rejected";
         case Error::PositionUnknown: return "position-unknown";
+        case Error::ProgramEnd: return "program-end";
     }
     return "unknown";
 }

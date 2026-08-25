@@ -106,6 +106,7 @@ void sd_job_task(void*) {
     s_job_state.store(JobState::Running);
     log_position("running");
     char line[kGcodeLineCapacity] = {};
+    bool program_ended = false;
     while (true) {
         if (reader->read_line(line, sizeof(line))) {
             s_job_current_line.fetch_add(1);
@@ -117,6 +118,10 @@ void sd_job_task(void*) {
                 const command::Error result =
                     ray2::protocol::command_dispatch_external(line, std::strlen(line));
                 if (result == command::Error::Ok) {
+                    break;
+                }
+                if (result == command::Error::ProgramEnd) {
+                    program_ended = true;
                     break;
                 }
                 if (result == command::Error::MotionBusy) {
@@ -132,6 +137,9 @@ void sd_job_task(void*) {
                 reader->close();
                 finish_job(JobState::Faulted, JobFault::CommandRejected, result);
                 return;
+            }
+            if (program_ended) {
+                break;
             }
             continue;
         }

@@ -41,7 +41,9 @@ bool write_text(const char* text) {
 }
 
 bool report_status(command::Error error) {
-    if (error == command::Error::Ok) return write_text("ok\r\n");
+    if (error == command::Error::Ok || error == command::Error::ProgramEnd) {
+        return write_text("ok\r\n");
+    }
 
     char response[80] = {};
     const int length = std::snprintf(response, sizeof(response), "error:%s\r\n", command::error_text(error));
