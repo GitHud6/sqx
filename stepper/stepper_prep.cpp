@@ -227,6 +227,21 @@ std::size_t stepper_segment_count() {
     return count;
 }
 
+std::size_t stepper_segment_count_for_next_block() {
+    portENTER_CRITICAL(&s_segment_lock);
+    std::size_t count = 0;
+    std::size_t index = s_segment_tail;
+    while (count < s_segment_count) {
+        ++count;
+        if (s_segment_buffer[index].completes_block) {
+            break;
+        }
+        index = (index + 1) % kStepSegmentBufferLength;
+    }
+    portEXIT_CRITICAL(&s_segment_lock);
+    return count;
+}
+
 const StepperProfile& stepper_prep_profile() {
     return s_profile;
 }

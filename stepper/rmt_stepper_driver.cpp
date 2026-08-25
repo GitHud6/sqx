@@ -8,6 +8,7 @@
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 
 #include "raycube_machine.hpp"
@@ -28,6 +29,24 @@ struct SegmentPayload {
 };
 
 std::array<SegmentPayload, kRmtSegmentTransactionDepth> s_segment_payloads = {};
+QueueHandle_t s_stream_pending_segments = nullptr;
+TaskHandle_t s_stream_task = nullptr;
+std::array<StepSegment, kRmtSegmentTransactionDepth> s_stream_inflight_segments = {};
+std::atomic<std::size_t> s_stream_inflight_count = 0;
+std::size_t s_stream_head = 0;
+std::size_t s_stream_tail = 0;
+RmtSegmentCompletedCallback s_stream_callback = nullptr;
+void* s_stream_callback_user_data = nullptr;
+
+bool IRAM_ATTR stream_transaction_done(rmt_channel_handle_t,
+                                       const rmt_tx_done_event_data_t*,
+                                       void*) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (s_stream_task != nullptr) {
+        vTaskNotifyGiveFromISR(s_stream_task, &higher_priority_task_woken);
+    }
+    return higher_priority_task_woken == pdTRUE;
+}
 
 esp_err_t release_sync_manager() {
     if (s_sync_manager == nullptr) {
@@ -159,6 +178,68 @@ void build_segment_payload(const StepSegment& segment, SegmentPayload& payload) 
     }
 }
 
+void stream_complete_transactions(const std::uint32_t completed_count) {
+    for (std::uint32_t count = 0; count < completed_count; ++count) {
+        if (s_stream_inflight_count.load() == 0) {
+            return;
+        }
+        const StepSegment segment = s_stream_inflight_segments[s_stream_tail];
+        s_stream_inflight_segments[s_stream_tail] = {};
+        s_stream_tail = (s_stream_tail + 1) % kRmtSegmentTransactionDepth;
+        s_stream_inflight_count.fetch_sub(1);
+        stepper_record_executed_steps(machine::Axis::X, segment.axis_steps[0]);
+        stepper_record_executed_steps(machine::Axis::Y, segment.axis_steps[1]);
+        if (s_stream_callback != nullptr) {
+            s_stream_callback(segment, true, s_stream_callback_user_data);
+        }
+    }
+}
+
+void stream_submit_pending_segments() {
+    StepSegment segment = {};
+    while (!s_feed_hold_requested.load() &&
+           s_stream_inflight_count.load() < kRmtSegmentTransactionDepth &&
+           xQueueReceive(s_stream_pending_segments, &segment, 0) == pdTRUE) {
+        const std::size_t slot = s_stream_head;
+        build_segment_payload(segment, s_segment_payloads[slot]);
+        SegmentPayload& payload = s_segment_payloads[slot];
+        if (s_stream_inflight_count.load() == 0) {
+            if (rmt_sync_reset(s_sync_manager) != ESP_OK) {
+                stepper_invalidate_position();
+                if (s_stream_callback != nullptr) {
+                    s_stream_callback(segment, false, s_stream_callback_user_data);
+                }
+                continue;
+            }
+        }
+        if (rmt_transmit(s_rmt_channels[0], s_copy_encoder, payload.symbols[0],
+                         payload.symbol_count * sizeof(rmt_symbol_word_t),
+                         &kQueuedTransmitConfig) != ESP_OK ||
+            rmt_transmit(s_rmt_channels[1], s_copy_encoder, payload.symbols[1],
+                         payload.symbol_count * sizeof(rmt_symbol_word_t),
+                         &kQueuedTransmitConfig) != ESP_OK) {
+            stepper_invalidate_position();
+            if (s_stream_callback != nullptr) {
+                s_stream_callback(segment, false, s_stream_callback_user_data);
+            }
+            continue;
+        }
+        s_stream_inflight_segments[slot] = segment;
+        s_stream_head = (s_stream_head + 1) % kRmtSegmentTransactionDepth;
+        s_stream_inflight_count.fetch_add(1);
+    }
+}
+
+void rmt_stepper_stream_task(void*) {
+    while (true) {
+        const std::uint32_t completed_count = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (completed_count != 0) {
+            stream_complete_transactions(completed_count);
+        }
+        stream_submit_pending_segments();
+    }
+}
+
 }  // namespace
 
 esp_err_t rmt_stepper_init() {
@@ -188,11 +269,20 @@ esp_err_t rmt_stepper_init() {
             return result;
         }
 
-        result = rmt_enable(s_rmt_channels[axis]);
+    result = rmt_enable(s_rmt_channels[axis]);
         if (result != ESP_OK) {
             release_rmt_resources();
             return result;
         }
+    }
+
+    const rmt_tx_event_callbacks_t callbacks = {
+        .on_trans_done = stream_transaction_done,
+    };
+    result = rmt_tx_register_event_callbacks(s_rmt_channels[0], &callbacks, nullptr);
+    if (result != ESP_OK) {
+        release_rmt_resources();
+        return result;
     }
 
     result = ensure_sync_manager();
@@ -333,6 +423,72 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
         stepper_record_executed_steps(machine::Axis::Y, emitted_steps[1]);
     }
     return result;
+}
+
+esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback callback, void* user_data) {
+    esp_err_t result = rmt_stepper_init();
+    if (result != ESP_OK) {
+        return result;
+    }
+    if (s_stream_pending_segments == nullptr) {
+        s_stream_pending_segments = xQueueCreate(kRmtSegmentTransactionDepth, sizeof(StepSegment));
+        if (s_stream_pending_segments == nullptr) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    s_stream_callback = callback;
+    s_stream_callback_user_data = user_data;
+    if (s_stream_task == nullptr &&
+        xTaskCreate(rmt_stepper_stream_task, "rmt_stepper", 4096, nullptr, 8,
+                    &s_stream_task) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+std::size_t rmt_stepper_stream_free_slots() {
+    if (s_stream_pending_segments == nullptr) {
+        return 0;
+    }
+    return static_cast<std::size_t>(uxQueueSpacesAvailable(s_stream_pending_segments));
+}
+
+bool rmt_stepper_stream_is_busy() {
+    return s_stream_inflight_count.load() != 0 ||
+           (s_stream_pending_segments != nullptr &&
+            uxQueueMessagesWaiting(s_stream_pending_segments) != 0);
+}
+
+esp_err_t rmt_stepper_stream_submit(const StepSegment* segments, std::size_t segment_count) {
+    if (!rmt_stepper_can_execute_segments(segments, segment_count) ||
+        s_stream_pending_segments == nullptr || s_stream_task == nullptr ||
+        rmt_stepper_stream_free_slots() < segment_count) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    for (std::size_t index = 0; index < segment_count; ++index) {
+        if (xQueueSend(s_stream_pending_segments, &segments[index], 0) != pdTRUE) {
+            return ESP_FAIL;
+        }
+    }
+    xTaskNotifyGive(s_stream_task);
+    return ESP_OK;
+}
+
+esp_err_t rmt_stepper_stream_drain() {
+    while (rmt_stepper_stream_is_busy()) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    return ESP_OK;
+}
+
+void rmt_stepper_stream_reset() {
+    if (s_stream_pending_segments != nullptr) {
+        xQueueReset(s_stream_pending_segments);
+    }
+    s_stream_inflight_segments = {};
+    s_stream_inflight_count.store(0);
+    s_stream_head = 0;
+    s_stream_tail = 0;
 }
 
 esp_err_t rmt_stepper_execute(machine::Axis axis,
@@ -492,6 +648,7 @@ esp_err_t rmt_stepper_stop() {
             first_error = result;
         }
     }
+    rmt_stepper_stream_reset();
     return first_error;
 }
 

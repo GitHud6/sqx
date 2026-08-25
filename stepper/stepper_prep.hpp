@@ -50,6 +50,7 @@ void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
 bool stepper_segment_pop(StepSegment& segment);
 std::size_t stepper_segment_count();
+std::size_t stepper_segment_count_for_next_block();
 const StepperProfile& stepper_prep_profile();
 
 }  // namespace ray2::stepper
