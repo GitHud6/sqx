@@ -5,6 +5,7 @@
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
+#include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
 
 extern "C" void app_main(void) {
@@ -16,6 +17,7 @@ extern "C" void app_main(void) {
         ESP_LOGW(tag, "SD card mount unavailable: %s", esp_err_to_name(sd_result));
     }
     ESP_ERROR_CHECK(ray2::driver::uart0_start());
+    ESP_ERROR_CHECK(ray2::stepper::timer_stepper_executor_init());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());

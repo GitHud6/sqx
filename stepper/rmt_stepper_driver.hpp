@@ -27,6 +27,14 @@ struct RmtStreamDiagnostics {
     std::uint64_t started_segments = 0;
     std::uint64_t completed_segments = 0;
     std::uint64_t failed_segments = 0;
+    std::uint64_t timeout_segments = 0;
+    bool active_segment = false;
+    std::uint64_t active_execution_id = 0;
+    std::int32_t active_x_steps = 0;
+    std::int32_t active_y_steps = 0;
+    std::int32_t active_major_steps = 0;
+    std::uint32_t active_duration_us = 0;
+    std::uint64_t active_elapsed_us = 0;
 };
 
 // This only allocates and enables RMT TX channels. It never transmits STEP pulses.

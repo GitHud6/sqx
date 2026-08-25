@@ -7,6 +7,7 @@
 
 #include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -37,18 +38,77 @@ std::atomic<std::uint64_t> s_stream_submitted_count = 0;
 std::atomic<std::uint64_t> s_stream_started_count = 0;
 std::atomic<std::uint64_t> s_stream_completed_count = 0;
 std::atomic<std::uint64_t> s_stream_failed_count = 0;
+std::atomic<std::uint64_t> s_stream_timeout_count = 0;
 std::size_t s_stream_head = 0;
 std::size_t s_stream_tail = 0;
 RmtSegmentCompletedCallback s_stream_callback = nullptr;
 RmtSegmentStartedCallback s_stream_started_callback = nullptr;
 void* s_stream_callback_user_data = nullptr;
+portMUX_TYPE s_stream_active_lock = portMUX_INITIALIZER_UNLOCKED;
+StepSegment s_stream_active_segment = {};
+TickType_t s_stream_active_started_tick = 0;
+bool s_stream_timeout_reported = false;
+
+constexpr std::uint64_t kStreamTimeoutMarginUs = 100000;
+constexpr TickType_t kStreamWatchdogPollTicks = pdMS_TO_TICKS(100);
+constexpr std::uint32_t kStreamNotifySubmitted = 1U << 0;
+constexpr std::uint32_t kStreamNotifyCompleted = 1U << 1;
+
+static_assert(kStreamWatchdogPollTicks > 0, "RMT stream watchdog polling must yield");
+
+void set_stream_active(const StepSegment& segment) {
+    portENTER_CRITICAL(&s_stream_active_lock);
+    s_stream_active_segment = segment;
+    s_stream_active_started_tick = xTaskGetTickCount();
+    s_stream_timeout_reported = false;
+    portEXIT_CRITICAL(&s_stream_active_lock);
+}
+
+void clear_stream_active() {
+    portENTER_CRITICAL(&s_stream_active_lock);
+    s_stream_active_segment = {};
+    s_stream_active_started_tick = 0;
+    s_stream_timeout_reported = false;
+    portEXIT_CRITICAL(&s_stream_active_lock);
+}
+
+void report_stream_timeout_if_needed() {
+    StepSegment segment = {};
+    std::uint64_t elapsed_us = 0;
+    bool report = false;
+    portENTER_CRITICAL(&s_stream_active_lock);
+    if (s_stream_active_started_tick != 0 && !s_stream_timeout_reported) {
+        const TickType_t elapsed_ticks = xTaskGetTickCount() - s_stream_active_started_tick;
+        elapsed_us = static_cast<std::uint64_t>(elapsed_ticks) * portTICK_PERIOD_MS * 1000U;
+        const std::uint64_t deadline_us =
+            static_cast<std::uint64_t>(s_stream_active_segment.duration_us) + kStreamTimeoutMarginUs;
+        if (elapsed_us > deadline_us) {
+            segment = s_stream_active_segment;
+            s_stream_timeout_reported = true;
+            report = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_stream_active_lock);
+
+    if (report) {
+        s_stream_timeout_count.fetch_add(1);
+        ESP_LOGE("rmt_stepper",
+                 "RMT-STREAM-TIMEOUT id=%llu steps=(%ld,%ld) major=%ld duration=%lu elapsed=%llu",
+                 static_cast<unsigned long long>(segment.execution_id),
+                 static_cast<long>(segment.axis_steps[0]), static_cast<long>(segment.axis_steps[1]),
+                 static_cast<long>(segment.major_steps),
+                 static_cast<unsigned long>(segment.duration_us),
+                 static_cast<unsigned long long>(elapsed_us));
+    }
+}
 
 bool IRAM_ATTR stream_transaction_done(rmt_channel_handle_t,
                                        const rmt_tx_done_event_data_t*,
                                        void*) {
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (s_stream_task != nullptr) {
-        vTaskNotifyGiveFromISR(s_stream_task, &higher_priority_task_woken);
+        xTaskNotifyFromISR(s_stream_task, kStreamNotifyCompleted, eSetBits,
+                           &higher_priority_task_woken);
     }
     return higher_priority_task_woken == pdTRUE;
 }
@@ -192,6 +252,7 @@ void stream_complete_transactions(const std::uint32_t completed_count) {
         s_stream_inflight_segments[s_stream_tail] = {};
         s_stream_tail = (s_stream_tail + 1) % kRmtSegmentTransactionDepth;
         s_stream_inflight_count.fetch_sub(1);
+        clear_stream_active();
         stepper_record_executed_steps(machine::Axis::X, segment.axis_steps[0]);
         stepper_record_executed_steps(machine::Axis::Y, segment.axis_steps[1]);
         s_stream_completed_count.fetch_add(1);
@@ -244,6 +305,7 @@ void stream_submit_pending_segments() {
         s_stream_head = slot;
         s_stream_inflight_segments[slot] = {};
         s_stream_inflight_count.fetch_sub(1);
+        clear_stream_active();
         stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
         s_stream_failed_count.fetch_add(1);
         if (s_stream_callback != nullptr) {
@@ -251,15 +313,18 @@ void stream_submit_pending_segments() {
         }
         return;
     }
+    set_stream_active(segment);
     s_stream_started_count.fetch_add(1);
 }
 
 void rmt_stepper_stream_task(void*) {
     while (true) {
-        const std::uint32_t completed_count = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        if (completed_count != 0) {
-            stream_complete_transactions(completed_count);
+        std::uint32_t notifications = 0;
+        xTaskNotifyWait(0, UINT32_MAX, &notifications, kStreamWatchdogPollTicks);
+        if ((notifications & kStreamNotifyCompleted) != 0) {
+            stream_complete_transactions(1);
         }
+        report_stream_timeout_if_needed();
         stream_submit_pending_segments();
     }
 }
@@ -500,6 +565,20 @@ RmtStreamDiagnostics rmt_stepper_stream_diagnostics() {
     diagnostics.started_segments = s_stream_started_count.load();
     diagnostics.completed_segments = s_stream_completed_count.load();
     diagnostics.failed_segments = s_stream_failed_count.load();
+    diagnostics.timeout_segments = s_stream_timeout_count.load();
+    portENTER_CRITICAL(&s_stream_active_lock);
+    diagnostics.active_segment = s_stream_active_started_tick != 0;
+    if (diagnostics.active_segment) {
+        diagnostics.active_execution_id = s_stream_active_segment.execution_id;
+        diagnostics.active_x_steps = s_stream_active_segment.axis_steps[0];
+        diagnostics.active_y_steps = s_stream_active_segment.axis_steps[1];
+        diagnostics.active_major_steps = s_stream_active_segment.major_steps;
+        diagnostics.active_duration_us = s_stream_active_segment.duration_us;
+        const TickType_t elapsed_ticks = xTaskGetTickCount() - s_stream_active_started_tick;
+        diagnostics.active_elapsed_us =
+            static_cast<std::uint64_t>(elapsed_ticks) * portTICK_PERIOD_MS * 1000U;
+    }
+    portEXIT_CRITICAL(&s_stream_active_lock);
     return diagnostics;
 }
 
@@ -515,7 +594,7 @@ esp_err_t rmt_stepper_stream_submit(const StepSegment* segments, std::size_t seg
         }
         s_stream_submitted_count.fetch_add(1);
     }
-    xTaskNotifyGive(s_stream_task);
+    xTaskNotify(s_stream_task, kStreamNotifySubmitted, eSetBits);
     return ESP_OK;
 }
 
@@ -534,6 +613,7 @@ void rmt_stepper_stream_reset() {
     s_stream_inflight_count.store(0);
     s_stream_head = 0;
     s_stream_tail = 0;
+    clear_stream_active();
 }
 
 esp_err_t rmt_stepper_execute(machine::Axis axis,
