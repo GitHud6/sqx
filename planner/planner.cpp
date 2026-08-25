@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 
 #include "raycube_machine.hpp"
+#include "timer_stepper_executor.hpp"
 #include "rmt_stepper_driver.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
@@ -32,6 +33,7 @@ std::size_t s_block_tail = 0;
 std::size_t s_block_planned = 0;
 std::size_t s_block_count = 0;
 portMUX_TYPE s_block_buffer_lock = portMUX_INITIALIZER_UNLOCKED;
+TaskHandle_t s_capacity_waiter = nullptr;
 std::atomic<ControlState> s_control_state = ControlState::Running;
 std::atomic<std::uint32_t> s_reset_generation = 0;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
@@ -435,6 +437,7 @@ void consume_rmt_completions() {
 }
 
 void discard_current_block(const MotionBlock& block) {
+    TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count != 0) {
         const MotionBlock& current = s_block_buffer[s_block_tail];
@@ -443,9 +446,13 @@ void discard_current_block(const MotionBlock& block) {
             s_block_tail = block_index_after(s_block_tail);
             --s_block_count;
             planner_recalculate_locked();
+            capacity_waiter = s_capacity_waiter;
         }
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    if (capacity_waiter != nullptr) {
+        xTaskNotifyGive(capacity_waiter);
+    }
 }
 
 void disable_axes(const bool enabled[]) {
@@ -611,6 +618,10 @@ bool execute_prepared_block(const MotionBlock& block) {
 }
 
 bool execute_block(const MotionBlock& block) {
+    if (block.type == MotionBlockType::Motion) {
+        return stepper::timer_stepper_executor_execute(
+                   block.plan.steps, block.plan.positive_direction, block.plan.step_interval_us) == ESP_OK;
+    }
     const std::int32_t major_steps = std::max(block.plan.steps[0], block.plan.steps[1]);
     if (major_steps <= 0 || block.plan.step_interval_us == 0 || stepper::stepper_init() != ESP_OK) {
         return false;
@@ -760,7 +771,7 @@ void planner_task(void*) {
             continue;
         }
 
-        if (block.type == MotionBlockType::Motion &&
+        if (false && block.type == MotionBlockType::Motion &&
             prefill_segment_ring(block)) {
             if (!dispatch_prepared_blocks()) {
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
@@ -869,6 +880,7 @@ void planner_resume() {
 void planner_reset() {
     s_reset_generation.fetch_add(1);
     s_control_state.store(ControlState::Running);
+    stepper::timer_stepper_executor_stop();
     stepper::rmt_stepper_stop();
     stepper::rmt_stepper_resume();
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
@@ -876,12 +888,17 @@ void planner_reset() {
     if (s_rmt_completion_queue != nullptr) {
         xQueueReset(s_rmt_completion_queue);
     }
+    TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);
     s_block_head = 0;
     s_block_tail = 0;
     s_block_planned = 0;
     s_block_count = 0;
+    capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    if (capacity_waiter != nullptr) {
+        xTaskNotifyGive(capacity_waiter);
+    }
     if (s_planner_task != nullptr) {
         xTaskNotifyGive(s_planner_task);
     }
@@ -906,6 +923,23 @@ std::size_t planner_free_blocks() {
     const std::size_t free_blocks = kPlannerQueueLength - s_block_count;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     return free_blocks;
+}
+
+void planner_wait_for_free_block() {
+    const TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
+    while (true) {
+        portENTER_CRITICAL(&s_block_buffer_lock);
+        if (s_block_count < kPlannerQueueLength) {
+            if (s_capacity_waiter == current_task) {
+                s_capacity_waiter = nullptr;
+            }
+            portEXIT_CRITICAL(&s_block_buffer_lock);
+            return;
+        }
+        s_capacity_waiter = current_task;
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
 }
 
 std::uint64_t planner_completed_block_count() {

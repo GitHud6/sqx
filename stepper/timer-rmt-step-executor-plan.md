@@ -83,6 +83,8 @@ timer 运行、ISR 次数和 segment 下溢统计，阶段二和阶段三才允�
 
 ## 阶段二：实现单脉冲 RMT 与 step timer 基础时序
 
+阶段状态：代码、构建与实机短线验收已通过。
+
 实现内容：
 
 1. 为 X/Y 保留 RMT 单脉冲配置：每次触发只输出一个固定宽度的 STEP 高电平及回落。
@@ -103,6 +105,20 @@ timer 运行、ISR 次数和 segment 下溢统计，阶段二和阶段三才允�
 - 已实机验证固定周期单轴、45 度和非等比 XY 直线。
 - 没有出现看门狗、重复脉冲、漏脉冲或方向错误。
 - 实机验收通过后提交本阶段改动，再开始阶段三。
+
+当前实现记录：阶段二已切换为 timer executor 独占 STEP 输出。启动时通过 ESP32-S3
+RMT LL 寄存器和 GPIO matrix 将 RMT0/RMT1 分别连接到 X/Y STEP 引脚，并在 APB
+FIFO 预装固定 3 us 高电平的单脉冲。GPTimer 以 1 MHz 运行；ISR 只执行整数
+Bresenham、触发对应 RMT 读指针重置和启动、累计实际步数，并在最后一步通知等待的
+Planner task。Planner 的 motion block 已只调用短线 timer executor，旧 RMT stream
+分支被禁用。阶段二限制主轴最多 256 步，超过限制会安全拒绝；Hold 尚未接入，留待
+阶段三的 segment ring 生命周期。
+
+验收记录：已使用 `$POS/SET=0,0`、`G91`、单轴正反 `G1 X1` / `G1 Y1` 与双轴正反
+`G1 X1 Y1` 短线命令完成实机验证。初版错误复用了 `planner_task` 的 task notification
+等待 timer 完成，导致后续 block 的入队通知被误当作前一 block 的完成事件；现已改为
+专用二值信号量。验证后连续命令正常执行，未再出现 `busy=1`、`execution-failure` 或
+`position-unknown`。
 
 ## 阶段三：由 timer ISR 连续消费 stepper segment ring
 

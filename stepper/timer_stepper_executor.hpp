@@ -4,6 +4,8 @@
 
 #include "esp_err.h"
 
+#include "raycube_machine.hpp"
+
 namespace ray2::stepper {
 
 struct TimerStepperDiagnostics {
@@ -14,9 +16,14 @@ struct TimerStepperDiagnostics {
     std::uint64_t segment_underflows = 0;
 };
 
-// Stage one only establishes the executor boundary. It does not allocate a
-// hardware timer, claim STEP pins, or emit pulses.
+// Stage two initialization remains passive until the new-driver-compatible
+// one-shot RMT backend is ready. It never emits a STEP pulse.
 esp_err_t timer_stepper_executor_init();
+esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[machine::kAxisCount],
+                                         const bool positive_direction[machine::kAxisCount],
+                                         std::uint32_t step_interval_us);
+bool timer_stepper_executor_is_busy();
+void timer_stepper_executor_stop();
 TimerStepperDiagnostics timer_stepper_executor_diagnostics();
 
 }  // namespace ray2::stepper

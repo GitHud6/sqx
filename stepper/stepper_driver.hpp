@@ -49,6 +49,7 @@ esp_err_t stepper_set_machine_position_mm(const double position_mm[machine::kAxi
 // Stepper execution backends call these only after a STEP pulse or RMT batch
 // has actually completed. Higher layers must not modify executed position.
 void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count);
+void stepper_record_executed_steps_from_isr(machine::Axis axis, std::int32_t step_count);
 void stepper_invalidate_position(
     PositionInvalidationReason reason = PositionInvalidationReason::ExecutionFailure);
 

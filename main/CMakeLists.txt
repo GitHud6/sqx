@@ -30,6 +30,7 @@ idf_component_register(SRCS "app_main.cpp"
                                     "../sd"
                                     "../stepper"
                        REQUIRES esp_driver_gpio
+                                esp_driver_gptimer
                                 esp_driver_ledc
                                 esp_driver_rmt
                                 esp_driver_uart

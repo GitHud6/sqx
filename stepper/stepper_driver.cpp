@@ -240,6 +240,14 @@ void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count) 
     portEXIT_CRITICAL(&s_position_lock);
 }
 
+void IRAM_ATTR stepper_record_executed_steps_from_isr(machine::Axis axis, std::int32_t step_count) {
+    std::size_t index = 0;
+    if (step_count <= 0 || !axis_index(axis, index)) return;
+    portENTER_CRITICAL_ISR(&s_position_lock);
+    record_steps_locked(index, step_count);
+    portEXIT_CRITICAL_ISR(&s_position_lock);
+}
+
 void stepper_invalidate_position(const PositionInvalidationReason reason) {
     portENTER_CRITICAL(&s_position_lock);
     s_position_state = PositionState::Invalidated;
