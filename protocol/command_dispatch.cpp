@@ -14,6 +14,7 @@
 #include "sdcard_driver.hpp"
 #include "planner.hpp"
 #include "stepper_driver.hpp"
+#include "stepper_prep.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -152,18 +153,23 @@ bool report_position_status() {
     const double planned_y = s_parser_state.planned_machine_position_mm[1];
     xSemaphoreGive(s_parser_mutex);
     const std::size_t queued_blocks = planner::kPlannerQueueLength - planner::planner_free_blocks();
+    const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
 
-    char response[384] = {};
+    char response[512] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,completed_pending=%zu)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
         planned_x - position.millimeters[0], planned_y - position.millimeters[1],
-        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()));
+        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()),
+        segment.queued_segments, segment.segment_capacity, segment.high_water_segments,
+        static_cast<unsigned long long>(segment.underflow_count), segment.active ? 1 : 0,
+        static_cast<unsigned long long>(segment.active_execution_id),
+        segment.pending_completions);
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
