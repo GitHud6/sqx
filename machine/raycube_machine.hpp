@@ -20,6 +20,8 @@ struct AxisHardware {
     float max_rate_mm_per_min;
     float acceleration_mm_per_sec2;
     float max_travel_mm;
+    int limit_pin;
+    bool limit_active_low;
 };
 
 struct LaserHardware {

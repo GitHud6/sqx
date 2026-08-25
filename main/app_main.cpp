@@ -2,6 +2,7 @@
 
 #include "laser_driver.hpp"
 #include "laser_planner_adapter.hpp"
+#include "limit_switch_driver.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
@@ -18,6 +19,7 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(ray2::driver::uart0_start());
     ESP_ERROR_CHECK(ray2::stepper::timer_stepper_executor_init());
+    ESP_ERROR_CHECK(ray2::driver::limit_switch_driver_init());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());

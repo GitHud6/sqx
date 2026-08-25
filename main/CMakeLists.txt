@@ -1,6 +1,7 @@
 idf_component_register(SRCS "app_main.cpp"
                             "../command/command_executor.cpp"
                             "../driver/rmt_step_pulse_driver.cpp"
+                            "../driver/limit_switch_driver.cpp"
                             "../driver/step_timer_driver.cpp"
                             "../driver/uart0_driver.cpp"
                             "../driver/sdcard_driver.cpp"

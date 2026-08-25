@@ -9,6 +9,7 @@
 
 #include "command_executor.hpp"
 #include "homing_service.hpp"
+#include "limit_switch_driver.hpp"
 #include "sd_command_handler.hpp"
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
@@ -154,6 +155,23 @@ bool is_homing_command(const char* line, const std::size_t length) {
     return equals_ignore_case(line, length, "$H");
 }
 
+bool is_homing_status_command(const char* line, const std::size_t length) {
+    return equals_ignore_case(line, length, "$H/STATUS");
+}
+
+bool report_homing_status() {
+    const homing::HomingState state = homing::homing_state();
+    const driver::LimitSwitchState limits = driver::limit_switch_driver_state();
+    char response[128] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "[HOMING:state=%s|limit=(x=%d,y=%d)|debounce=%lu]\r\nok\r\n",
+        homing::homing_state_text(state), limits.triggered[0] ? 1 : 0,
+        limits.triggered[1] ? 1 : 0, static_cast<unsigned long>(limits.debounce_events));
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
 bool start_homing() {
     switch (homing::homing_start()) {
         case homing::StartResult::Accepted:
@@ -278,6 +296,9 @@ bool command_dispatch(const char* line, std::size_t length) {
         }
     }
 
+    if (is_homing_status_command(line, length)) {
+        return report_homing_status();
+    }
     if (is_homing_command(line, length)) {
         return start_homing();
     }
