@@ -105,6 +105,12 @@ void IRAM_ATTR rmt_step_pulse_driver_stop_from_isr() {
     }
 }
 
+void IRAM_ATTR rmt_step_pulse_driver_stop_axis_from_isr(const std::size_t axis_index) {
+    if (axis_index >= machine::kAxisCount || !s_initialized.load(std::memory_order_relaxed)) return;
+    rmt_ll_tx_stop(&RMT, axis_index);
+    rmt_ll_tx_reset_pointer(&RMT, axis_index);
+}
+
 bool rmt_step_pulse_driver_is_initialized() {
     return s_initialized.load();
 }

@@ -20,6 +20,7 @@ struct RmtStepPulseDiagnostics {
 esp_err_t rmt_step_pulse_driver_init();
 void rmt_step_pulse_driver_stop();
 void IRAM_ATTR rmt_step_pulse_driver_stop_from_isr();
+void IRAM_ATTR rmt_step_pulse_driver_stop_axis_from_isr(std::size_t axis_index);
 bool rmt_step_pulse_driver_is_initialized();
 
 // ISR-safe. The caller must pass an initialized axis index in range.

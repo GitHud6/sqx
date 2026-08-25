@@ -1,5 +1,6 @@
 #include "homing_service.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -22,79 +23,83 @@ std::atomic<HomingState> s_state = HomingState::Idle;
 std::atomic<bool> s_seek_active = false;
 std::atomic<bool> s_limit_triggered = false;
 std::atomic<std::size_t> s_seek_axis = 0;
+std::atomic<std::uint32_t> s_active_axes_mask = 0;
+std::atomic<std::uint32_t> s_triggered_axes_mask = 0;
 TaskHandle_t s_seek_task = nullptr;
 
 constexpr double kSeekRateMmPerMin = 2000.0;
-constexpr double kLocateRateMmPerMin = 500.0;
 constexpr double kPullOffMm = 3.0;
 constexpr double kSeekDistanceMultiplier = 1.1;
 constexpr TickType_t kMotionTimeoutMargin = pdMS_TO_TICKS(2000);
 std::atomic<bool> s_stop_on_limit = false;
 
-enum class SystemMotionResult {
-    Completed,
-    LimitTriggered,
-    TimedOut,
-    StartFailed,
-};
-
 void IRAM_ATTR on_limit_switch(std::size_t axis, void*) {
+    const std::uint32_t axis_bit = 1U << axis;
+    const std::uint32_t active_axes = s_active_axes_mask.load(std::memory_order_relaxed);
     if (!s_seek_active.load(std::memory_order_relaxed) ||
-        !s_stop_on_limit.load(std::memory_order_relaxed) ||
-        axis != s_seek_axis.load(std::memory_order_relaxed)) {
+        !s_stop_on_limit.load(std::memory_order_relaxed) || (active_axes & axis_bit) == 0) {
         return;
     }
     s_limit_triggered.store(true, std::memory_order_relaxed);
-    stepper::timer_stepper_executor_stop_from_isr();
-    if (s_seek_task != nullptr) {
+    s_triggered_axes_mask.fetch_or(axis_bit, std::memory_order_relaxed);
+    if (stepper::timer_stepper_executor_stop_axis_from_isr(axis) && s_seek_task != nullptr) {
         BaseType_t task_woken = pdFALSE;
         vTaskNotifyGiveFromISR(s_seek_task, &task_woken);
         if (task_woken == pdTRUE) portYIELD_FROM_ISR();
     }
 }
 
-SystemMotionResult run_axis_motion(const std::size_t axis_index, const bool positive_direction,
-                                   const double distance_mm, const double rate_mm_per_min,
-                                   const bool stop_on_limit) {
-    const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
-    const std::int32_t steps = static_cast<std::int32_t>(
-        std::llround(distance_mm * hardware.steps_per_mm));
-    const std::uint32_t interval_us = static_cast<std::uint32_t>(std::llround(
-        60000000.0 / (rate_mm_per_min * hardware.steps_per_mm)));
-    if (steps <= 0 || interval_us <= 3) return SystemMotionResult::StartFailed;
+bool axis_limit_is_triggered(std::size_t axis_index);
+bool wait_for_limit_state(std::size_t axis_index, bool triggered);
 
-    stepper::StepSegment segment = {};
-    segment.execution_id = 1;
-    segment.axis_steps[axis_index] = steps;
-    segment.positive_direction[axis_index] = positive_direction;
-    segment.major_steps = steps;
-    segment.duration_us = interval_us * static_cast<std::uint32_t>(steps);
-    segment.step_interval_us = interval_us;
-    segment.system_motion = true;
-
-    s_seek_axis.store(axis_index, std::memory_order_relaxed);
-    s_limit_triggered.store(false, std::memory_order_relaxed);
-    s_stop_on_limit.store(stop_on_limit, std::memory_order_release);
-    ulTaskNotifyTake(pdTRUE, 0);
-    const esp_err_t result = stepper::timer_stepper_executor_start_segment(segment);
-    if (result != ESP_OK) {
-        s_stop_on_limit.store(false, std::memory_order_release);
-        return SystemMotionResult::StartFailed;
+bool run_parallel_homing() {
+    constexpr std::uint32_t kBothAxes = (1U << machine::kAxisCount) - 1U;
+    if (axis_limit_is_triggered(0) || axis_limit_is_triggered(1)) return false;
+    stepper::StepSegment seek = {};
+    seek.execution_id = 1;
+    seek.system_motion = true;
+    seek.step_interval_us = static_cast<std::uint32_t>(std::llround(
+        60000000.0 / (kSeekRateMmPerMin * machine::raycube_axis(machine::Axis::X).steps_per_mm)));
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
+        seek.axis_steps[axis] = static_cast<std::int32_t>(std::llround(
+            hardware.max_travel_mm * kSeekDistanceMultiplier * hardware.steps_per_mm));
+        seek.positive_direction[axis] = hardware.homing_seek_positive_direction;
+        seek.major_steps = std::max(seek.major_steps, seek.axis_steps[axis]);
     }
-
-    const TickType_t timeout = pdMS_TO_TICKS(segment.duration_us / 1000U) + kMotionTimeoutMargin;
+    seek.duration_us = seek.step_interval_us * static_cast<std::uint32_t>(seek.major_steps);
+    s_active_axes_mask.store(kBothAxes, std::memory_order_relaxed);
+    s_triggered_axes_mask.store(0, std::memory_order_relaxed);
+    s_stop_on_limit.store(true, std::memory_order_release);
+    if (stepper::timer_stepper_executor_start_segment(seek) != ESP_OK) return false;
+    const TickType_t timeout = pdMS_TO_TICKS(seek.duration_us / 1000U) + kMotionTimeoutMargin;
     const TickType_t deadline = xTaskGetTickCount() + timeout;
     while (stepper::timer_stepper_executor_is_busy() &&
-           !s_limit_triggered.load(std::memory_order_acquire) &&
            static_cast<std::int32_t>(deadline - xTaskGetTickCount()) > 0) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
-    const bool limit_triggered = s_limit_triggered.load(std::memory_order_acquire);
-    const bool timed_out = stepper::timer_stepper_executor_is_busy() && !limit_triggered;
+    const bool both_triggered = s_triggered_axes_mask.load(std::memory_order_acquire) == kBothAxes;
     stepper::timer_stepper_executor_stop();
     s_stop_on_limit.store(false, std::memory_order_release);
-    if (limit_triggered) return SystemMotionResult::LimitTriggered;
-    return timed_out ? SystemMotionResult::TimedOut : SystemMotionResult::Completed;
+    if (!both_triggered) return false;
+
+    stepper::StepSegment pull_off = {};
+    pull_off.execution_id = 1;
+    pull_off.system_motion = true;
+    pull_off.step_interval_us = static_cast<std::uint32_t>(std::llround(
+        60000000.0 / (kSeekRateMmPerMin * machine::raycube_axis(machine::Axis::X).steps_per_mm)));
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
+        pull_off.axis_steps[axis] = static_cast<std::int32_t>(std::llround(kPullOffMm * hardware.steps_per_mm));
+        pull_off.positive_direction[axis] = !hardware.homing_seek_positive_direction;
+        pull_off.major_steps = std::max(pull_off.major_steps, pull_off.axis_steps[axis]);
+    }
+    pull_off.duration_us = pull_off.step_interval_us * static_cast<std::uint32_t>(pull_off.major_steps);
+    s_active_axes_mask.store(0, std::memory_order_relaxed);
+    if (stepper::timer_stepper_executor_start_segment(pull_off) != ESP_OK) return false;
+    while (stepper::timer_stepper_executor_is_busy()) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+    stepper::timer_stepper_executor_stop();
+    return wait_for_limit_state(0, false) && wait_for_limit_state(1, false);
 }
 
 bool axis_limit_is_triggered(const std::size_t axis_index) {
@@ -104,23 +109,6 @@ bool axis_limit_is_triggered(const std::size_t axis_index) {
 bool wait_for_limit_state(const std::size_t axis_index, const bool triggered) {
     vTaskDelay(pdMS_TO_TICKS(10));
     return axis_limit_is_triggered(axis_index) == triggered;
-}
-
-bool run_axis_homing(const std::size_t axis_index) {
-    const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
-    const bool seek_direction = hardware.homing_seek_positive_direction;
-    if (axis_limit_is_triggered(axis_index)) return false;
-    if (run_axis_motion(axis_index, seek_direction,
-                        hardware.max_travel_mm * kSeekDistanceMultiplier,
-                        kSeekRateMmPerMin, true) != SystemMotionResult::LimitTriggered) return false;
-    if (run_axis_motion(axis_index, !seek_direction, kPullOffMm,
-                        kLocateRateMmPerMin, false) != SystemMotionResult::Completed ||
-        !wait_for_limit_state(axis_index, false)) return false;
-    if (run_axis_motion(axis_index, seek_direction, kPullOffMm * 2.0,
-                        kLocateRateMmPerMin, true) != SystemMotionResult::LimitTriggered) return false;
-    return run_axis_motion(axis_index, !seek_direction, kPullOffMm,
-                           kLocateRateMmPerMin, false) == SystemMotionResult::Completed &&
-           wait_for_limit_state(axis_index, false);
 }
 
 bool commit_machine_origin() {
@@ -133,9 +121,7 @@ bool commit_machine_origin() {
 
 void homing_task(void*) {
     laser::laser_disable();
-    const bool x_complete = run_axis_homing(static_cast<std::size_t>(machine::Axis::X));
-    const bool y_complete = x_complete && run_axis_homing(static_cast<std::size_t>(machine::Axis::Y));
-    const bool completed = y_complete && commit_machine_origin();
+    const bool completed = run_parallel_homing() && commit_machine_origin();
     s_stop_on_limit.store(false, std::memory_order_release);
     if (!completed) stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     s_state.store(completed ? HomingState::Completed : HomingState::Faulted,
@@ -222,6 +208,8 @@ StartResult homing_start_seek_test(const TestAxis axis) {
     if (driver::limit_switch_driver_state().triggered[axis_index]) return StartResult::Unavailable;
 
     s_seek_axis.store(axis_index, std::memory_order_relaxed);
+    s_active_axes_mask.store(1U << axis_index, std::memory_order_relaxed);
+    s_triggered_axes_mask.store(0, std::memory_order_relaxed);
     s_limit_triggered.store(false, std::memory_order_relaxed);
     s_stop_on_limit.store(true, std::memory_order_release);
     s_seek_active.store(true, std::memory_order_release);

@@ -27,6 +27,8 @@ esp_err_t timer_stepper_executor_start_from_segment_ring();
 bool timer_stepper_executor_is_busy();
 void timer_stepper_executor_stop();
 void IRAM_ATTR timer_stepper_executor_stop_from_isr();
+// Stops one active system-motion axis. Returns true when no system-motion axis remains.
+bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(std::size_t axis_index);
 TimerStepperDiagnostics timer_stepper_executor_diagnostics();
 
 }  // namespace ray2::stepper

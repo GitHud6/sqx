@@ -111,9 +111,10 @@ planned position = (0.0000, 0.0000)
 - 协议层、归零服务和普通 G-code 的所有权边界明确。
 - 未接入限位硬件时不会误报归零成功。
 
-当前实现状态：`protocol` 已在 `execute_line()` 前分流 `$H`，空闲时启动归零任务；
-Planner、SD 作业或已运行归零任务存在时返回 `error:homing-busy`。归零完成前不会把位置
-标记为 `known`，逻辑原点提交仍保留给阶段五。
+当前实现状态：已新增 `homing/homing_service` 的状态与启动接口，`protocol` 已将 `$H`
+从 `execute_line()` 前分流。阶段二、三的限位与 system-motion 后端尚未存在，因此空闲时
+`$H` 返回 `error:homing-unavailable`；Planner 有运动、SD 作业活跃或未来归零任务运行时
+返回 `error:homing-busy`。当前实现不会改变激光、脉冲、Planner 或位置可信状态。
 
 ### 阶段二：限位驱动与电平确认
 
@@ -136,10 +137,10 @@ Planner、SD 作业或已运行归零任务存在时返回 `error:homing-busy`�
 - 软件能够可靠区分每个轴的触发状态。
 - 未确认有效电平时不进入寻零运动阶段。
 
-当前实现状态：`driver/limit_switch_driver` 以 GPIO42（X）和 GPIO2（Y）输入、内部上拉、
-低电平触发配置运行。任意边沿 ISR 仅执行归零回调和去抖任务通知；任务在 5 ms 后更新原子快照。
-`$H/STATUS` 输出 `limit=(x=0|1,y=0|1)` 和去抖次数。归零 seek/locate 时，ISR 会停止脉冲；
-非归零运动不使用该限位回调替代软限位。
+当前实现状态：已增加 `driver/limit_switch_driver`，以 GPIO42（X）和 GPIO2（Y）输入、内部上拉、
+低电平触发配置运行。任意边沿 ISR 仅唤醒 driver 去抖任务；任务在 5 ms 后更新原子快照。
+`$H/STATUS` 输出 `limit=(x=0|1,y=0|1)` 和去抖次数，供实机确认有效电平。该阶段尚未把限位
+接到硬限位停机或 `$H` system-motion，故不会因手动触发而影响当前运动。
 
 ### 阶段三：单轴 system-motion 与限位停止
 
@@ -187,8 +188,6 @@ pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回�
 确认开关已释放。任一步失败均进入 `faulted` 并保持位置失效；此阶段仍不提交逻辑
 原点，等待阶段五处理。
 
-实机验收结果：X/Y 均已确认使用正方向寻限位，完整 `$H` 流程能回到预期物理位置。
-
 ### 阶段五：提交逻辑零点与恢复普通运动
 
 实现内容：
@@ -211,11 +210,6 @@ pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回�
 - `$H` 成功是唯一将启动后未知/失效位置恢复为可信机床坐标的路径。
 - 软限位、绝对坐标、SD 雕刻和手动运动均使用同一 `(0,0)` 基准。
 
-阶段五当前实现状态：仅在 X/Y 两轴完整归零均成功后，homing 才调用
-`stepper_set_machine_position_mm({0,0})`。随后通过 protocol 提供的受锁接口同步其私有
-`ParserState.planned_machine_position_mm`；任一操作失败均再次使位置失效。归零任务在这两步
-完成后才退出 `running`，从而恢复普通运动入口。
-
 ## 阶段三当前实现状态
 
 已接入仅用于实机验收的 `$H/TEST=X` 与 `$H/TEST=Y`。命令分别以固定 seek
@@ -224,8 +218,8 @@ pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回�
 走满 `1.1 * max_travel` 时进入 `faulted`，用于验证传感器失效时不会持续撞机。
 
 归零 seek 的物理方向由 `machine::AxisHardware::homing_seek_positive_direction`
-独立定义，不从普通 G-code 坐标正负推导。为使逻辑正坐标从限位零点进入幅面，X、Y
-均采用 `direction_inverted=true` 与逻辑负向 seek；两项组合后仍保持实际机械 seek 方向不变。
+独立定义，不从普通 G-code 坐标正负推导。当前 X 轴已按实机结果设为正方向，Y 轴保持
+原负方向，待其单轴测试确认后再固化。
 
 实机验收命令：
 

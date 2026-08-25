@@ -32,6 +32,7 @@ struct MotionState {
     bool completes_block = false;
     bool system_motion = false;
     bool x_is_major = true;
+    bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
 };
 
@@ -64,12 +65,16 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
 
     const machine::Axis major_axis = s_motion.x_is_major ? machine::Axis::X : machine::Axis::Y;
     const machine::Axis minor_axis = s_motion.x_is_major ? machine::Axis::Y : machine::Axis::X;
-    trigger_pulse(static_cast<std::size_t>(major_axis));
-    stepper_record_executed_steps_from_isr(major_axis, 1);
+    if (!s_motion.axis_stopped[static_cast<std::size_t>(major_axis)]) {
+        trigger_pulse(static_cast<std::size_t>(major_axis));
+        stepper_record_executed_steps_from_isr(major_axis, 1);
+    }
     s_motion.error += s_motion.minor_steps;
     if (s_motion.error * 2 >= s_motion.major_steps) {
-        trigger_pulse(static_cast<std::size_t>(minor_axis));
-        stepper_record_executed_steps_from_isr(minor_axis, 1);
+        if (!s_motion.axis_stopped[static_cast<std::size_t>(minor_axis)]) {
+            trigger_pulse(static_cast<std::size_t>(minor_axis));
+            stepper_record_executed_steps_from_isr(minor_axis, 1);
+        }
         s_motion.error -= s_motion.major_steps;
     }
 
@@ -221,6 +226,29 @@ void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
     portENTER_CRITICAL_ISR(&s_motion_lock);
     s_busy.store(false, std::memory_order_relaxed);
     portEXIT_CRITICAL_ISR(&s_motion_lock);
+}
+
+bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(const std::size_t axis_index) {
+    if (axis_index >= machine::kAxisCount || !s_initialized.load(std::memory_order_relaxed)) return false;
+    portENTER_CRITICAL_ISR(&s_motion_lock);
+    if (!s_busy.load(std::memory_order_relaxed) || !s_motion.system_motion) {
+        portEXIT_CRITICAL_ISR(&s_motion_lock);
+        return false;
+    }
+    s_motion.axis_stopped[axis_index] = true;
+    driver::rmt_step_pulse_driver_stop_axis_from_isr(axis_index);
+    bool all_stopped = true;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (s_motion.axis_steps[axis] > 0 && !s_motion.axis_stopped[axis]) all_stopped = false;
+    }
+    if (all_stopped) {
+        driver::step_timer_driver_stop_from_isr();
+        laser::laser_disable_from_isr();
+        stepper_segment_clear_active_from_isr();
+        s_busy.store(false, std::memory_order_relaxed);
+    }
+    portEXIT_CRITICAL_ISR(&s_motion_lock);
+    return all_stopped;
 }
 
 TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
