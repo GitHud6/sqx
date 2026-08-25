@@ -45,6 +45,7 @@ std::array<stepper::StepSegment, stepper::kStepSegmentBufferLength> s_segment_ba
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
+constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr char kLogTag[] = "planner";
 
 const char* position_state_text(stepper::PositionState state) {
@@ -319,6 +320,30 @@ void disable_axes(const bool enabled[]) {
     }
 }
 
+void disable_all_axes() {
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        stepper::stepper_set_enabled(static_cast<machine::Axis>(axis), false);
+    }
+}
+
+void disable_axes_after_idle() {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool queue_empty_before_wait = s_block_count == 0;
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    if (!queue_empty_before_wait) {
+        return;
+    }
+
+    vTaskDelay(kStepperIdleLockTime);
+
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool queue_still_empty = s_block_count == 0;
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    if (queue_still_empty) {
+        disable_all_axes();
+    }
+}
+
 bool configure_axes(const MotionBlock& block, bool enabled[]) {
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         if (block.plan.steps[axis] == 0) {
@@ -396,7 +421,9 @@ bool execute_block(const MotionBlock& block) {
             segmented_started = true;
         }
         if (segmented_started || !segmented_result) {
-            disable_axes(enabled);
+            if (!segmented_result) {
+                disable_axes(enabled);
+            }
             return segmented_result;
         }
     }
@@ -423,7 +450,9 @@ bool execute_block(const MotionBlock& block) {
         const bool completed = stepper::rmt_stepper_execute(
             active_axis, block.plan.steps[axis_index], block.plan.step_interval_us) == ESP_OK;
         emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
-        disable_axes(enabled);
+        if (!completed) {
+            disable_axes(enabled);
+        }
         return completed;
     }
     if (active_axis_count == 2 &&
@@ -431,7 +460,9 @@ bool execute_block(const MotionBlock& block) {
         const bool completed = stepper::rmt_stepper_execute_xy(
             block.plan.steps, block.plan.step_interval_us) == ESP_OK;
         emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
-        disable_axes(enabled);
+        if (!completed) {
+            disable_axes(enabled);
+        }
         return completed;
     }
 
@@ -462,7 +493,9 @@ bool execute_block(const MotionBlock& block) {
         completed = step + 1 == major_steps;
     }
 
-    disable_axes(enabled);
+    if (!completed) {
+        disable_axes(enabled);
+    }
     emit_execution_event(ExecutionEventType::SegmentBatchCompleted, &block, &fallback_segment);
     return completed;
 }
@@ -501,6 +534,7 @@ void planner_task(void*) {
         }
         discard_current_block(block);
         report_queue_drained();
+        disable_axes_after_idle();
     }
 }
 
