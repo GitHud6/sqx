@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "command_executor.hpp"
+#include "homing_service.hpp"
 #include "sd_command_handler.hpp"
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
@@ -149,6 +150,22 @@ const char* position_invalidation_reason_text(stepper::PositionInvalidationReaso
     return "unknown";
 }
 
+bool is_homing_command(const char* line, const std::size_t length) {
+    return equals_ignore_case(line, length, "$H");
+}
+
+bool start_homing() {
+    switch (homing::homing_start()) {
+        case homing::StartResult::Accepted:
+            return write_text("ok\r\n");
+        case homing::StartResult::Busy:
+            return write_text("error:homing-busy\r\n");
+        case homing::StartResult::Unavailable:
+            return write_text("error:homing-unavailable\r\n");
+    }
+    return write_text("error:homing-unavailable\r\n");
+}
+
 const char* planner_block_state_text(planner::PlannerBlockState state) {
     switch (state) {
         case planner::PlannerBlockState::Executing: return "executing";
@@ -259,6 +276,10 @@ bool command_dispatch(const char* line, std::size_t length) {
         if (s_parser_mutex == nullptr) {
             return write_text("error:protocol-no-mem\r\n");
         }
+    }
+
+    if (is_homing_command(line, length)) {
+        return start_homing();
     }
 
     PositionCommand position_command = {};
