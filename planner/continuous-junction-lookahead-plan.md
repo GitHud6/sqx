@@ -147,6 +147,26 @@ lookahead=(
 - 连续提交短线段不会因为 planner 重算引入数据竞争、重复 block 或位置错误；
 - 单轴、XY 直线、正反方向切换仍能通过现有实机测试。
 
+当前实现状态：planner 已将已发布 segment 的 source block 前缀视为冻结窗口，仅跳过该
+前缀的重算；冻结前缀之后的 block 会继续执行 junction、反向减速和正向加速 pass。首个
+未冻结 block 从冻结前缀既定的出口速度衔接，绝不反向修改已发布 segment。
+
+实机验收记录：沿用阶段一的首段 `G1 X20 F600` 加 7 条同方向 `G1 X0.05 F600`，首段
+执行期间得到：
+
+```text
+planner=(queued=8,frozen=1,completed=0)
+lookahead=(
+  b0=executing#1:e=0.0,x=0.0,j=0.0,n=600.0;
+  b1=lookahead#2:e=0.0,x=424.3,j=inf,n=600.0;
+  b2=lookahead#3:e=424.3,x=600.0,j=inf,n=600.0
+)
+```
+
+`b0` 已在后续 block 到达前冻结，故其出口仍为零；`b1` 和 `b2` 已获得连续的
+`exit/entry=424.3 mm/min`。共线同向 junction 的 `j=inf` 符合几何约束。阶段二验收通过；
+进入阶段三前需提交本阶段改动。
+
 ### 阶段三：实现连续 junction 速度
 
 实现内容：

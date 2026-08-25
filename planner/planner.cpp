@@ -102,15 +102,27 @@ void planner_recalculate_locked() {
         return;
     }
 
-    // Published segments own their velocity profile until the ISR reports
-    // completion, so look-ahead must not rewrite their source blocks.
-    if (s_segment_prepared_blocks.load(std::memory_order_acquire) != 0) {
+    // A published segment owns its source block profile. Only that prefix is
+    // frozen; later blocks must remain eligible for look-ahead when more G-code
+    // arrives while the executor is running.
+    const std::size_t frozen_blocks = std::min(
+        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    const std::size_t mutable_blocks = s_block_count - frozen_blocks;
+    if (mutable_blocks == 0) {
+        s_block_planned = s_block_head;
         return;
     }
 
     std::size_t index = s_block_tail;
-    MotionBlock* previous = nullptr;
-    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+    for (std::size_t offset = 0; offset < frozen_blocks; ++offset) {
+        index = block_index_after(index);
+    }
+    const std::size_t mutable_tail = index;
+    MotionBlock* previous = frozen_blocks == 0
+                                ? nullptr
+                                : &s_block_buffer[(mutable_tail + kPlannerQueueLength - 1) % kPlannerQueueLength];
+
+    for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
         block.entry_speed_sqr = 0.0;
         block.exit_speed_sqr = 0.0;
@@ -129,10 +141,12 @@ void planner_recalculate_locked() {
         index = block_index_after(index);
     }
 
-    // Reverse pass: every block must be able to decelerate to the next entry speed.
+    // Reverse pass: every mutable block must be able to decelerate to the next
+    // mutable block's entry speed. The tail of the mutable window still has to
+    // reach rest because no later block has been accepted yet.
     double next_entry_speed_sqr = 0.0;
     index = (s_block_head + kPlannerQueueLength - 1) % kPlannerQueueLength;
-    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+    for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
         if (is_plannable_motion(block)) {
             const double deceleration_limit = next_entry_speed_sqr +
@@ -145,15 +159,22 @@ void planner_recalculate_locked() {
         index = (index + kPlannerQueueLength - 1) % kPlannerQueueLength;
     }
 
-    // Forward pass: an entry speed must also be reachable from the prior block.
-    double previous_entry_speed_sqr = 0.0;
+    // Forward pass: the first mutable block inherits the already frozen
+    // prefix's exit speed. It may not rewrite that exit speed, but all later
+    // mutable junctions remain free to converge on a continuous profile.
+    const double frozen_exit_speed_sqr = frozen_blocks == 0
+                                             ? 0.0
+                                             : previous->exit_speed_sqr;
+    double previous_entry_speed_sqr = frozen_exit_speed_sqr;
     double previous_acceleration_mm_per_sec2 = 0.0;
     double previous_millimeters = 0.0;
-    index = s_block_tail;
-    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+    index = mutable_tail;
+    for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
         if (is_plannable_motion(block)) {
-            if (offset != 0) {
+            if (offset == 0) {
+                block.entry_speed_sqr = std::min(block.entry_speed_sqr, frozen_exit_speed_sqr);
+            } else {
                 const double acceleration_limit = previous_entry_speed_sqr +
                     2.0 * previous_acceleration_mm_per_sec2 * 60.0 * 60.0 * previous_millimeters;
                 block.entry_speed_sqr = std::min(block.entry_speed_sqr, acceleration_limit);
@@ -169,11 +190,11 @@ void planner_recalculate_locked() {
         index = block_index_after(index);
     }
 
-    index = s_block_tail;
-    for (std::size_t offset = 0; offset < s_block_count; ++offset) {
+    index = mutable_tail;
+    for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
         const std::size_t next_index = block_index_after(index);
-        if (offset + 1 < s_block_count && is_plannable_motion(s_block_buffer[next_index])) {
+        if (offset + 1 < mutable_blocks && is_plannable_motion(s_block_buffer[next_index])) {
             block.exit_speed_sqr = s_block_buffer[next_index].entry_speed_sqr;
         }
         index = next_index;
