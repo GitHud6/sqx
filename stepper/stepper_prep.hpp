@@ -41,6 +41,8 @@ struct StepSegment {
     motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     bool completes_block = false;
+    // System motions use the timer/RMT pulse backend without planner completion.
+    bool system_motion = false;
 };
 
 enum class SegmentCompletionStatus : std::uint8_t {

@@ -30,6 +30,7 @@ struct MotionState {
     std::int64_t error = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
+    bool system_motion = false;
     bool x_is_major = true;
     bool enabled[machine::kAxisCount] = {};
 };
@@ -45,6 +46,7 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.x_is_major = segment.axis_steps[0] >= segment.axis_steps[1];
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
+    motion.system_motion = segment.system_motion;
     return motion;
 }
 
@@ -84,7 +86,12 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             stepper_completion_publish_from_isr(completion, &task_woken);
         }
         StepSegment next = {};
-        if (stepper_segment_consume(next)) {
+        if (completed_motion.system_motion) {
+            s_busy.store(false);
+            driver::step_timer_driver_stop_from_isr();
+            laser::laser_disable_from_isr();
+            stepper_segment_clear_active_from_isr();
+        } else if (stepper_segment_consume(next)) {
             for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
                 stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
                                                 next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
@@ -203,6 +210,17 @@ void timer_stepper_executor_stop() {
     motion = s_motion; s_motion = {}; s_busy.store(false);
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
+}
+
+void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
+    if (!s_initialized.load(std::memory_order_relaxed)) return;
+    driver::step_timer_driver_stop_from_isr();
+    driver::rmt_step_pulse_driver_stop_from_isr();
+    laser::laser_disable_from_isr();
+    stepper_segment_clear_active_from_isr();
+    portENTER_CRITICAL_ISR(&s_motion_lock);
+    s_busy.store(false, std::memory_order_relaxed);
+    portEXIT_CRITICAL_ISR(&s_motion_lock);
 }
 
 TimerStepperDiagnostics timer_stepper_executor_diagnostics() {

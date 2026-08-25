@@ -97,6 +97,14 @@ void rmt_step_pulse_driver_stop() {
     }
 }
 
+void IRAM_ATTR rmt_step_pulse_driver_stop_from_isr() {
+    if (!s_initialized.load(std::memory_order_relaxed)) return;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        rmt_ll_tx_stop(&RMT, axis);
+        rmt_ll_tx_reset_pointer(&RMT, axis);
+    }
+}
+
 bool rmt_step_pulse_driver_is_initialized() {
     return s_initialized.load();
 }

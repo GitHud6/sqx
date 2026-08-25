@@ -1,10 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 
 namespace ray2::driver {
+
+using LimitSwitchIsrCallback = void (*)(std::size_t axis, void* user_data);
 
 struct LimitSwitchState {
     bool triggered[2] = {};
@@ -15,5 +19,6 @@ struct LimitSwitchState {
 esp_err_t limit_switch_driver_init();
 bool limit_switch_driver_is_initialized();
 LimitSwitchState limit_switch_driver_state();
+void limit_switch_driver_set_isr_callback(LimitSwitchIsrCallback callback, void* user_data);
 
 }  // namespace ray2::driver

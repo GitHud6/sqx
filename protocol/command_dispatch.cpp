@@ -159,6 +159,19 @@ bool is_homing_status_command(const char* line, const std::size_t length) {
     return equals_ignore_case(line, length, "$H/STATUS");
 }
 
+bool parse_homing_seek_test_command(const char* line, const std::size_t length,
+                                    homing::TestAxis& axis) {
+    if (equals_ignore_case(line, length, "$H/TEST=X")) {
+        axis = homing::TestAxis::X;
+        return true;
+    }
+    if (equals_ignore_case(line, length, "$H/TEST=Y")) {
+        axis = homing::TestAxis::Y;
+        return true;
+    }
+    return false;
+}
+
 bool report_homing_status() {
     const homing::HomingState state = homing::homing_state();
     const driver::LimitSwitchState limits = driver::limit_switch_driver_state();
@@ -174,6 +187,18 @@ bool report_homing_status() {
 
 bool start_homing() {
     switch (homing::homing_start()) {
+        case homing::StartResult::Accepted:
+            return write_text("ok\r\n");
+        case homing::StartResult::Busy:
+            return write_text("error:homing-busy\r\n");
+        case homing::StartResult::Unavailable:
+            return write_text("error:homing-unavailable\r\n");
+    }
+    return write_text("error:homing-unavailable\r\n");
+}
+
+bool start_homing_seek_test(const homing::TestAxis axis) {
+    switch (homing::homing_start_seek_test(axis)) {
         case homing::StartResult::Accepted:
             return write_text("ok\r\n");
         case homing::StartResult::Busy:
@@ -299,8 +324,15 @@ bool command_dispatch(const char* line, std::size_t length) {
     if (is_homing_status_command(line, length)) {
         return report_homing_status();
     }
+    homing::TestAxis homing_test_axis = {};
+    if (parse_homing_seek_test_command(line, length, homing_test_axis)) {
+        return start_homing_seek_test(homing_test_axis);
+    }
     if (is_homing_command(line, length)) {
         return start_homing();
+    }
+    if (homing::homing_is_active()) {
+        return write_text("error:homing-busy\r\n");
     }
 
     PositionCommand position_command = {};

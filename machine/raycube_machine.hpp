@@ -15,6 +15,8 @@ struct AxisHardware {
     int direction_pin;
     int disable_pin;
     bool direction_inverted;
+    // Physical direction that moves this axis toward its homing switch.
+    bool homing_seek_positive_direction;
     bool disable_active_high;
     float steps_per_mm;
     float max_rate_mm_per_min;

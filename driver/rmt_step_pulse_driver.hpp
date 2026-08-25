@@ -19,6 +19,7 @@ struct RmtStepPulseDiagnostics {
 // Owns the ESP32-S3 RMT channels and GPIO matrix used for STEP pulse output.
 esp_err_t rmt_step_pulse_driver_init();
 void rmt_step_pulse_driver_stop();
+void IRAM_ATTR rmt_step_pulse_driver_stop_from_isr();
 bool rmt_step_pulse_driver_is_initialized();
 
 // ISR-safe. The caller must pass an initialized axis index in range.

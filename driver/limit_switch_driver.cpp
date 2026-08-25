@@ -17,6 +17,8 @@ std::atomic<bool> s_initialized = false;
 std::atomic<std::uint32_t> s_triggered_mask = 0;
 std::atomic<std::uint32_t> s_debounce_events = 0;
 TaskHandle_t s_debounce_task = nullptr;
+LimitSwitchIsrCallback s_isr_callback = nullptr;
+void* s_isr_callback_user_data = nullptr;
 
 std::uint32_t read_triggered_mask() {
     std::uint32_t mask = 0;
@@ -29,8 +31,12 @@ std::uint32_t read_triggered_mask() {
     return mask;
 }
 
-void IRAM_ATTR limit_switch_isr(void*) {
+void IRAM_ATTR limit_switch_isr(void* user_data) {
+    const std::size_t axis = reinterpret_cast<std::uintptr_t>(user_data);
     BaseType_t task_woken = pdFALSE;
+    if (s_isr_callback != nullptr) {
+        s_isr_callback(axis, s_isr_callback_user_data);
+    }
     if (s_debounce_task != nullptr) {
         vTaskNotifyGiveFromISR(s_debounce_task, &task_woken);
     }
@@ -80,8 +86,9 @@ esp_err_t limit_switch_driver_init() {
     }
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
         const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
-        const esp_err_t result = gpio_isr_handler_add(static_cast<gpio_num_t>(axis.limit_pin),
-                                                       limit_switch_isr, nullptr);
+        const esp_err_t result = gpio_isr_handler_add(
+            static_cast<gpio_num_t>(axis.limit_pin), limit_switch_isr,
+            reinterpret_cast<void*>(static_cast<std::uintptr_t>(index)));
         if (result != ESP_OK) return result;
     }
 
@@ -100,6 +107,11 @@ LimitSwitchState limit_switch_driver_state() {
         .triggered = {(mask & 1U) != 0, (mask & 2U) != 0},
         .debounce_events = s_debounce_events.load(std::memory_order_relaxed),
     };
+}
+
+void limit_switch_driver_set_isr_callback(const LimitSwitchIsrCallback callback, void* user_data) {
+    s_isr_callback = callback;
+    s_isr_callback_user_data = user_data;
 }
 
 }  // namespace ray2::driver

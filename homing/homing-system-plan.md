@@ -204,6 +204,36 @@ planned position = (0.0000, 0.0000)
 - `$H` 成功是唯一将启动后未知/失效位置恢复为可信机床坐标的路径。
 - 软限位、绝对坐标、SD 雕刻和手动运动均使用同一 `(0,0)` 基准。
 
+## 阶段三当前实现状态
+
+已接入仅用于实机验收的 `$H/TEST=X` 与 `$H/TEST=Y`。命令分别以固定 seek
+速度沿对应轴配置的物理寻限位方向运动；命中本轴限位后由 ISR 立即停止 GPTimer/RMT 脉冲并通知
+归零任务完成清理。单轴测试不会写入逻辑原点，位置保持 `invalidated`；未触发限位而
+走满 `1.1 * max_travel` 时进入 `faulted`，用于验证传感器失效时不会持续撞机。
+
+归零 seek 的物理方向由 `machine::AxisHardware::homing_seek_positive_direction`
+独立定义，不从普通 G-code 坐标正负推导。当前 X 轴已按实机结果设为正方向，Y 轴保持
+原负方向，待其单轴测试确认后再固化。
+
+实机验收命令：
+
+```text
+$H/TEST=X
+$H/STATUS
+$POS/STATUS
+
+$H/TEST=Y
+$H/STATUS
+$POS/STATUS
+```
+
+验收标准：设备从对应限位外、幅面中部开始。人工触发对应开关时，仅该轴立即停止；
+`$H/STATUS` 显示 `completed`，`$POS/STATUS` 显示 `state=invalidated`。若不触发开关，
+受控行程结束后 `$H/STATUS` 显示 `faulted`，且不写入 `(0,0)`。
+
+实机验收结果：X 轴 `$H/TEST=X` 已按配置的物理正方向到达 X 限位。停止后
+`$H/STATUS` 返回 `state=completed|limit=(x=1,y=0)`，单轴过程没有写入逻辑原点。
+
 ## 当前非目标
 
 - G28/G30/G92/G10 等扩展坐标命令。

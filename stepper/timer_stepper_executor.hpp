@@ -2,6 +2,7 @@
 
 #include <cstdint>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 
 #include "raycube_machine.hpp"
@@ -25,6 +26,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment);
 esp_err_t timer_stepper_executor_start_from_segment_ring();
 bool timer_stepper_executor_is_busy();
 void timer_stepper_executor_stop();
+void IRAM_ATTR timer_stepper_executor_stop_from_isr();
 TimerStepperDiagnostics timer_stepper_executor_diagnostics();
 
 }  // namespace ray2::stepper
