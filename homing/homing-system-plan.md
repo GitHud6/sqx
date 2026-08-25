@@ -111,10 +111,9 @@ planned position = (0.0000, 0.0000)
 - 协议层、归零服务和普通 G-code 的所有权边界明确。
 - 未接入限位硬件时不会误报归零成功。
 
-当前实现状态：已新增 `homing/homing_service` 的状态与启动接口，`protocol` 已将 `$H`
-从 `execute_line()` 前分流。阶段二、三的限位与 system-motion 后端尚未存在，因此空闲时
-`$H` 返回 `error:homing-unavailable`；Planner 有运动、SD 作业活跃或未来归零任务运行时
-返回 `error:homing-busy`。当前实现不会改变激光、脉冲、Planner 或位置可信状态。
+当前实现状态：`protocol` 已在 `execute_line()` 前分流 `$H`，空闲时启动归零任务；
+Planner、SD 作业或已运行归零任务存在时返回 `error:homing-busy`。归零完成前不会把位置
+标记为 `known`，逻辑原点提交仍保留给阶段五。
 
 ### 阶段二：限位驱动与电平确认
 
@@ -137,10 +136,10 @@ planned position = (0.0000, 0.0000)
 - 软件能够可靠区分每个轴的触发状态。
 - 未确认有效电平时不进入寻零运动阶段。
 
-当前实现状态：已增加 `driver/limit_switch_driver`，以 GPIO42（X）和 GPIO2（Y）输入、内部上拉、
-低电平触发配置运行。任意边沿 ISR 仅唤醒 driver 去抖任务；任务在 5 ms 后更新原子快照。
-`$H/STATUS` 输出 `limit=(x=0|1,y=0|1)` 和去抖次数，供实机确认有效电平。该阶段尚未把限位
-接到硬限位停机或 `$H` system-motion，故不会因手动触发而影响当前运动。
+当前实现状态：`driver/limit_switch_driver` 以 GPIO42（X）和 GPIO2（Y）输入、内部上拉、
+低电平触发配置运行。任意边沿 ISR 仅执行归零回调和去抖任务通知；任务在 5 ms 后更新原子快照。
+`$H/STATUS` 输出 `limit=(x=0|1,y=0|1)` 和去抖次数。归零 seek/locate 时，ISR 会停止脉冲；
+非归零运动不使用该限位回调替代软限位。
 
 ### 阶段三：单轴 system-motion 与限位停止
 
@@ -182,6 +181,14 @@ planned position = (0.0000, 0.0000)
 
 - 两个轴的机械寻零过程可重复执行，且不会撞击限位后持续推压。
 
+当前实现状态：正式 `$H` 已进入顺序 X、Y 归零任务。每个轴执行 `seek -> 3 mm
+pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回退使用
+500 mm/min。seek/locate 必须由本轴限位中断，两个回退阶段必须完整走完且经去抖快照
+确认开关已释放。任一步失败均进入 `faulted` 并保持位置失效；此阶段仍不提交逻辑
+原点，等待阶段五处理。
+
+实机验收结果：X/Y 均已确认使用正方向寻限位，完整 `$H` 流程能回到预期物理位置。
+
 ### 阶段五：提交逻辑零点与恢复普通运动
 
 实现内容：
@@ -212,8 +219,7 @@ planned position = (0.0000, 0.0000)
 走满 `1.1 * max_travel` 时进入 `faulted`，用于验证传感器失效时不会持续撞机。
 
 归零 seek 的物理方向由 `machine::AxisHardware::homing_seek_positive_direction`
-独立定义，不从普通 G-code 坐标正负推导。当前 X 轴已按实机结果设为正方向，Y 轴保持
-原负方向，待其单轴测试确认后再固化。
+独立定义，不从普通 G-code 坐标正负推导。X、Y 两轴均已按实机结果设为正方向。
 
 实机验收命令：
 
