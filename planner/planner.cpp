@@ -121,6 +121,7 @@ void planner_recalculate_locked() {
     MotionBlock* previous = frozen_blocks == 0
                                 ? nullptr
                                 : &s_block_buffer[(mutable_tail + kPlannerQueueLength - 1) % kPlannerQueueLength];
+    const double frozen_exit_speed_sqr = previous == nullptr ? 0.0 : previous->exit_speed_sqr;
 
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
@@ -162,9 +163,6 @@ void planner_recalculate_locked() {
     // Forward pass: the first mutable block inherits the already frozen
     // prefix's exit speed. It may not rewrite that exit speed, but all later
     // mutable junctions remain free to converge on a continuous profile.
-    const double frozen_exit_speed_sqr = frozen_blocks == 0
-                                             ? 0.0
-                                             : previous->exit_speed_sqr;
     double previous_entry_speed_sqr = frozen_exit_speed_sqr;
     double previous_acceleration_mm_per_sec2 = 0.0;
     double previous_millimeters = 0.0;
