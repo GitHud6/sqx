@@ -8,6 +8,7 @@
 #include "limit_switch_driver.hpp"
 #include "laser_driver.hpp"
 #include "planner.hpp"
+#include "command_dispatch.hpp"
 #include "raycube_machine.hpp"
 #include "sd_job_service.hpp"
 #include "stepper_driver.hpp"
@@ -122,15 +123,24 @@ bool run_axis_homing(const std::size_t axis_index) {
            wait_for_limit_state(axis_index, false);
 }
 
+bool commit_machine_origin() {
+    const double origin[machine::kAxisCount] = {};
+    if (stepper::stepper_set_machine_position_mm(origin) != ESP_OK) return false;
+    if (protocol::command_sync_parser_position_from_machine() == command::Error::Ok) return true;
+    stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
+    return false;
+}
+
 void homing_task(void*) {
     laser::laser_disable();
     const bool x_complete = run_axis_homing(static_cast<std::size_t>(machine::Axis::X));
     const bool y_complete = x_complete && run_axis_homing(static_cast<std::size_t>(machine::Axis::Y));
+    const bool completed = y_complete && commit_machine_origin();
     s_stop_on_limit.store(false, std::memory_order_release);
-    s_seek_active.store(false, std::memory_order_release);
-    stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
-    s_state.store(y_complete ? HomingState::Completed : HomingState::Faulted,
+    if (!completed) stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
+    s_state.store(completed ? HomingState::Completed : HomingState::Faulted,
                   std::memory_order_release);
+    s_seek_active.store(false, std::memory_order_release);
     s_seek_task = nullptr;
     vTaskDelete(nullptr);
 }

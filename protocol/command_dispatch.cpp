@@ -422,4 +422,15 @@ command::Error command_dispatch_external(const char* line, std::size_t length) {
     return result;
 }
 
+command::Error command_sync_parser_position_from_machine() {
+    if (s_parser_mutex == nullptr) {
+        s_parser_mutex = xSemaphoreCreateMutex();
+        if (s_parser_mutex == nullptr) return command::Error::MotionRejected;
+    }
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const command::Error result = command::sync_parser_position_from_machine(s_parser_state);
+    xSemaphoreGive(s_parser_mutex);
+    return result;
+}
+
 }  // namespace ray2::protocol

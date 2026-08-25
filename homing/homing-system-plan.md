@@ -211,6 +211,11 @@ pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回�
 - `$H` 成功是唯一将启动后未知/失效位置恢复为可信机床坐标的路径。
 - 软限位、绝对坐标、SD 雕刻和手动运动均使用同一 `(0,0)` 基准。
 
+阶段五当前实现状态：仅在 X/Y 两轴完整归零均成功后，homing 才调用
+`stepper_set_machine_position_mm({0,0})`。随后通过 protocol 提供的受锁接口同步其私有
+`ParserState.planned_machine_position_mm`；任一操作失败均再次使位置失效。归零任务在这两步
+完成后才退出 `running`，从而恢复普通运动入口。
+
 ## 阶段三当前实现状态
 
 已接入仅用于实机验收的 `$H/TEST=X` 与 `$H/TEST=Y`。命令分别以固定 seek
@@ -219,7 +224,8 @@ pull-off -> locate -> final pull-off`；seek 使用 2000 mm/min，locate 与回�
 走满 `1.1 * max_travel` 时进入 `faulted`，用于验证传感器失效时不会持续撞机。
 
 归零 seek 的物理方向由 `machine::AxisHardware::homing_seek_positive_direction`
-独立定义，不从普通 G-code 坐标正负推导。X、Y 两轴均已按实机结果设为正方向。
+独立定义，不从普通 G-code 坐标正负推导。为使逻辑正坐标从限位零点进入幅面，X、Y
+均采用 `direction_inverted=true` 与逻辑负向 seek；两项组合后仍保持实际机械 seek 方向不变。
 
 实机验收命令：
 
