@@ -13,6 +13,7 @@
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
 #include "planner.hpp"
+#include "rmt_stepper_driver.hpp"
 #include "stepper_driver.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
@@ -134,21 +135,42 @@ const char* position_state_text(stepper::PositionState state) {
     return "invalid";
 }
 
+const char* position_invalidation_reason_text(stepper::PositionInvalidationReason reason) {
+    switch (reason) {
+        case stepper::PositionInvalidationReason::None: return "none";
+        case stepper::PositionInvalidationReason::Startup: return "startup";
+        case stepper::PositionInvalidationReason::Reset: return "reset";
+        case stepper::PositionInvalidationReason::RmtFailure: return "rmt-failure";
+        case stepper::PositionInvalidationReason::ExecutionFailure: return "execution-failure";
+    }
+    return "unknown";
+}
+
 bool report_position_status() {
     const stepper::MachinePosition position = stepper::machine_position();
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const double planned_x = s_parser_state.planned_machine_position_mm[0];
     const double planned_y = s_parser_state.planned_machine_position_mm[1];
     xSemaphoreGive(s_parser_mutex);
+    const stepper::RmtStreamDiagnostics rmt = stepper::rmt_stepper_stream_diagnostics();
+    const std::size_t queued_blocks = planner::kPlannerQueueLength - planner::planner_free_blocks();
 
-    char response[256] = {};
+    char response[512] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|rmt=(pending=%zu,inflight=%zu,submitted=%llu,started=%llu,completed=%llu,failed=%llu)]\r\nok\r\n",
         position_state_text(position.state),
+        position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
-        position.millimeters[0], position.millimeters[1], planned_x, planned_y);
+        position.millimeters[0], position.millimeters[1], planned_x, planned_y,
+        planned_x - position.millimeters[0], planned_y - position.millimeters[1],
+        queued_blocks, static_cast<unsigned long long>(planner::planner_completed_block_count()),
+        rmt.pending_segments, rmt.inflight_segments,
+        static_cast<unsigned long long>(rmt.submitted_segments),
+        static_cast<unsigned long long>(rmt.started_segments),
+        static_cast<unsigned long long>(rmt.completed_segments),
+        static_cast<unsigned long long>(rmt.failed_segments));
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }

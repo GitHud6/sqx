@@ -18,6 +18,7 @@ std::array<Direction, machine::kAxisCount> s_directions = {
 };
 std::array<std::int64_t, machine::kAxisCount> s_machine_position_steps = {};
 PositionState s_position_state = PositionState::Unknown;
+PositionInvalidationReason s_position_invalidation_reason = PositionInvalidationReason::Startup;
 portMUX_TYPE s_position_lock = portMUX_INITIALIZER_UNLOCKED;
 
 esp_err_t set_output_level(int pin, bool high) {
@@ -178,6 +179,7 @@ MachinePosition machine_position() {
     portENTER_CRITICAL(&s_position_lock);
     position.steps = s_machine_position_steps;
     position.state = s_position_state;
+    position.invalidation_reason = s_position_invalidation_reason;
     portEXIT_CRITICAL(&s_position_lock);
 
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
@@ -222,6 +224,7 @@ esp_err_t stepper_set_machine_position_mm(const double position_mm[machine::kAxi
     portENTER_CRITICAL(&s_position_lock);
     s_machine_position_steps = steps;
     s_position_state = PositionState::Known;
+    s_position_invalidation_reason = PositionInvalidationReason::None;
     portEXIT_CRITICAL(&s_position_lock);
     return ESP_OK;
 }
@@ -237,9 +240,10 @@ void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count) 
     portEXIT_CRITICAL(&s_position_lock);
 }
 
-void stepper_invalidate_position() {
+void stepper_invalidate_position(const PositionInvalidationReason reason) {
     portENTER_CRITICAL(&s_position_lock);
     s_position_state = PositionState::Invalidated;
+    s_position_invalidation_reason = reason;
     portEXIT_CRITICAL(&s_position_lock);
 }
 

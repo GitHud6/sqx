@@ -20,10 +20,19 @@ enum class PositionState {
     Invalidated,
 };
 
+enum class PositionInvalidationReason {
+    None,
+    Startup,
+    Reset,
+    RmtFailure,
+    ExecutionFailure,
+};
+
 struct MachinePosition {
     std::array<std::int64_t, machine::kAxisCount> steps = {};
     std::array<double, machine::kAxisCount> millimeters = {};
     PositionState state = PositionState::Unknown;
+    PositionInvalidationReason invalidation_reason = PositionInvalidationReason::Startup;
 };
 
 esp_err_t stepper_init();
@@ -40,6 +49,7 @@ esp_err_t stepper_set_machine_position_mm(const double position_mm[machine::kAxi
 // Stepper execution backends call these only after a STEP pulse or RMT batch
 // has actually completed. Higher layers must not modify executed position.
 void stepper_record_executed_steps(machine::Axis axis, std::int32_t step_count);
-void stepper_invalidate_position();
+void stepper_invalidate_position(
+    PositionInvalidationReason reason = PositionInvalidationReason::ExecutionFailure);
 
 }  // namespace ray2::stepper

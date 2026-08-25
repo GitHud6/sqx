@@ -33,6 +33,10 @@ QueueHandle_t s_stream_pending_segments = nullptr;
 TaskHandle_t s_stream_task = nullptr;
 std::array<StepSegment, kRmtSegmentTransactionDepth> s_stream_inflight_segments = {};
 std::atomic<std::size_t> s_stream_inflight_count = 0;
+std::atomic<std::uint64_t> s_stream_submitted_count = 0;
+std::atomic<std::uint64_t> s_stream_started_count = 0;
+std::atomic<std::uint64_t> s_stream_completed_count = 0;
+std::atomic<std::uint64_t> s_stream_failed_count = 0;
 std::size_t s_stream_head = 0;
 std::size_t s_stream_tail = 0;
 RmtSegmentCompletedCallback s_stream_callback = nullptr;
@@ -190,6 +194,7 @@ void stream_complete_transactions(const std::uint32_t completed_count) {
         s_stream_inflight_count.fetch_sub(1);
         stepper_record_executed_steps(machine::Axis::X, segment.axis_steps[0]);
         stepper_record_executed_steps(machine::Axis::Y, segment.axis_steps[1]);
+        s_stream_completed_count.fetch_add(1);
         if (s_stream_callback != nullptr) {
             s_stream_callback(segment, true, s_stream_callback_user_data);
         }
@@ -210,7 +215,8 @@ void stream_submit_pending_segments() {
     build_segment_payload(segment, s_segment_payloads[slot]);
     SegmentPayload& payload = s_segment_payloads[slot];
     if (rmt_sync_reset(s_sync_manager) != ESP_OK) {
-        stepper_invalidate_position();
+        stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
+        s_stream_failed_count.fetch_add(1);
         if (s_stream_callback != nullptr) {
             s_stream_callback(segment, false, s_stream_callback_user_data);
         }
@@ -238,11 +244,14 @@ void stream_submit_pending_segments() {
         s_stream_head = slot;
         s_stream_inflight_segments[slot] = {};
         s_stream_inflight_count.fetch_sub(1);
-        stepper_invalidate_position();
+        stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
+        s_stream_failed_count.fetch_add(1);
         if (s_stream_callback != nullptr) {
             s_stream_callback(segment, false, s_stream_callback_user_data);
         }
+        return;
     }
+    s_stream_started_count.fetch_add(1);
 }
 
 void rmt_stepper_stream_task(void*) {
@@ -424,7 +433,7 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
     if (x_active) {
         result = rmt_tx_wait_all_done(s_rmt_channels[0], -1);
         if (result != ESP_OK) {
-            stepper_invalidate_position();
+            stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
             return result;
         }
         stepper_record_executed_steps(machine::Axis::X, emitted_steps[0]);
@@ -432,7 +441,7 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
     if (y_active) {
         result = rmt_tx_wait_all_done(s_rmt_channels[1], -1);
         if (result != ESP_OK) {
-            stepper_invalidate_position();
+            stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
             return result;
         }
         stepper_record_executed_steps(machine::Axis::Y, emitted_steps[1]);
@@ -444,6 +453,10 @@ esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback completed_callbac
                                    RmtSegmentStartedCallback started_callback,
                                    void* user_data) {
     esp_err_t result = rmt_stepper_init();
+    if (result != ESP_OK) {
+        return result;
+    }
+    result = ensure_sync_manager();
     if (result != ESP_OK) {
         return result;
     }
@@ -477,6 +490,19 @@ bool rmt_stepper_stream_is_busy() {
             uxQueueMessagesWaiting(s_stream_pending_segments) != 0);
 }
 
+RmtStreamDiagnostics rmt_stepper_stream_diagnostics() {
+    RmtStreamDiagnostics diagnostics = {};
+    if (s_stream_pending_segments != nullptr) {
+        diagnostics.pending_segments = uxQueueMessagesWaiting(s_stream_pending_segments);
+    }
+    diagnostics.inflight_segments = s_stream_inflight_count.load();
+    diagnostics.submitted_segments = s_stream_submitted_count.load();
+    diagnostics.started_segments = s_stream_started_count.load();
+    diagnostics.completed_segments = s_stream_completed_count.load();
+    diagnostics.failed_segments = s_stream_failed_count.load();
+    return diagnostics;
+}
+
 esp_err_t rmt_stepper_stream_submit(const StepSegment* segments, std::size_t segment_count) {
     if (!rmt_stepper_can_execute_segments(segments, segment_count) ||
         s_stream_pending_segments == nullptr || s_stream_task == nullptr ||
@@ -487,6 +513,7 @@ esp_err_t rmt_stepper_stream_submit(const StepSegment* segments, std::size_t seg
         if (xQueueSend(s_stream_pending_segments, &segments[index], 0) != pdTRUE) {
             return ESP_FAIL;
         }
+        s_stream_submitted_count.fetch_add(1);
     }
     xTaskNotifyGive(s_stream_task);
     return ESP_OK;
@@ -549,7 +576,7 @@ esp_err_t rmt_stepper_execute(machine::Axis axis,
         }
         result = wait_for_tx_done(axis, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
-            stepper_invalidate_position();
+            stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
             return result;
         }
         stepper_record_executed_steps(axis, chunk_steps);
@@ -625,13 +652,13 @@ esp_err_t rmt_stepper_execute_xy(const std::int32_t steps[machine::kAxisCount],
         }
         result = wait_for_tx_done(machine::Axis::X, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
-            stepper_invalidate_position();
+            stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
             return result;
         }
         stepper_record_executed_steps(machine::Axis::X, x_emitted_steps);
         result = wait_for_tx_done(machine::Axis::Y, chunk_steps, step_interval_us);
         if (result != ESP_OK) {
-            stepper_invalidate_position();
+            stepper_invalidate_position(PositionInvalidationReason::RmtFailure);
             return result;
         }
         stepper_record_executed_steps(machine::Axis::Y, y_emitted_steps);

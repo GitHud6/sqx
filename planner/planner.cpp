@@ -414,7 +414,7 @@ void consume_rmt_completions() {
     while (s_rmt_completion_queue != nullptr &&
            xQueueReceive(s_rmt_completion_queue, &completion, 0) == pdTRUE) {
         if (!completion.completed) {
-            stepper::stepper_invalidate_position();
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::RmtFailure);
             continue;
         }
         if (!completion.segment.completes_block) {
@@ -422,7 +422,7 @@ void consume_rmt_completions() {
         }
         MotionBlock block = {};
         if (!current_block_snapshot(block) || block.execution_id != completion.segment.execution_id) {
-            stepper::stepper_invalidate_position();
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             continue;
         }
         ++s_completed_block_count;
@@ -754,7 +754,7 @@ void planner_task(void*) {
         }
 
         if (!wait_for_run_permission(block.reset_generation)) {
-            stepper::stepper_invalidate_position();
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
             emit_execution_event(ExecutionEventType::BlockCancelled, &block);
             report_queue_drained();
             continue;
@@ -763,7 +763,7 @@ void planner_task(void*) {
         if (block.type == MotionBlockType::Motion &&
             prefill_segment_ring(block)) {
             if (!dispatch_prepared_blocks()) {
-                stepper::stepper_invalidate_position();
+                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
                 emit_execution_event(ExecutionEventType::BlockFailed, &block);
                 clear_prepared_segment_ring();
                 discard_current_block(block);
@@ -782,10 +782,10 @@ void planner_task(void*) {
             discard_prepared_block(block);
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
         } else if (s_reset_generation.load() != block.reset_generation) {
-            stepper::stepper_invalidate_position();
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
             emit_execution_event(ExecutionEventType::BlockCancelled, &block);
         } else {
-            stepper::stepper_invalidate_position();
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
         }
         discard_current_block(block);
@@ -871,7 +871,7 @@ void planner_reset() {
     s_control_state.store(ControlState::Running);
     stepper::rmt_stepper_stop();
     stepper::rmt_stepper_resume();
-    stepper::stepper_invalidate_position();
+    stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     clear_prepared_segment_ring();
     if (s_rmt_completion_queue != nullptr) {
         xQueueReset(s_rmt_completion_queue);

@@ -20,6 +20,15 @@ using RmtSegmentCompletedCallback = void (*)(const StepSegment& segment,
                                              void* user_data);
 using RmtSegmentStartedCallback = void (*)(const StepSegment& segment, void* user_data);
 
+struct RmtStreamDiagnostics {
+    std::size_t pending_segments = 0;
+    std::size_t inflight_segments = 0;
+    std::uint64_t submitted_segments = 0;
+    std::uint64_t started_segments = 0;
+    std::uint64_t completed_segments = 0;
+    std::uint64_t failed_segments = 0;
+};
+
 // This only allocates and enables RMT TX channels. It never transmits STEP pulses.
 esp_err_t rmt_stepper_init();
 esp_err_t rmt_stepper_deinit();
@@ -39,6 +48,7 @@ esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback completed_callbac
                                    void* user_data);
 std::size_t rmt_stepper_stream_free_slots();
 bool rmt_stepper_stream_is_busy();
+RmtStreamDiagnostics rmt_stepper_stream_diagnostics();
 esp_err_t rmt_stepper_stream_submit(const StepSegment* segments, std::size_t segment_count);
 esp_err_t rmt_stepper_stream_drain();
 void rmt_stepper_stream_reset();
