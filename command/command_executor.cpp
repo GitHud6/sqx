@@ -324,10 +324,14 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
                                       : state.planned_machine_position_mm[axis] + value_mm;
     }
 
-    // A standalone rapid-mode word is a modal update in Grbl. It must not
-    // create a zero-length planner block when a file header sends G00 without
-    // axis words. Linear G1 remains strict until its file behavior is known.
-    if (parsed.has_motion && !has_axis && parsed.motion_mode != MotionMode::Rapid) {
+    // Modal-only G00 is valid in file headers. The observed LightBurn trailer
+    // also emits G1 S0 to update laser power without an XY move. Neither form
+    // may create a zero-length planner block.
+    const bool linear_power_only = parsed.has_motion &&
+                                   parsed.motion_mode == MotionMode::Linear &&
+                                   parsed.has_spindle_speed;
+    if (parsed.has_motion && !has_axis && parsed.motion_mode != MotionMode::Rapid &&
+        !linear_power_only) {
         return Error::NoAxisWords;
     }
     if (has_axis && stepper::machine_position_state() != stepper::PositionState::Known) {
