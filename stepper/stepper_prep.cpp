@@ -100,6 +100,8 @@ StepSegment build_segment(const std::uint32_t segment_index) {
     } else {
         segment.laser_power = s_source_block.request.spindle_power;
     }
+    segment.motion_mode = s_source_block.request.motion_mode;
+    segment.spindle_mode = s_source_block.request.spindle_mode;
     segment.phase = phase_at_distance(start_distance);
     segment.completes_block = segment_index + 1 == s_profile.total_segments;
     for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {

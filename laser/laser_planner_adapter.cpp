@@ -19,7 +19,10 @@ void disable_laser() {
 void planner_execution_callback(const planner::ExecutionEvent& event, void*) {
     switch (event.type) {
         case planner::ExecutionEventType::BlockStarted:
-            disable_laser();
+            if (event.request.motion_mode != motion::MotionType::Linear ||
+                event.request.spindle_mode == motion::SpindleMode::Off) {
+                disable_laser();
+            }
             return;
         case planner::ExecutionEventType::SegmentBatchStarted:
             if (event.request.motion_mode == motion::MotionType::Linear &&

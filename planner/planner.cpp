@@ -208,6 +208,11 @@ void emit_execution_event(ExecutionEventType type,
         event.plan = block->plan;
     }
     if (segment != nullptr) {
+        if (block == nullptr) {
+            event.execution_id = segment->execution_id;
+            event.request.motion_mode = segment->motion_mode;
+            event.request.spindle_mode = segment->spindle_mode;
+        }
         event.segment_power = segment->laser_power;
         event.segment_start_speed_mm_per_min = segment->start_speed_mm_per_min;
         event.segment_end_speed_mm_per_min = segment->end_speed_mm_per_min;
@@ -400,6 +405,10 @@ void rmt_segment_completed(const stepper::StepSegment& segment,
     }
 }
 
+void rmt_segment_started(const stepper::StepSegment& segment, void*) {
+    emit_execution_event(ExecutionEventType::SegmentBatchStarted, nullptr, &segment);
+}
+
 void consume_rmt_completions() {
     RmtSegmentCompletion completion = {};
     while (s_rmt_completion_queue != nullptr &&
@@ -505,7 +514,8 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
 }
 
 bool dispatch_prepared_blocks() {
-    if (stepper::rmt_stepper_stream_start(rmt_segment_completed, nullptr) != ESP_OK) {
+    if (stepper::rmt_stepper_stream_start(
+            rmt_segment_completed, rmt_segment_started, nullptr) != ESP_OK) {
         return false;
     }
 
@@ -539,7 +549,6 @@ bool dispatch_prepared_blocks() {
             return false;
         }
         emit_execution_event(ExecutionEventType::BlockStarted, &block);
-        emit_execution_event(ExecutionEventType::SegmentBatchStarted, &block, &s_segment_batch[0]);
         if (stepper::rmt_stepper_stream_submit(s_segment_batch.data(), segment_count) != ESP_OK) {
             disable_axes(enabled);
             return false;
@@ -752,7 +761,6 @@ void planner_task(void*) {
         }
 
         if (block.type == MotionBlockType::Motion &&
-            block.request.spindle_mode == motion::SpindleMode::Off &&
             prefill_segment_ring(block)) {
             if (!dispatch_prepared_blocks()) {
                 stepper::stepper_invalidate_position();

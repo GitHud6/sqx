@@ -36,6 +36,7 @@ std::atomic<std::size_t> s_stream_inflight_count = 0;
 std::size_t s_stream_head = 0;
 std::size_t s_stream_tail = 0;
 RmtSegmentCompletedCallback s_stream_callback = nullptr;
+RmtSegmentStartedCallback s_stream_started_callback = nullptr;
 void* s_stream_callback_user_data = nullptr;
 
 bool IRAM_ATTR stream_transaction_done(rmt_channel_handle_t,
@@ -196,37 +197,51 @@ void stream_complete_transactions(const std::uint32_t completed_count) {
 }
 
 void stream_submit_pending_segments() {
+    if (s_feed_hold_requested.load() || s_stream_inflight_count.load() != 0) {
+        return;
+    }
+
     StepSegment segment = {};
-    while (!s_feed_hold_requested.load() &&
-           s_stream_inflight_count.load() < kRmtSegmentTransactionDepth &&
-           xQueueReceive(s_stream_pending_segments, &segment, 0) == pdTRUE) {
-        const std::size_t slot = s_stream_head;
-        build_segment_payload(segment, s_segment_payloads[slot]);
-        SegmentPayload& payload = s_segment_payloads[slot];
-        if (s_stream_inflight_count.load() == 0) {
-            if (rmt_sync_reset(s_sync_manager) != ESP_OK) {
-                stepper_invalidate_position();
-                if (s_stream_callback != nullptr) {
-                    s_stream_callback(segment, false, s_stream_callback_user_data);
-                }
-                continue;
-            }
+    if (xQueueReceive(s_stream_pending_segments, &segment, 0) != pdTRUE) {
+        return;
+    }
+
+    const std::size_t slot = s_stream_head;
+    build_segment_payload(segment, s_segment_payloads[slot]);
+    SegmentPayload& payload = s_segment_payloads[slot];
+    if (rmt_sync_reset(s_sync_manager) != ESP_OK) {
+        stepper_invalidate_position();
+        if (s_stream_callback != nullptr) {
+            s_stream_callback(segment, false, s_stream_callback_user_data);
         }
-        if (rmt_transmit(s_rmt_channels[0], s_copy_encoder, payload.symbols[0],
-                         payload.symbol_count * sizeof(rmt_symbol_word_t),
-                         &kQueuedTransmitConfig) != ESP_OK ||
-            rmt_transmit(s_rmt_channels[1], s_copy_encoder, payload.symbols[1],
-                         payload.symbol_count * sizeof(rmt_symbol_word_t),
-                         &kQueuedTransmitConfig) != ESP_OK) {
-            stepper_invalidate_position();
-            if (s_stream_callback != nullptr) {
-                s_stream_callback(segment, false, s_stream_callback_user_data);
-            }
-            continue;
+        return;
+    }
+
+    // A laser segment is armed immediately before its transaction enters RMT.
+    if (s_stream_started_callback != nullptr) {
+        s_stream_started_callback(segment, s_stream_callback_user_data);
+    }
+    s_stream_inflight_segments[slot] = segment;
+    s_stream_head = (s_stream_head + 1) % kRmtSegmentTransactionDepth;
+    s_stream_inflight_count.fetch_add(1);
+
+    const esp_err_t x_result = rmt_transmit(
+        s_rmt_channels[0], s_copy_encoder, payload.symbols[0],
+        payload.symbol_count * sizeof(rmt_symbol_word_t), &kQueuedTransmitConfig);
+    const esp_err_t y_result = x_result == ESP_OK
+                                   ? rmt_transmit(s_rmt_channels[1], s_copy_encoder,
+                                                  payload.symbols[1],
+                                                  payload.symbol_count * sizeof(rmt_symbol_word_t),
+                                                  &kQueuedTransmitConfig)
+                                   : x_result;
+    if (x_result != ESP_OK || y_result != ESP_OK) {
+        s_stream_head = slot;
+        s_stream_inflight_segments[slot] = {};
+        s_stream_inflight_count.fetch_sub(1);
+        stepper_invalidate_position();
+        if (s_stream_callback != nullptr) {
+            s_stream_callback(segment, false, s_stream_callback_user_data);
         }
-        s_stream_inflight_segments[slot] = segment;
-        s_stream_head = (s_stream_head + 1) % kRmtSegmentTransactionDepth;
-        s_stream_inflight_count.fetch_add(1);
     }
 }
 
@@ -425,7 +440,9 @@ esp_err_t rmt_stepper_execute_segments(const StepSegment* segments, std::size_t 
     return result;
 }
 
-esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback callback, void* user_data) {
+esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback completed_callback,
+                                   RmtSegmentStartedCallback started_callback,
+                                   void* user_data) {
     esp_err_t result = rmt_stepper_init();
     if (result != ESP_OK) {
         return result;
@@ -436,7 +453,8 @@ esp_err_t rmt_stepper_stream_start(RmtSegmentCompletedCallback callback, void* u
             return ESP_ERR_NO_MEM;
         }
     }
-    s_stream_callback = callback;
+    s_stream_callback = completed_callback;
+    s_stream_started_callback = started_callback;
     s_stream_callback_user_data = user_data;
     if (s_stream_task == nullptr &&
         xTaskCreate(rmt_stepper_stream_task, "rmt_stepper", 4096, nullptr, 8,
