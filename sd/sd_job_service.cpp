@@ -120,7 +120,7 @@ void sd_job_task(void*) {
                     break;
                 }
                 if (result == command::Error::MotionBusy) {
-                    vTaskDelay(pdMS_TO_TICKS(1));
+                    ray2::planner::planner_wait_for_free_block();
                     continue;
                 }
                 ESP_LOGE(kLogTag,
