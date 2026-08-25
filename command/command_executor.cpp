@@ -120,20 +120,26 @@ Error parse_m_word(double value, ParsedBlock& parsed) {
     if (std::floor(value) != value) {
         return Error::UnsupportedCommand;
     }
-    if (parsed.has_spindle_mode) {
-        return Error::ModalGroupViolation;
-    }
 
     switch (static_cast<int>(value)) {
         case 3:
+            if (parsed.has_spindle_mode) return Error::ModalGroupViolation;
             parsed.spindle_mode = SpindleMode::Clockwise;
             break;
         case 4:
+            if (parsed.has_spindle_mode) return Error::ModalGroupViolation;
             parsed.spindle_mode = SpindleMode::CounterClockwise;
             break;
         case 5:
+            if (parsed.has_spindle_mode) return Error::ModalGroupViolation;
             parsed.spindle_mode = SpindleMode::Off;
             break;
+        case 9:
+            if (parsed.has_coolant_off) return Error::ModalGroupViolation;
+            // M9 disables coolant outputs in Grbl. RayCube has no coolant
+            // output, so accept the known-safe command without touching laser state.
+            parsed.has_coolant_off = true;
+            return Error::Ok;
         default:
             return Error::UnsupportedCommand;
     }
