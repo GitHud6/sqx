@@ -124,7 +124,7 @@ planner
   GPTimer、Bresenham、DIR/ENABLE 与位置累计，并通过 driver 接口触发脉冲。
 - 尚未在此阶段版本上完成实机短线验收，因此不得提交阶段二，也不得进入阶段三。
 
-## 阶段三：提取 GPTimer 硬件驱动
+## 阶段三：提取 GPTimer 硬件驱动（代码已实现，待实机验收）
 
 实现步骤：
 
@@ -145,6 +145,14 @@ planner
 
 - GPTimer 只有 `driver/step_timer_driver.cpp` 一个所有者。
 - 实机验收通过后提交本阶段改动，再进入阶段四。
+
+当前实现状态：
+
+- 已新增 `driver/step_timer_driver.hpp/.cpp`，拥有 GPTimer 创建、回调注册、1 MHz
+  周期配置、启动和停止。
+- `timer_stepper_executor` 不再包含 `driver/gptimer.h` 或调用 `gptimer_*`；它注册固定
+  ISR 回调并保留 Bresenham、DIR/ENABLE、实际位置和完成通知。
+- 尚未完成阶段三实机验收，因此不得提交本阶段或进入阶段四。
 
 ## 阶段四：清理旧 RMT stream 后端与上层泄漏
 

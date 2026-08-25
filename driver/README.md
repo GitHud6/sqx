@@ -22,7 +22,7 @@ driver 不应该理解一条字节流是不是 G-code，也不应该决定电机
 | UART0 | 已实现 | `uart0_driver.hpp/.cpp` | 串口接收、接收队列、原始字节发送 |
 | GPIO | 预留 | - | 限位、控制输入、方向和使能输出 |
 | LEDC | 预留 | - | 激光 PWM |
-| GPTimer | 迁移中 | `stepper/timer_stepper_executor.cpp` | 当前 Step event 定时基准，后续迁入 `step_timer_driver` |
+| GPTimer | 已实现 | `step_timer_driver.hpp/.cpp` | Step event 定时基准；回调运动语义仍由 stepper 提供 |
 | RMT | 迁移中 | `rmt_step_pulse_driver.hpp/.cpp` | 当前产生单个 STEP 脉冲；GPTimer 所有权仍待迁移 |
 | SPI / SDMMC | 预留 | - | 后续存储或扩展外设 |
 
@@ -129,7 +129,7 @@ Stepper 的运动语义与 ESP32-S3 外设所有权正在拆分。当前运行�
 | X STEP | `driver/rmt_step_pulse_driver.cpp` | GPIO15，RMT channel 0 | 该 driver 运行时独占此 GPIO；旧 RMT stream 不得初始化或重新绑定它 |
 | Y STEP | `driver/rmt_step_pulse_driver.cpp` | GPIO8，RMT channel 1 | 该 driver 运行时独占此 GPIO；旧 RMT stream 不得初始化或重新绑定它 |
 | RMT | `driver/rmt_step_pulse_driver.cpp` | RMT LL 寄存器，单脉冲触发 | `stepper` 只能通过 `rmt_step_pulse_driver_trigger()` 请求发脉冲 |
-| GPTimer | `stepper/timer_stepper_executor.cpp` | 1 MHz，优先级 3 | 当前 Timer executor 独占；后续唯一迁入 `driver/step_timer_driver` |
+| GPTimer | `driver/step_timer_driver.cpp` | 1 MHz，优先级 3 | 该 driver 独占 timer lifecycle；stepper 只能注册固定 ISR 回调并请求启停 |
 | 旧 RMT stream | `stepper/rmt_stepper_driver.cpp` | ESP-IDF RMT high-level TX、transaction queue、stream task | 仅保留为迁移参考；当前不得在启动时初始化、创建任务或绑定 X/Y STEP GPIO |
 
 当前启动路径调用 `timer_stepper_executor_init()`，它再初始化

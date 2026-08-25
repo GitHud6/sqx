@@ -3,8 +3,8 @@
 #include <algorithm>
 #include <atomic>
 
-#include "driver/gptimer.h"
 #include "rmt_step_pulse_driver.hpp"
+#include "step_timer_driver.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -22,7 +22,6 @@ std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
 std::atomic<std::uint64_t> s_timer_interrupts = 0;
 SemaphoreHandle_t s_completion_semaphore = nullptr;
-gptimer_handle_t s_timer = nullptr;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
@@ -41,9 +40,7 @@ void IRAM_ATTR trigger_pulse(const std::size_t axis) {
     driver::rmt_step_pulse_driver_trigger(axis);
 }
 
-bool IRAM_ATTR timer_alarm_callback(gptimer_handle_t timer,
-                                    const gptimer_alarm_event_data_t*,
-                                    void*) {
+bool IRAM_ATTR timer_alarm_callback(void*) {
     BaseType_t task_woken = pdFALSE;
     portENTER_CRITICAL_ISR(&s_motion_lock);
     if (!s_busy.load()) {
@@ -67,7 +64,7 @@ bool IRAM_ATTR timer_alarm_callback(gptimer_handle_t timer,
     const bool finished = s_motion.completed_steps == s_motion.major_steps;
     if (finished) {
         s_busy.store(false);
-        gptimer_stop(timer);
+        driver::step_timer_driver_stop_from_isr();
     }
     portEXIT_CRITICAL_ISR(&s_motion_lock);
     if (finished && s_completion_semaphore != nullptr) {
@@ -89,16 +86,7 @@ esp_err_t timer_stepper_executor_init() {
     if (stepper_init() != ESP_OK) return ESP_FAIL;
     const esp_err_t pulse_driver_result = driver::rmt_step_pulse_driver_init();
     if (pulse_driver_result != ESP_OK) return pulse_driver_result;
-    const gptimer_config_t config = {
-        .clk_src = GPTIMER_CLK_SRC_DEFAULT, .direction = GPTIMER_COUNT_UP,
-        .resolution_hz = 1000000, .intr_priority = 3, .flags = {},
-    };
-    esp_err_t result = gptimer_new_timer(&config, &s_timer);
-    if (result != ESP_OK) return result;
-    const gptimer_event_callbacks_t callbacks = {.on_alarm = timer_alarm_callback};
-    result = gptimer_register_event_callbacks(s_timer, &callbacks, nullptr);
-    if (result != ESP_OK) return result;
-    result = gptimer_enable(s_timer);
+    const esp_err_t result = driver::step_timer_driver_init(timer_alarm_callback, nullptr);
     if (result != ESP_OK) return result;
     s_completion_semaphore = xSemaphoreCreateBinary();
     if (s_completion_semaphore == nullptr) return ESP_ERR_NO_MEM;
@@ -146,10 +134,7 @@ esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[], const 
     portENTER_CRITICAL(&s_motion_lock);
     s_motion = motion; s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
-    const gptimer_alarm_config_t alarm = {.alarm_count = interval_us, .reload_count = 0, .flags = {.auto_reload_on_alarm = true}};
-    esp_err_t result = gptimer_set_raw_count(s_timer, 0);
-    if (result == ESP_OK) result = gptimer_set_alarm_action(s_timer, &alarm);
-    if (result == ESP_OK) result = gptimer_start(s_timer);
+    const esp_err_t result = driver::step_timer_driver_start(interval_us);
     if (result != ESP_OK) {
         ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) interval=%lu",
                  esp_err_to_name(result), static_cast<long>(axis_steps[0]),
@@ -164,7 +149,7 @@ esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[], const 
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
 void timer_stepper_executor_stop() {
-    if (s_timer != nullptr) gptimer_stop(s_timer);
+    if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
     MotionState motion = {};
     portENTER_CRITICAL(&s_motion_lock);
