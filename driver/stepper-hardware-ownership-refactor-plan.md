@@ -91,7 +91,7 @@ planner
 - 本阶段未修改运行代码，因此不要求新增实机验收；当前短线执行行为保持原样，不能据此
   声称已完成后续硬件驱动迁移。
 
-## 阶段二：提取 RMT 单脉冲硬件驱动
+## 阶段二：提取 RMT 单脉冲硬件驱动（代码已实现，待实机验收）
 
 实现步骤：
 
@@ -104,15 +104,25 @@ planner
 
 验收标准：
 
-- `stepper/` 中不再包含 `driver/rmt_*.h`、`hal/rmt_ll.h`、`soc/rmt_struct.h` 或
-  `esp_rom_gpio_connect_out_signal()`。
+- 活动执行路径 `stepper/timer_stepper_executor.cpp` 中不再包含
+  `driver/rmt_*.h`、`hal/rmt_ll.h`、`soc/rmt_struct.h` 或
+  `esp_rom_gpio_connect_out_signal()`；冻结的旧 `rmt_stepper_driver.cpp` 留待阶段四清理。
 - X/Y 正反向短线仍可实机运动，STEP 空闲电平和脉冲宽度满足硬件要求。
 - 冷启动、停止与异常退出后 STEP 均回到安全空闲电平。
 
 结束改动标准：
 
-- RMT 的初始化与 GPIO matrix 绑定只存在于 `driver/rmt_step_pulse_driver.cpp`。
+- 活动单脉冲路径的 RMT 初始化与 GPIO matrix 绑定只存在于
+  `driver/rmt_step_pulse_driver.cpp`；旧 stream 后端仍被冻结，必须在阶段四删除。
 - 实机验收通过后提交本阶段改动，再进入阶段三。
+
+当前实现状态：
+
+- 已新增 `driver/rmt_step_pulse_driver.hpp/.cpp`，并迁入 RMT LL、GPIO matrix、固定
+  脉冲符号、初始化、停止和 ISR 单脉冲触发。
+- `timer_stepper_executor` 不再直接包含或访问 RMT LL、RMT 寄存器和 GPIO matrix；它保留
+  GPTimer、Bresenham、DIR/ENABLE 与位置累计，并通过 driver 接口触发脉冲。
+- 尚未在此阶段版本上完成实机短线验收，因此不得提交阶段二，也不得进入阶段三。
 
 ## 阶段三：提取 GPTimer 硬件驱动
 

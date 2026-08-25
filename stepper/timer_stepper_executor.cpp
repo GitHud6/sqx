@@ -4,14 +4,11 @@
 #include <atomic>
 
 #include "driver/gptimer.h"
+#include "rmt_step_pulse_driver.hpp"
 #include "esp_log.h"
-#include "esp_rom_gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
-#include "hal/rmt_ll.h"
-#include "soc/gpio_sig_map.h"
-#include "soc/rmt_struct.h"
 
 #include "stepper_driver.hpp"
 
@@ -19,8 +16,6 @@ namespace ray2::stepper {
 namespace {
 
 constexpr std::int32_t kMaximumMajorSteps = 256;
-constexpr std::uint32_t kRmtClockDivider = 80;
-constexpr std::uint32_t kRmtPulseSymbol = 3U | (1U << 15) | (1U << 16);
 constexpr char kLogTag[] = "timer_stepper";
 
 std::atomic<bool> s_initialized = false;
@@ -43,8 +38,7 @@ struct MotionState {
 MotionState s_motion = {};
 
 void IRAM_ATTR trigger_pulse(const std::size_t axis) {
-    rmt_ll_tx_reset_pointer(&RMT, axis);
-    rmt_ll_tx_start(&RMT, axis);
+    driver::rmt_step_pulse_driver_trigger(axis);
 }
 
 bool IRAM_ATTR timer_alarm_callback(gptimer_handle_t timer,
@@ -82,23 +76,6 @@ bool IRAM_ATTR timer_alarm_callback(gptimer_handle_t timer,
     return task_woken == pdTRUE;
 }
 
-esp_err_t configure_rmt_axis(const std::size_t axis_index) {
-    const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
-    rmt_ll_enable_group_clock(&RMT, true);
-    rmt_ll_tx_stop(&RMT, axis_index);
-    rmt_ll_tx_set_channel_clock_div(&RMT, axis_index, kRmtClockDivider);
-    rmt_ll_tx_set_mem_blocks(&RMT, axis_index, 1);
-    rmt_ll_tx_enable_wrap(&RMT, axis_index, false);
-    rmt_ll_tx_enable_loop(&RMT, axis_index, false);
-    rmt_ll_tx_fix_idle_level(&RMT, axis_index, 0, true);
-    rmt_ll_tx_enable_carrier_modulation(&RMT, axis_index, false);
-    rmt_ll_tx_reset_pointer(&RMT, axis_index);
-    RMT.chndata[axis_index].chndata = kRmtPulseSymbol;
-    RMT.chndata[axis_index].chndata = 0;
-    esp_rom_gpio_connect_out_signal(axis.step_pin, RMT_SIG_OUT0_IDX + axis_index, false, false);
-    return ESP_OK;
-}
-
 void disable_active_axes(const MotionState& motion) {
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         if (motion.enabled[axis]) stepper_set_enabled(static_cast<machine::Axis>(axis), false);
@@ -110,10 +87,8 @@ void disable_active_axes(const MotionState& motion) {
 esp_err_t timer_stepper_executor_init() {
     if (s_initialized.load()) return ESP_OK;
     if (stepper_init() != ESP_OK) return ESP_FAIL;
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        const esp_err_t result = configure_rmt_axis(axis);
-        if (result != ESP_OK) return result;
-    }
+    const esp_err_t pulse_driver_result = driver::rmt_step_pulse_driver_init();
+    if (pulse_driver_result != ESP_OK) return pulse_driver_result;
     const gptimer_config_t config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT, .direction = GPTIMER_COUNT_UP,
         .resolution_hz = 1000000, .intr_priority = 3, .flags = {},
@@ -190,6 +165,7 @@ bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
 void timer_stepper_executor_stop() {
     if (s_timer != nullptr) gptimer_stop(s_timer);
+    driver::rmt_step_pulse_driver_stop();
     MotionState motion = {};
     portENTER_CRITICAL(&s_motion_lock);
     motion = s_motion; s_motion = {}; s_busy.store(false);
