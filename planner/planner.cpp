@@ -334,17 +334,61 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
 }
 
 bool execute_block(const MotionBlock& block) {
-    if (block.type == MotionBlockType::Motion) {
-        return stepper::timer_stepper_executor_execute(
-                   block.plan.steps, block.plan.positive_direction, block.plan.step_interval_us) == ESP_OK;
+    if (block.type != MotionBlockType::Motion) {
+        return false;
     }
-    return false;
+
+    stepper::StepSegment segment = {};
+    segment.execution_id = block.execution_id;
+    segment.axis_steps[0] = block.plan.steps[0];
+    segment.axis_steps[1] = block.plan.steps[1];
+    segment.positive_direction[0] = block.plan.positive_direction[0];
+    segment.positive_direction[1] = block.plan.positive_direction[1];
+    segment.major_steps = block.step_event_count;
+    segment.step_interval_us = block.plan.step_interval_us;
+    segment.duration_us = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(
+            static_cast<std::uint64_t>(segment.major_steps) * segment.step_interval_us,
+            std::numeric_limits<std::uint32_t>::max()));
+    segment.laser_power = block.request.spindle_power;
+    segment.motion_mode = block.request.motion_mode;
+    segment.spindle_mode = block.request.spindle_mode;
+    segment.completes_block = true;
+    return stepper::timer_stepper_executor_start_segment(segment) == ESP_OK;
+}
+
+void consume_segment_completions() {
+    stepper::SegmentCompletion completion = {};
+    while (stepper::stepper_completion_consume(completion)) {
+        MotionBlock block = {};
+        if (!active_block_snapshot(block) || block.execution_id != completion.execution_id) {
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+            continue;
+        }
+
+        clear_active_block();
+        if (completion.status == stepper::SegmentCompletionStatus::Completed) {
+            ++s_completed_block_count;
+            emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+        } else {
+            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+            emit_execution_event(ExecutionEventType::BlockFailed, &block);
+        }
+        discard_current_block(block);
+        report_queue_drained();
+    }
 }
 
 void planner_task(void*) {
     MotionBlock block = {};
 
     while (true) {
+        consume_segment_completions();
+        if (active_block_snapshot(block)) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
         if (!current_block_snapshot(block)) {
             disable_axes_after_idle();
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -360,21 +404,30 @@ void planner_task(void*) {
 
         set_active_block(block);
         emit_execution_event(ExecutionEventType::BlockStarted, &block);
-        const bool completed = block.type == MotionBlockType::SpindleDisable || execute_block(block);
-        clear_active_block();
-        if (completed) {
+        if (block.type == MotionBlockType::SpindleDisable) {
+            clear_active_block();
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
-        } else if (s_reset_generation.load() != block.reset_generation) {
-            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
-            emit_execution_event(ExecutionEventType::BlockCancelled, &block);
-        } else {
-            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
-            emit_execution_event(ExecutionEventType::BlockFailed, &block);
+            discard_current_block(block);
+            report_queue_drained();
+            continue;
         }
-        discard_current_block(block);
-        report_queue_drained();
-        disable_axes_after_idle();
+        if (!execute_block(block)) {
+            clear_active_block();
+            if (s_reset_generation.load() != block.reset_generation) {
+                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
+                emit_execution_event(ExecutionEventType::BlockCancelled, &block);
+            } else {
+                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+                emit_execution_event(ExecutionEventType::BlockFailed, &block);
+            }
+            discard_current_block(block);
+            report_queue_drained();
+            disable_axes_after_idle();
+            continue;
+        }
+
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
 
@@ -388,6 +441,7 @@ esp_err_t planner_start() {
     if (xTaskCreate(planner_task, "planner", 4096, nullptr, 7, &s_planner_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
+    stepper::stepper_completion_set_notification_task(s_planner_task);
     return ESP_OK;
 }
 
@@ -445,6 +499,8 @@ void planner_reset() {
     s_reset_generation.fetch_add(1);
     s_control_state.store(ControlState::Running);
     stepper::timer_stepper_executor_stop();
+    clear_active_block();
+    stepper::stepper_prep_reset();
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);

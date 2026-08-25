@@ -82,6 +82,8 @@ bool IRAM_ATTR stepper_segment_consume_from_isr(StepSegment& segment);
 std::size_t stepper_segment_count();
 std::size_t stepper_segment_free_slots();
 void IRAM_ATTR stepper_segment_record_underflow_from_isr();
+void stepper_segment_set_active(std::uint64_t execution_id);
+void IRAM_ATTR stepper_segment_clear_active_from_isr();
 
 void stepper_completion_set_notification_task(TaskHandle_t task);
 bool IRAM_ATTR stepper_completion_publish_from_isr(const SegmentCompletion& completion,

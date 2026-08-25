@@ -100,7 +100,7 @@ segment 水位、RMT 或 timer 背压。
 - `$POS/STATUS` 已增加稳定的 `segment=(...)` 诊断。当前 active、id、completed_pending 均应为
   零值，因为阶段二以前不接入实际消费链路。
 
-### 阶段二：将 Timer executor 改为非阻塞单 segment 执行器
+### 阶段二：将 Timer executor 改为非阻塞单 segment 执行器（代码已实现，待验收）
 
 实现步骤：
 
@@ -119,6 +119,14 @@ segment 水位、RMT 或 timer 背压。
 
 - 已实机验证非阻塞单 segment 生命周期。
 - 未启用连续自动切段；验收后提交，再进入阶段三。
+
+当前实现状态：
+
+- Timer executor 已提供非阻塞 `start_segment()`；最后一步由 ISR 写入 completion ring 并通知
+  planner，不再使用等待整个 block 的二值信号量。
+- planner 已将当前 Motion block 临时适配为一个完整 segment，收到 completion 后才发出
+  `BlockCompleted`、递增完成数并回收 block。
+- ISR 尚不自动读取下一 segment；相邻 block 仍会经过 task 调度边界，这个连续性问题留待阶段三。
 
 ### 阶段三：ISR 无缝切换与低水位补料
 

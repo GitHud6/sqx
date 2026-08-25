@@ -15,6 +15,7 @@ std::atomic<std::uint32_t> s_segment_head = 0;
 std::atomic<std::uint32_t> s_segment_tail = 0;
 std::atomic<std::size_t> s_segment_high_water = 0;
 std::atomic<std::uint64_t> s_segment_underflow_count = 0;
+std::atomic<std::uint64_t> s_active_execution_id = 0;
 
 std::array<SegmentCompletion, kStepCompletionBufferLength> s_completion_buffer = {};
 std::atomic<std::uint32_t> s_completion_head = 0;
@@ -158,6 +159,7 @@ void stepper_prep_reset() {
     s_segment_tail.store(0, std::memory_order_relaxed);
     s_segment_high_water.store(0, std::memory_order_relaxed);
     s_segment_underflow_count.store(0, std::memory_order_relaxed);
+    s_active_execution_id.store(0, std::memory_order_relaxed);
     s_completion_head.store(0, std::memory_order_relaxed);
     s_completion_tail.store(0, std::memory_order_relaxed);
     s_profile = {};
@@ -271,6 +273,14 @@ void IRAM_ATTR stepper_segment_record_underflow_from_isr() {
     s_segment_underflow_count.fetch_add(1, std::memory_order_relaxed);
 }
 
+void stepper_segment_set_active(const std::uint64_t execution_id) {
+    s_active_execution_id.store(execution_id, std::memory_order_release);
+}
+
+void IRAM_ATTR stepper_segment_clear_active_from_isr() {
+    s_active_execution_id.store(0, std::memory_order_release);
+}
+
 void stepper_completion_set_notification_task(const TaskHandle_t task) {
     s_completion_notification_task.store(task, std::memory_order_release);
 }
@@ -308,6 +318,8 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     diagnostics.queued_segments = segment_count_snapshot();
     diagnostics.high_water_segments = s_segment_high_water.load(std::memory_order_relaxed);
     diagnostics.underflow_count = s_segment_underflow_count.load(std::memory_order_relaxed);
+    diagnostics.active_execution_id = s_active_execution_id.load(std::memory_order_acquire);
+    diagnostics.active = diagnostics.active_execution_id != 0;
     diagnostics.pending_completions = completion_count_snapshot();
     return diagnostics;
 }

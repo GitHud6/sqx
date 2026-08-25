@@ -8,6 +8,8 @@
 
 namespace ray2::stepper {
 
+struct StepSegment;
+
 struct TimerStepperDiagnostics {
     bool initialized = false;
     bool owns_step_pins = false;
@@ -19,9 +21,7 @@ struct TimerStepperDiagnostics {
 // Stage two initialization remains passive until the new-driver-compatible
 // one-shot RMT backend is ready. It never emits a STEP pulse.
 esp_err_t timer_stepper_executor_init();
-esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[machine::kAxisCount],
-                                         const bool positive_direction[machine::kAxisCount],
-                                         std::uint32_t step_interval_us);
+esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment);
 bool timer_stepper_executor_is_busy();
 void timer_stepper_executor_stop();
 TimerStepperDiagnostics timer_stepper_executor_diagnostics();

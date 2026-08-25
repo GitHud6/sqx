@@ -7,21 +7,18 @@
 #include "step_timer_driver.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
 
 #include "stepper_driver.hpp"
+#include "stepper_prep.hpp"
 
 namespace ray2::stepper {
 namespace {
 
-constexpr std::int32_t kMaximumMajorSteps = 256;
 constexpr char kLogTag[] = "timer_stepper";
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
 std::atomic<std::uint64_t> s_timer_interrupts = 0;
-SemaphoreHandle_t s_completion_semaphore = nullptr;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
@@ -30,6 +27,7 @@ struct MotionState {
     std::int32_t minor_steps = 0;
     std::int32_t completed_steps = 0;
     std::int64_t error = 0;
+    std::uint64_t execution_id = 0;
     bool x_is_major = true;
     bool enabled[machine::kAxisCount] = {};
 };
@@ -65,11 +63,14 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     if (finished) {
         s_busy.store(false);
         driver::step_timer_driver_stop_from_isr();
+        stepper_segment_clear_active_from_isr();
+        const SegmentCompletion completion = {
+            .execution_id = s_motion.execution_id,
+            .status = SegmentCompletionStatus::Completed,
+        };
+        stepper_completion_publish_from_isr(completion, &task_woken);
     }
     portEXIT_CRITICAL_ISR(&s_motion_lock);
-    if (finished && s_completion_semaphore != nullptr) {
-        xSemaphoreGiveFromISR(s_completion_semaphore, &task_woken);
-    }
     return task_woken == pdTRUE;
 }
 
@@ -88,35 +89,35 @@ esp_err_t timer_stepper_executor_init() {
     if (pulse_driver_result != ESP_OK) return pulse_driver_result;
     const esp_err_t result = driver::step_timer_driver_init(timer_alarm_callback, nullptr);
     if (result != ESP_OK) return result;
-    s_completion_semaphore = xSemaphoreCreateBinary();
-    if (s_completion_semaphore == nullptr) return ESP_ERR_NO_MEM;
     s_initialized.store(true);
     return ESP_OK;
 }
 
-esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[], const bool positive_direction[],
-                                         std::uint32_t interval_us) {
-    if (!s_initialized.load() || axis_steps == nullptr || positive_direction == nullptr || interval_us <= 3) {
+esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
+    if (!s_initialized.load() || segment.major_steps <= 0 || segment.step_interval_us <= 3) {
         ESP_LOGE(kLogTag, "TIMER-REJECT reason=invalid-request initialized=%d interval=%lu",
-                 s_initialized.load() ? 1 : 0, static_cast<unsigned long>(interval_us));
+                 s_initialized.load() ? 1 : 0,
+                 static_cast<unsigned long>(segment.step_interval_us));
         return ESP_ERR_INVALID_ARG;
     }
-    const std::int32_t major = std::max(axis_steps[0], axis_steps[1]);
-    if (s_busy.load() || major <= 0 || major > kMaximumMajorSteps) {
-        ESP_LOGE(kLogTag, "TIMER-REJECT reason=busy-or-range busy=%d steps=(%ld,%ld) maximum=%ld",
-                 s_busy.load() ? 1 : 0, static_cast<long>(axis_steps[0]),
-                 static_cast<long>(axis_steps[1]), static_cast<long>(kMaximumMajorSteps));
+    const std::int32_t major = std::max(segment.axis_steps[0], segment.axis_steps[1]);
+    if (s_busy.load() || major != segment.major_steps) {
+        ESP_LOGE(kLogTag, "TIMER-REJECT reason=busy-or-segment-mismatch busy=%d steps=(%ld,%ld) major=%ld",
+                 s_busy.load() ? 1 : 0, static_cast<long>(segment.axis_steps[0]),
+                 static_cast<long>(segment.axis_steps[1]), static_cast<long>(segment.major_steps));
         return ESP_ERR_NOT_SUPPORTED;
     }
     MotionState motion = {};
-    motion.axis_steps[0] = axis_steps[0]; motion.axis_steps[1] = axis_steps[1];
-    motion.major_steps = major; motion.minor_steps = std::min(axis_steps[0], axis_steps[1]);
-    motion.x_is_major = axis_steps[0] >= axis_steps[1];
+    motion.axis_steps[0] = segment.axis_steps[0]; motion.axis_steps[1] = segment.axis_steps[1];
+    motion.major_steps = major;
+    motion.minor_steps = std::min(segment.axis_steps[0], segment.axis_steps[1]);
+    motion.x_is_major = segment.axis_steps[0] >= segment.axis_steps[1];
+    motion.execution_id = segment.execution_id;
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (axis_steps[axis] == 0) continue;
+        if (segment.axis_steps[axis] == 0) continue;
         const auto current = static_cast<machine::Axis>(axis);
         const esp_err_t direction_result =
-            stepper_set_direction(current, positive_direction[axis] ? Direction::Positive : Direction::Negative);
+            stepper_set_direction(current, segment.positive_direction[axis] ? Direction::Positive : Direction::Negative);
         const esp_err_t enable_result = direction_result == ESP_OK
                                             ? stepper_set_enabled(current, true)
                                             : direction_result;
@@ -129,20 +130,18 @@ esp_err_t timer_stepper_executor_execute(const std::int32_t axis_steps[], const 
         }
         motion.enabled[axis] = true;
     }
-    vTaskDelay(pdMS_TO_TICKS(1));
-    xSemaphoreTake(s_completion_semaphore, 0);
     portENTER_CRITICAL(&s_motion_lock);
     s_motion = motion; s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
-    const esp_err_t result = driver::step_timer_driver_start(interval_us);
+    stepper_segment_set_active(segment.execution_id);
+    const esp_err_t result = driver::step_timer_driver_start(segment.step_interval_us);
     if (result != ESP_OK) {
         ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) interval=%lu",
-                 esp_err_to_name(result), static_cast<long>(axis_steps[0]),
-                 static_cast<long>(axis_steps[1]), static_cast<unsigned long>(interval_us));
+                 esp_err_to_name(result), static_cast<long>(segment.axis_steps[0]),
+                 static_cast<long>(segment.axis_steps[1]),
+                 static_cast<unsigned long>(segment.step_interval_us));
         timer_stepper_executor_stop(); return ESP_FAIL;
     }
-    xSemaphoreTake(s_completion_semaphore, portMAX_DELAY);
-    disable_active_axes(motion);
     return ESP_OK;
 }
 
@@ -151,6 +150,7 @@ bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 void timer_stepper_executor_stop() {
     if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
+    stepper_segment_clear_active_from_isr();
     MotionState motion = {};
     portENTER_CRITICAL(&s_motion_lock);
     motion = s_motion; s_motion = {}; s_busy.store(false);
