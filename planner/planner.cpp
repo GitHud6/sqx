@@ -42,6 +42,9 @@ void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
 std::array<stepper::StepSegment, stepper::kStepSegmentBufferLength> s_segment_batch = {};
+constexpr std::size_t kPreparedBlockCapacity = 8;
+std::array<MotionBlock, kPreparedBlockCapacity> s_prepared_blocks = {};
+std::size_t s_prepared_block_count = 0;
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
@@ -298,6 +301,98 @@ bool current_block_snapshot(MotionBlock& block) {
     return true;
 }
 
+bool blocks_are_segment_compatible(const MotionBlock& previous, const MotionBlock& current) {
+    if (previous.type != MotionBlockType::Motion || current.type != MotionBlockType::Motion ||
+        previous.reset_generation != current.reset_generation ||
+        previous.request.motion_mode != current.request.motion_mode ||
+        previous.request.spindle_mode != current.request.spindle_mode) {
+        return false;
+    }
+
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (previous.plan.steps[axis] > 0 && current.plan.steps[axis] > 0 &&
+            previous.plan.positive_direction[axis] != current.plan.positive_direction[axis]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    if (offset >= s_block_count) {
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        return false;
+    }
+    std::size_t index = s_block_tail;
+    for (std::size_t step = 0; step < offset; ++step) {
+        index = block_index_after(index);
+    }
+    block = s_block_buffer[index];
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    return true;
+}
+
+void clear_prepared_segment_ring() {
+    stepper::stepper_prep_reset();
+    s_prepared_blocks = {};
+    s_prepared_block_count = 0;
+}
+
+bool prefill_segment_ring(const MotionBlock& first_block) {
+    if (s_prepared_block_count != 0) {
+        return s_prepared_blocks[0].execution_id == first_block.execution_id;
+    }
+
+    clear_prepared_segment_ring();
+    MotionBlock previous = first_block;
+    for (std::size_t offset = 0; offset < kPreparedBlockCapacity; ++offset) {
+        MotionBlock candidate = {};
+        if (offset == 0) {
+            candidate = first_block;
+        } else if (!queued_block_snapshot(offset, candidate) ||
+                   !blocks_are_segment_compatible(previous, candidate)) {
+            break;
+        }
+
+        if (!stepper::stepper_prep_start_block(candidate)) {
+            break;
+        }
+        const std::size_t required_segments = stepper::stepper_prep_profile().total_segments;
+        const std::size_t available_segments =
+            stepper::kStepSegmentBufferLength - stepper::stepper_segment_count();
+        if (required_segments == 0 || required_segments > available_segments) {
+            stepper::stepper_prep_cancel_block();
+            break;
+        }
+        if (stepper::stepper_prep_fill() != required_segments) {
+            stepper::stepper_prep_cancel_block();
+            break;
+        }
+
+        s_prepared_blocks[s_prepared_block_count++] = candidate;
+        previous = candidate;
+    }
+
+    return s_prepared_block_count != 0 &&
+           s_prepared_blocks[0].execution_id == first_block.execution_id;
+}
+
+void discard_prepared_block(const MotionBlock& block) {
+    if (s_prepared_block_count == 0 ||
+        s_prepared_blocks[0].execution_id != block.execution_id) {
+        return;
+    }
+    for (std::size_t index = 1; index < s_prepared_block_count; ++index) {
+        s_prepared_blocks[index - 1] = s_prepared_blocks[index];
+    }
+    s_prepared_blocks[s_prepared_block_count - 1] = {};
+    --s_prepared_block_count;
+    if (s_prepared_block_count == 0 && stepper::stepper_segment_count() == 0) {
+        stepper::stepper_prep_reset();
+    }
+}
+
 void discard_current_block(const MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count != 0) {
@@ -374,10 +469,66 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
     return s_reset_generation.load() == block_generation;
 }
 
+bool execute_prepared_block(const MotionBlock& block) {
+    if (!prefill_segment_ring(block) || s_prepared_block_count == 0 ||
+        stepper::stepper_init() != ESP_OK) {
+        return false;
+    }
+
+    bool enabled[machine::kAxisCount] = {};
+    if (!configure_axes(block, enabled)) {
+        clear_prepared_segment_ring();
+        return false;
+    }
+
+    std::size_t segment_count = 0;
+    bool completes_block = false;
+    while (stepper::stepper_segment_count() != 0 &&
+           segment_count < s_segment_batch.size()) {
+        if (!stepper::stepper_segment_pop(s_segment_batch[segment_count])) {
+            break;
+        }
+        completes_block = s_segment_batch[segment_count].completes_block;
+        ++segment_count;
+        if (completes_block) {
+            break;
+        }
+    }
+
+    if (!completes_block || segment_count == 0 ||
+        !stepper::rmt_stepper_can_execute_segments(s_segment_batch.data(), segment_count)) {
+        clear_prepared_segment_ring();
+        disable_axes(enabled);
+        return false;
+    }
+
+    if (!wait_for_run_permission(block.reset_generation)) {
+        clear_prepared_segment_ring();
+        disable_axes(enabled);
+        return false;
+    }
+
+    emit_execution_event(ExecutionEventType::SegmentBatchStarted, &block, &s_segment_batch[0]);
+    const bool completed = stepper::rmt_stepper_execute_segments(
+                               s_segment_batch.data(), segment_count) == ESP_OK;
+    if (completed) {
+        emit_execution_event(ExecutionEventType::SegmentBatchCompleted,
+                             &block, &s_segment_batch[segment_count - 1]);
+    } else {
+        clear_prepared_segment_ring();
+        disable_axes(enabled);
+    }
+    return completed;
+}
+
 bool execute_block(const MotionBlock& block) {
     const std::int32_t major_steps = std::max(block.plan.steps[0], block.plan.steps[1]);
     if (major_steps <= 0 || block.plan.step_interval_us == 0 || stepper::stepper_init() != ESP_OK) {
         return false;
+    }
+
+    if (execute_prepared_block(block)) {
+        return true;
     }
 
     bool enabled[machine::kAxisCount] = {};
@@ -521,6 +672,7 @@ void planner_task(void*) {
         clear_active_block();
         if (completed) {
             ++s_completed_block_count;
+            discard_prepared_block(block);
             if (block.type == MotionBlockType::Motion) {
                 log_completed_motion_position(block);
             }
@@ -609,6 +761,7 @@ void planner_reset() {
     stepper::rmt_stepper_stop();
     stepper::rmt_stepper_resume();
     stepper::stepper_invalidate_position();
+    clear_prepared_segment_ring();
     portENTER_CRITICAL(&s_block_buffer_lock);
     s_block_head = 0;
     s_block_tail = 0;

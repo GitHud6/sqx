@@ -159,7 +159,7 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)));
 
     portENTER_CRITICAL(&s_segment_lock);
-    if (s_profile.active || s_segment_count != 0) {
+    if (s_profile.active) {
         portEXIT_CRITICAL(&s_segment_lock);
         return false;
     }
@@ -180,6 +180,13 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
     };
     portEXIT_CRITICAL(&s_segment_lock);
     return true;
+}
+
+void stepper_prep_cancel_block() {
+    portENTER_CRITICAL(&s_segment_lock);
+    s_profile = {};
+    s_source_block = {};
+    portEXIT_CRITICAL(&s_segment_lock);
 }
 
 std::size_t stepper_prep_fill() {
