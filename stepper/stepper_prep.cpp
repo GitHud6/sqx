@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cmath>
 
+#include "raycube_machine.hpp"
+
 namespace ray2::stepper {
 namespace {
 
@@ -127,14 +129,21 @@ StepSegment build_segment(const std::uint32_t segment_index) {
         static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us / segment.major_steps))));
     segment.start_speed_mm_per_min = start_speed;
     segment.end_speed_mm_per_min = final_speed;
-    if (s_source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
+    const bool laser_enabled =
+        s_source_block.request.motion_mode == motion::MotionType::Linear &&
+        s_source_block.request.spindle_mode != motion::SpindleMode::Off;
+    if (laser_enabled &&
+        s_source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
         const double actual_speed =
             (final_distance - start_distance) * 60000000.0 / std::max(1.0, duration_us);
         segment.laser_power = s_source_block.request.spindle_power * std::clamp(
             actual_speed / s_source_block.programmed_rate_mm_per_min, 0.0, 1.0);
-    } else {
+    } else if (laser_enabled) {
         segment.laser_power = s_source_block.request.spindle_power;
     }
+    const double max_power = static_cast<double>(machine::raycube_laser().max_power);
+    segment.laser_power_per_mille = static_cast<std::uint16_t>(std::clamp(
+        std::lround(segment.laser_power * 1000.0 / max_power), 0L, 1000L));
     segment.motion_mode = s_source_block.request.motion_mode;
     segment.spindle_mode = s_source_block.request.spindle_mode;
     segment.phase = phase_at_distance(start_distance);
@@ -250,7 +259,7 @@ bool stepper_segment_publish(const StepSegment& segment) {
     return true;
 }
 
-bool IRAM_ATTR stepper_segment_consume(StepSegment& segment) {
+bool stepper_segment_consume(StepSegment& segment) {
     const std::uint32_t tail = s_segment_tail.load(std::memory_order_relaxed);
     const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
     if (tail == head) {
@@ -269,17 +278,17 @@ std::size_t stepper_segment_free_slots() {
     return kStepSegmentBufferLength - segment_count_snapshot();
 }
 
-void IRAM_ATTR stepper_segment_record_underflow_from_isr() {
+void stepper_segment_record_underflow_from_isr() {
     s_segment_underflow_count.fetch_add(1, std::memory_order_relaxed);
 }
 
-bool IRAM_ATTR stepper_segment_needs_refill_from_isr() {
+bool stepper_segment_needs_refill_from_isr() {
     const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
     const std::uint32_t tail = s_segment_tail.load(std::memory_order_relaxed);
     return head - tail == kStepSegmentLowWater;
 }
 
-void IRAM_ATTR stepper_segment_request_refill_from_isr(
+void stepper_segment_request_refill_from_isr(
     BaseType_t* const higher_priority_task_woken) {
     const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
     if (task != nullptr && higher_priority_task_woken != nullptr) {
@@ -291,7 +300,7 @@ void stepper_segment_set_active(const std::uint64_t execution_id) {
     s_active_execution_id.store(execution_id, std::memory_order_release);
 }
 
-void IRAM_ATTR stepper_segment_clear_active_from_isr() {
+void stepper_segment_clear_active_from_isr() {
     s_active_execution_id.store(0, std::memory_order_release);
 }
 
@@ -299,7 +308,7 @@ void stepper_completion_set_notification_task(const TaskHandle_t task) {
     s_completion_notification_task.store(task, std::memory_order_release);
 }
 
-bool IRAM_ATTR stepper_completion_publish_from_isr(
+bool stepper_completion_publish_from_isr(
     const SegmentCompletion& completion, BaseType_t* const higher_priority_task_woken) {
     const std::uint32_t head = s_completion_head.load(std::memory_order_relaxed);
     const std::uint32_t tail = s_completion_tail.load(std::memory_order_acquire);

@@ -33,6 +33,7 @@ struct StepSegment {
     double start_speed_mm_per_min = 0.0;
     double end_speed_mm_per_min = 0.0;
     double laser_power = 0.0;
+    std::uint16_t laser_power_per_mille = 0;
     motion::MotionType motion_mode = motion::MotionType::Rapid;
     motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;

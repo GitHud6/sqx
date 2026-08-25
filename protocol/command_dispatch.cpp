@@ -12,6 +12,7 @@
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
+#include "rmt_step_pulse_driver.hpp"
 #include "planner.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
@@ -154,11 +155,12 @@ bool report_position_status() {
     xSemaphoreGive(s_parser_mutex);
     const std::size_t queued_blocks = planner::kPlannerQueueLength - planner::planner_free_blocks();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
+    const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
 
-    char response[512] = {};
+    char response[768] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,completed_pending=%zu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,completed=%llu)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -169,7 +171,14 @@ bool report_position_status() {
         segment.queued_segments, segment.segment_capacity, segment.high_water_segments,
         static_cast<unsigned long long>(segment.underflow_count), segment.active ? 1 : 0,
         static_cast<unsigned long long>(segment.active_execution_id),
-        segment.pending_completions);
+        segment.pending_completions,
+        static_cast<unsigned long long>(rmt.trigger_count[0]),
+        static_cast<unsigned long long>(rmt.trigger_count[1]),
+        static_cast<unsigned long long>(rmt.active_retrigger_count[0]),
+        static_cast<unsigned long long>(rmt.active_retrigger_count[1]),
+        static_cast<unsigned long>(rmt.last_status_word[0]),
+        static_cast<unsigned long>(rmt.last_status_word[1]),
+        static_cast<unsigned long long>(rmt.invalid_trigger_count));
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }

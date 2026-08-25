@@ -113,14 +113,14 @@ bool step_timer_driver_is_running() {
     return s_running.load();
 }
 
-void IRAM_ATTR step_timer_driver_stop_from_isr() {
+void step_timer_driver_stop_from_isr() {
     s_running.store(false);
     if (s_timer != nullptr) {
         gptimer_stop(s_timer);
     }
 }
 
-void IRAM_ATTR step_timer_driver_update_interval_from_isr(const std::uint32_t interval_us) {
+void step_timer_driver_update_interval_from_isr(const std::uint32_t interval_us) {
     if (!s_running.load() || s_timer == nullptr || interval_us == 0) {
         return;
     }

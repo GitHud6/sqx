@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 
+#include "laser_driver.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
@@ -89,6 +90,8 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
                                                 next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
             }
             s_motion = motion_from_segment(next);
+            laser::laser_apply_segment_power_from_isr(next.laser_power_per_mille,
+                                                       next.execution_id);
             stepper_segment_set_active(next.execution_id);
             driver::step_timer_driver_update_interval_from_isr(next.step_interval_us);
             if (stepper_segment_needs_refill_from_isr()) {
@@ -97,6 +100,7 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
         } else {
             s_busy.store(false);
             driver::step_timer_driver_stop_from_isr();
+            laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
             if (!completed_motion.completes_block) {
                 stepper_segment_record_underflow_from_isr();
@@ -165,6 +169,8 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     portENTER_CRITICAL(&s_motion_lock);
     s_motion = motion; s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
+    laser::laser_apply_segment_power_from_isr(segment.laser_power_per_mille,
+                                               segment.execution_id);
     stepper_segment_set_active(segment.execution_id);
     const esp_err_t result = driver::step_timer_driver_start(segment.step_interval_us);
     if (result != ESP_OK) {
@@ -190,6 +196,7 @@ bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 void timer_stepper_executor_stop() {
     if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
+    laser::laser_disable();
     stepper_segment_clear_active_from_isr();
     MotionState motion = {};
     portENTER_CRITICAL(&s_motion_lock);

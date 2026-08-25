@@ -19,34 +19,29 @@ void disable_laser() {
 void planner_execution_callback(const planner::ExecutionEvent& event, void*) {
     switch (event.type) {
         case planner::ExecutionEventType::BlockStarted:
-            if (event.request.motion_mode == motion::MotionType::Linear &&
-                event.request.spindle_mode != motion::SpindleMode::Off &&
-                event.request.spindle_power > 0.0 &&
-                laser_set_power(event.request.spindle_power) == ESP_OK) {
-                s_active_execution_id.store(event.execution_id);
-            } else {
+            if (event.request.spindle_mode == motion::SpindleMode::Off) {
                 disable_laser();
+            } else {
+                s_active_execution_id.store(event.execution_id);
             }
             return;
         case planner::ExecutionEventType::SegmentBatchStarted:
-            if (event.request.motion_mode == motion::MotionType::Linear &&
-                event.request.spindle_mode != motion::SpindleMode::Off &&
-                event.segment_power > 0.0 &&
-                laser_set_power(event.segment_power) == ESP_OK) {
-                s_active_execution_id.store(event.execution_id);
-            } else {
-                disable_laser();
-            }
             return;
         case planner::ExecutionEventType::SegmentBatchCompleted:
+        case planner::ExecutionEventType::BlockCompleted:
             return;
         case planner::ExecutionEventType::Resumed:
+            laser_set_motion_output_permitted(true);
             return;
         case planner::ExecutionEventType::FeedHoldRequested:
-        case planner::ExecutionEventType::BlockCompleted:
+            laser_set_motion_output_permitted(false);
+            return;
         case planner::ExecutionEventType::BlockCancelled:
         case planner::ExecutionEventType::BlockFailed:
+            disable_laser();
+            return;
         case planner::ExecutionEventType::QueueDrained:
+            laser_set_motion_output_permitted(true);
             disable_laser();
             return;
     }

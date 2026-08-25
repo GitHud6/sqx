@@ -130,8 +130,8 @@ esp_err_t stepper_set_direction(machine::Axis axis, Direction direction) {
     return result;
 }
 
-void IRAM_ATTR stepper_set_direction_from_isr(const machine::Axis axis,
-                                              const Direction direction) {
+void stepper_set_direction_from_isr(const machine::Axis axis,
+                                    const Direction direction) {
     const std::size_t index = static_cast<std::size_t>(axis);
     if (index >= machine::kAxisCount) {
         return;
