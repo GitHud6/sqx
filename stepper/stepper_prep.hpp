@@ -15,6 +15,7 @@ namespace ray2::stepper {
 constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 750;
+constexpr std::size_t kStepSegmentLowWater = 16;
 
 enum class StepSegmentPhase : std::uint8_t {
     Accelerate,
@@ -78,10 +79,13 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
 bool stepper_segment_publish(const StepSegment& segment);
-bool IRAM_ATTR stepper_segment_consume_from_isr(StepSegment& segment);
+bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
 std::size_t stepper_segment_count();
 std::size_t stepper_segment_free_slots();
 void IRAM_ATTR stepper_segment_record_underflow_from_isr();
+bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
+void IRAM_ATTR stepper_segment_request_refill_from_isr(
+    BaseType_t* higher_priority_task_woken);
 void stepper_segment_set_active(std::uint64_t execution_id);
 void IRAM_ATTR stepper_segment_clear_active_from_isr();
 

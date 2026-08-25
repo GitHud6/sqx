@@ -120,4 +120,16 @@ void IRAM_ATTR step_timer_driver_stop_from_isr() {
     }
 }
 
+void IRAM_ATTR step_timer_driver_update_interval_from_isr(const std::uint32_t interval_us) {
+    if (!s_running.load() || s_timer == nullptr || interval_us == 0) {
+        return;
+    }
+    const gptimer_alarm_config_t alarm = {
+        .alarm_count = interval_us,
+        .reload_count = 0,
+        .flags = {.auto_reload_on_alarm = true},
+    };
+    gptimer_set_alarm_action(s_timer, &alarm);
+}
+
 }  // namespace ray2::driver

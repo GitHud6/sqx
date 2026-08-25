@@ -40,6 +40,7 @@ ExecutionCallback s_execution_callback = nullptr;
 void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
+std::atomic<std::size_t> s_segment_prepared_blocks = 0;
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kJunctionDeviationMm = 0.01;
@@ -98,6 +99,12 @@ double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& curren
 void planner_recalculate_locked() {
     if (s_block_count == 0) {
         s_block_planned = s_block_tail;
+        return;
+    }
+
+    // Published segments own their velocity profile until the ISR reports
+    // completion, so look-ahead must not rewrite their source blocks.
+    if (s_segment_prepared_blocks.load(std::memory_order_acquire) != 0) {
         return;
     }
 
@@ -278,6 +285,21 @@ bool current_block_snapshot(MotionBlock& block) {
     return true;
 }
 
+bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    if (offset >= s_block_count) {
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        return false;
+    }
+    std::size_t index = s_block_tail;
+    for (std::size_t position = 0; position < offset; ++position) {
+        index = block_index_after(index);
+    }
+    block = s_block_buffer[index];
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    return true;
+}
+
 void discard_current_block(const MotionBlock& block);
 
 void discard_current_block(const MotionBlock& block) {
@@ -289,6 +311,10 @@ void discard_current_block(const MotionBlock& block) {
             current.reset_generation == block.reset_generation) {
             s_block_tail = block_index_after(s_block_tail);
             --s_block_count;
+            const std::size_t prepared = s_segment_prepared_blocks.load(std::memory_order_acquire);
+            if (prepared != 0) {
+                s_segment_prepared_blocks.store(prepared - 1, std::memory_order_release);
+            }
             planner_recalculate_locked();
             capacity_waiter = s_capacity_waiter;
         }
@@ -333,40 +359,68 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
     return s_reset_generation.load() == block_generation;
 }
 
-bool execute_block(const MotionBlock& block) {
-    if (block.type != MotionBlockType::Motion) {
+void fill_segment_ring_from_planner() {
+    while (stepper::stepper_segment_free_slots() != 0) {
+        if (stepper::stepper_prep_profile().active) {
+            stepper::stepper_prep_fill();
+            if (stepper::stepper_prep_profile().active) {
+                return;
+            }
+            continue;
+        }
+
+        MotionBlock candidate = {};
+        const std::size_t offset = s_segment_prepared_blocks.load(std::memory_order_acquire);
+        if (!queued_block_snapshot(offset, candidate) || candidate.type != MotionBlockType::Motion) {
+            return;
+        }
+        if (!stepper::stepper_prep_start_block(candidate)) {
+            return;
+        }
+        // Freeze before publishing the first segment. Concurrent submission
+        // must not let look-ahead mutate this block's copied profile.
+        s_segment_prepared_blocks.fetch_add(1, std::memory_order_release);
+    }
+}
+
+void mark_isr_started_block_active() {
+    if (!stepper::timer_stepper_executor_is_busy()) {
+        return;
+    }
+    const auto diagnostics = stepper::stepper_segment_diagnostics();
+    MotionBlock block = {};
+    if (!diagnostics.active || !current_block_snapshot(block) ||
+        block.execution_id != diagnostics.active_execution_id) {
+        return;
+    }
+    MotionBlock active = {};
+    if (!active_block_snapshot(active) || active.execution_id != block.execution_id) {
+        set_active_block(block);
+        emit_execution_event(ExecutionEventType::BlockStarted, &block);
+    }
+}
+
+bool start_segment_ring() {
+    if (stepper::timer_stepper_executor_start_from_segment_ring() != ESP_OK) {
         return false;
     }
-
-    stepper::StepSegment segment = {};
-    segment.execution_id = block.execution_id;
-    segment.axis_steps[0] = block.plan.steps[0];
-    segment.axis_steps[1] = block.plan.steps[1];
-    segment.positive_direction[0] = block.plan.positive_direction[0];
-    segment.positive_direction[1] = block.plan.positive_direction[1];
-    segment.major_steps = block.step_event_count;
-    segment.step_interval_us = block.plan.step_interval_us;
-    segment.duration_us = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(
-            static_cast<std::uint64_t>(segment.major_steps) * segment.step_interval_us,
-            std::numeric_limits<std::uint32_t>::max()));
-    segment.laser_power = block.request.spindle_power;
-    segment.motion_mode = block.request.motion_mode;
-    segment.spindle_mode = block.request.spindle_mode;
-    segment.completes_block = true;
-    return stepper::timer_stepper_executor_start_segment(segment) == ESP_OK;
+    mark_isr_started_block_active();
+    return true;
 }
 
 void consume_segment_completions() {
     stepper::SegmentCompletion completion = {};
     while (stepper::stepper_completion_consume(completion)) {
         MotionBlock block = {};
-        if (!active_block_snapshot(block) || block.execution_id != completion.execution_id) {
+        if (!current_block_snapshot(block) || block.execution_id != completion.execution_id) {
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             continue;
         }
 
-        clear_active_block();
+        MotionBlock active = {};
+        if (active_block_snapshot(active) && active.execution_id == completion.execution_id) {
+            clear_active_block();
+        }
         if (completion.status == stepper::SegmentCompletionStatus::Completed) {
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
@@ -384,7 +438,9 @@ void planner_task(void*) {
 
     while (true) {
         consume_segment_completions();
-        if (active_block_snapshot(block)) {
+        fill_segment_ring_from_planner();
+        mark_isr_started_block_active();
+        if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
@@ -402,9 +458,9 @@ void planner_task(void*) {
             continue;
         }
 
-        set_active_block(block);
-        emit_execution_event(ExecutionEventType::BlockStarted, &block);
         if (block.type == MotionBlockType::SpindleDisable) {
+            set_active_block(block);
+            emit_execution_event(ExecutionEventType::BlockStarted, &block);
             clear_active_block();
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
@@ -412,8 +468,7 @@ void planner_task(void*) {
             report_queue_drained();
             continue;
         }
-        if (!execute_block(block)) {
-            clear_active_block();
+        if (!start_segment_ring()) {
             if (s_reset_generation.load() != block.reset_generation) {
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
                 emit_execution_event(ExecutionEventType::BlockCancelled, &block);
@@ -501,6 +556,7 @@ void planner_reset() {
     stepper::timer_stepper_executor_stop();
     clear_active_block();
     stepper::stepper_prep_reset();
+    s_segment_prepared_blocks.store(0, std::memory_order_release);
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);

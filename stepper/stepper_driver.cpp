@@ -7,6 +7,8 @@
 #include "driver/gpio.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
 
 namespace ray2::stepper {
 namespace {
@@ -126,6 +128,21 @@ esp_err_t stepper_set_direction(machine::Axis axis, Direction direction) {
         portEXIT_CRITICAL(&s_position_lock);
     }
     return result;
+}
+
+void IRAM_ATTR stepper_set_direction_from_isr(const machine::Axis axis,
+                                              const Direction direction) {
+    const std::size_t index = static_cast<std::size_t>(axis);
+    if (index >= machine::kAxisCount) {
+        return;
+    }
+    const auto& hardware = machine::raycube_axis(axis);
+    const bool direction_level =
+        (direction == Direction::Positive) ^ hardware.direction_inverted;
+    gpio_ll_set_level(&GPIO, hardware.direction_pin, direction_level ? 1U : 0U);
+    portENTER_CRITICAL_ISR(&s_position_lock);
+    s_directions[index] = direction;
+    portEXIT_CRITICAL_ISR(&s_position_lock);
 }
 
 esp_err_t stepper_pulse(machine::Axis axis) {

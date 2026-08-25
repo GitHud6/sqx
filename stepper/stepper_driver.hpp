@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 
 #include "raycube_machine.hpp"
@@ -38,6 +39,7 @@ struct MachinePosition {
 esp_err_t stepper_init();
 esp_err_t stepper_set_enabled(machine::Axis axis, bool enabled);
 esp_err_t stepper_set_direction(machine::Axis axis, Direction direction);
+void IRAM_ATTR stepper_set_direction_from_isr(machine::Axis axis, Direction direction);
 esp_err_t stepper_pulse(machine::Axis axis);
 
 std::int64_t machine_position_steps(machine::Axis axis);

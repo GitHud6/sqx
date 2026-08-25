@@ -250,7 +250,7 @@ bool stepper_segment_publish(const StepSegment& segment) {
     return true;
 }
 
-bool IRAM_ATTR stepper_segment_consume_from_isr(StepSegment& segment) {
+bool IRAM_ATTR stepper_segment_consume(StepSegment& segment) {
     const std::uint32_t tail = s_segment_tail.load(std::memory_order_relaxed);
     const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
     if (tail == head) {
@@ -271,6 +271,20 @@ std::size_t stepper_segment_free_slots() {
 
 void IRAM_ATTR stepper_segment_record_underflow_from_isr() {
     s_segment_underflow_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool IRAM_ATTR stepper_segment_needs_refill_from_isr() {
+    const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
+    const std::uint32_t tail = s_segment_tail.load(std::memory_order_relaxed);
+    return head - tail == kStepSegmentLowWater;
+}
+
+void IRAM_ATTR stepper_segment_request_refill_from_isr(
+    BaseType_t* const higher_priority_task_woken) {
+    const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
+    if (task != nullptr && higher_priority_task_woken != nullptr) {
+        vTaskNotifyGiveFromISR(task, higher_priority_task_woken);
+    }
 }
 
 void stepper_segment_set_active(const std::uint64_t execution_id) {

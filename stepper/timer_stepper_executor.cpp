@@ -28,11 +28,24 @@ struct MotionState {
     std::int32_t completed_steps = 0;
     std::int64_t error = 0;
     std::uint64_t execution_id = 0;
+    bool completes_block = false;
     bool x_is_major = true;
     bool enabled[machine::kAxisCount] = {};
 };
 
 MotionState s_motion = {};
+
+MotionState motion_from_segment(const StepSegment& segment) {
+    MotionState motion = {};
+    motion.axis_steps[0] = segment.axis_steps[0];
+    motion.axis_steps[1] = segment.axis_steps[1];
+    motion.major_steps = segment.major_steps;
+    motion.minor_steps = std::min(segment.axis_steps[0], segment.axis_steps[1]);
+    motion.x_is_major = segment.axis_steps[0] >= segment.axis_steps[1];
+    motion.execution_id = segment.execution_id;
+    motion.completes_block = segment.completes_block;
+    return motion;
+}
 
 void IRAM_ATTR trigger_pulse(const std::size_t axis) {
     driver::rmt_step_pulse_driver_trigger(axis);
@@ -61,14 +74,39 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     s_timer_interrupts.fetch_add(1);
     const bool finished = s_motion.completed_steps == s_motion.major_steps;
     if (finished) {
-        s_busy.store(false);
-        driver::step_timer_driver_stop_from_isr();
-        stepper_segment_clear_active_from_isr();
-        const SegmentCompletion completion = {
-            .execution_id = s_motion.execution_id,
-            .status = SegmentCompletionStatus::Completed,
-        };
-        stepper_completion_publish_from_isr(completion, &task_woken);
+        const MotionState completed_motion = s_motion;
+        if (completed_motion.completes_block) {
+            const SegmentCompletion completion = {
+                .execution_id = completed_motion.execution_id,
+                .status = SegmentCompletionStatus::Completed,
+            };
+            stepper_completion_publish_from_isr(completion, &task_woken);
+        }
+        StepSegment next = {};
+        if (stepper_segment_consume(next)) {
+            for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+                stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
+                                                next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
+            }
+            s_motion = motion_from_segment(next);
+            stepper_segment_set_active(next.execution_id);
+            driver::step_timer_driver_update_interval_from_isr(next.step_interval_us);
+            if (stepper_segment_needs_refill_from_isr()) {
+                stepper_segment_request_refill_from_isr(&task_woken);
+            }
+        } else {
+            s_busy.store(false);
+            driver::step_timer_driver_stop_from_isr();
+            stepper_segment_clear_active_from_isr();
+            if (!completed_motion.completes_block) {
+                stepper_segment_record_underflow_from_isr();
+                const SegmentCompletion fault = {
+                    .execution_id = completed_motion.execution_id,
+                    .status = SegmentCompletionStatus::Faulted,
+                };
+                stepper_completion_publish_from_isr(fault, &task_woken);
+            }
+        }
     }
     portEXIT_CRITICAL_ISR(&s_motion_lock);
     return task_woken == pdTRUE;
@@ -107,14 +145,8 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
                  static_cast<long>(segment.axis_steps[1]), static_cast<long>(segment.major_steps));
         return ESP_ERR_NOT_SUPPORTED;
     }
-    MotionState motion = {};
-    motion.axis_steps[0] = segment.axis_steps[0]; motion.axis_steps[1] = segment.axis_steps[1];
-    motion.major_steps = major;
-    motion.minor_steps = std::min(segment.axis_steps[0], segment.axis_steps[1]);
-    motion.x_is_major = segment.axis_steps[0] >= segment.axis_steps[1];
-    motion.execution_id = segment.execution_id;
+    MotionState motion = motion_from_segment(segment);
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (segment.axis_steps[axis] == 0) continue;
         const auto current = static_cast<machine::Axis>(axis);
         const esp_err_t direction_result =
             stepper_set_direction(current, segment.positive_direction[axis] ? Direction::Positive : Direction::Negative);
@@ -143,6 +175,14 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
         timer_stepper_executor_stop(); return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+esp_err_t timer_stepper_executor_start_from_segment_ring() {
+    StepSegment segment = {};
+    if (!stepper_segment_consume(segment)) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    return timer_stepper_executor_start_segment(segment);
 }
 
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
