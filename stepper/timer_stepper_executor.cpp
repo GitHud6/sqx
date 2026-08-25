@@ -92,7 +92,7 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             s_motion = motion_from_segment(next);
             laser::laser_apply_segment_power_from_isr(next.laser_power_per_mille,
                                                        next.execution_id);
-            stepper_segment_set_active(next.execution_id);
+            stepper_segment_set_active(next);
             driver::step_timer_driver_update_interval_from_isr(next.step_interval_us);
             if (stepper_segment_needs_refill_from_isr()) {
                 stepper_segment_request_refill_from_isr(&task_woken);
@@ -171,7 +171,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     portEXIT_CRITICAL(&s_motion_lock);
     laser::laser_apply_segment_power_from_isr(segment.laser_power_per_mille,
                                                segment.execution_id);
-    stepper_segment_set_active(segment.execution_id);
+    stepper_segment_set_active(segment);
     const esp_err_t result = driver::step_timer_driver_start(segment.step_interval_us);
     if (result != ESP_OK) {
         ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) interval=%lu",

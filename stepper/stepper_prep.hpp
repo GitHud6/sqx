@@ -32,6 +32,9 @@ struct StepSegment {
     std::uint32_t step_interval_us = 0;
     double start_speed_mm_per_min = 0.0;
     double end_speed_mm_per_min = 0.0;
+    // Prepared outside the ISR for status reporting while this segment is active.
+    std::uint32_t start_speed_tenths_mm_per_min = 0;
+    std::uint32_t end_speed_tenths_mm_per_min = 0;
     double laser_power = 0.0;
     std::uint16_t laser_power_per_mille = 0;
     motion::MotionType motion_mode = motion::MotionType::Rapid;
@@ -57,6 +60,9 @@ struct SegmentExecutionDiagnostics {
     std::uint64_t underflow_count = 0;
     bool active = false;
     std::uint64_t active_execution_id = 0;
+    std::uint32_t active_step_interval_us = 0;
+    std::uint32_t active_start_speed_tenths_mm_per_min = 0;
+    std::uint32_t active_end_speed_tenths_mm_per_min = 0;
     std::size_t pending_completions = 0;
 };
 
@@ -87,7 +93,7 @@ void IRAM_ATTR stepper_segment_record_underflow_from_isr();
 bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
 void IRAM_ATTR stepper_segment_request_refill_from_isr(
     BaseType_t* higher_priority_task_woken);
-void stepper_segment_set_active(std::uint64_t execution_id);
+void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment);
 void IRAM_ATTR stepper_segment_clear_active_from_isr();
 
 void stepper_completion_set_notification_task(TaskHandle_t task);

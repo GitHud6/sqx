@@ -18,6 +18,9 @@ std::atomic<std::uint32_t> s_segment_tail = 0;
 std::atomic<std::size_t> s_segment_high_water = 0;
 std::atomic<std::uint64_t> s_segment_underflow_count = 0;
 std::atomic<std::uint64_t> s_active_execution_id = 0;
+std::atomic<std::uint32_t> s_active_step_interval_us = 0;
+std::atomic<std::uint32_t> s_active_start_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_active_end_speed_tenths_mm_per_min = 0;
 
 std::array<SegmentCompletion, kStepCompletionBufferLength> s_completion_buffer = {};
 std::atomic<std::uint32_t> s_completion_head = 0;
@@ -49,6 +52,12 @@ void update_segment_high_water(const std::size_t count) {
                                                        std::memory_order_relaxed,
                                                        std::memory_order_relaxed)) {
     }
+}
+
+std::uint32_t speed_to_tenths_mm_per_min(const double speed) {
+    if (!std::isfinite(speed) || speed <= 0.0) return 0;
+    return static_cast<std::uint32_t>(std::min(
+        std::llround(speed * 10.0), static_cast<long long>(std::numeric_limits<std::uint32_t>::max())));
 }
 
 bool block_is_valid(const planner::PlannerBlock& block) {
@@ -129,6 +138,8 @@ StepSegment build_segment(const std::uint32_t segment_index) {
         static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us / segment.major_steps))));
     segment.start_speed_mm_per_min = start_speed;
     segment.end_speed_mm_per_min = final_speed;
+    segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(start_speed);
+    segment.end_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(final_speed);
     const bool laser_enabled =
         s_source_block.request.motion_mode == motion::MotionType::Linear &&
         s_source_block.request.spindle_mode != motion::SpindleMode::Off;
@@ -169,6 +180,9 @@ void stepper_prep_reset() {
     s_segment_high_water.store(0, std::memory_order_relaxed);
     s_segment_underflow_count.store(0, std::memory_order_relaxed);
     s_active_execution_id.store(0, std::memory_order_relaxed);
+    s_active_step_interval_us.store(0, std::memory_order_relaxed);
+    s_active_start_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+    s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_completion_head.store(0, std::memory_order_relaxed);
     s_completion_tail.store(0, std::memory_order_relaxed);
     s_profile = {};
@@ -296,12 +310,20 @@ void stepper_segment_request_refill_from_isr(
     }
 }
 
-void stepper_segment_set_active(const std::uint64_t execution_id) {
-    s_active_execution_id.store(execution_id, std::memory_order_release);
+void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment) {
+    s_active_step_interval_us.store(segment.step_interval_us, std::memory_order_relaxed);
+    s_active_start_speed_tenths_mm_per_min.store(
+        segment.start_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_active_end_speed_tenths_mm_per_min.store(
+        segment.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_active_execution_id.store(segment.execution_id, std::memory_order_release);
 }
 
 void stepper_segment_clear_active_from_isr() {
     s_active_execution_id.store(0, std::memory_order_release);
+    s_active_step_interval_us.store(0, std::memory_order_relaxed);
+    s_active_start_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+    s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
 }
 
 void stepper_completion_set_notification_task(const TaskHandle_t task) {
@@ -343,6 +365,11 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     diagnostics.underflow_count = s_segment_underflow_count.load(std::memory_order_relaxed);
     diagnostics.active_execution_id = s_active_execution_id.load(std::memory_order_acquire);
     diagnostics.active = diagnostics.active_execution_id != 0;
+    diagnostics.active_step_interval_us = s_active_step_interval_us.load(std::memory_order_relaxed);
+    diagnostics.active_start_speed_tenths_mm_per_min =
+        s_active_start_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
+    diagnostics.active_end_speed_tenths_mm_per_min =
+        s_active_end_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
     diagnostics.pending_completions = completion_count_snapshot();
     return diagnostics;
 }

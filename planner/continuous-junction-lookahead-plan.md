@@ -224,6 +224,18 @@ block 不会因临时扫描指针移动而继承错误速度。
 - 运动连续期间轴 enable 不会在相邻 block 之间反复切换；
 - 单段运动和多段连续运动的 STEP 数量均正确。
 
+当前实现状态：`StepSegment` 原本已携带 planner 生成的起止速度与 interval，executor 也会在
+segment 边界由 ISR 直接装载下一项。本阶段补充 `$POS/STATUS` 的
+`segment=(...,interval=...,speed=(start,end),...)` 只读诊断，用于实机确认 segment 实际采用
+的 profile 没有在 block 或 segment 边界退化为零速。速度定点诊断值在 `stepper_prep`
+生产阶段预先生成，GPTimer ISR 切换 segment 时只加载整数诊断字段，不执行浮点换算。
+
+实机验收记录：连续同向短段测试中，执行中的 block 具有
+`segment=(...,active=1,id=5,interval=1250,speed=(600.0,600.0),...)`，其后续 block 的
+lookahead 为 `b1: e=0.0,x=600.0,j=inf` 与 `b2: e=600.0,x=600.0,j=inf`。任务完成后
+实际位置为 `X=23.0000`，并且 `underflows=0`、`retrigger=(0,0)`。继续使用灰度文件实机
+雕刻时，图案效果符合预期，原先由 block 边界反复起停造成的“嘟嘟嘟”声音已消失。阶段四验收通过。
+
 ### 阶段五：LightBurn 灰度雕刻验收
 
 实现内容：
