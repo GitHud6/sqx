@@ -6,6 +6,7 @@
 
 #include "command_dispatch.hpp"
 #include "line_assembler.hpp"
+#include "planner.hpp"
 #include "realtime_command.hpp"
 #include "uart0_driver.hpp"
 
@@ -44,6 +45,11 @@ bool protocol_process_byte(LineAssembler& assembler, std::uint8_t byte) {
         realtime_command_receive(realtime_command);
         if (realtime_command == RealtimeCommand::StatusReport) {
             return command_report_realtime_status();
+        }
+        if (realtime_command == RealtimeCommand::FeedHold) {
+            planner::planner_request_feed_hold();
+        } else if (realtime_command == RealtimeCommand::CycleStart) {
+            planner::planner_resume();
         }
         return true;
     }

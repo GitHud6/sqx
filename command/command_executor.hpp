@@ -72,6 +72,10 @@ struct ParsedBlock {
     // so a compatibility M9 cannot alter laser state.
     bool has_coolant_off = false;
     bool has_program_end = false;
+    bool has_program_pause = false;
+    bool has_dwell = false;
+    bool has_dwell_parameter = false;
+    double dwell_seconds = 0.0;
 };
 
 Error execute_line(const char* line, std::size_t length, ParserState& state);

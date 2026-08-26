@@ -44,6 +44,7 @@ std::atomic<std::size_t> s_segment_prepared_blocks = 0;
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
+constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
 constexpr char kLogTag[] = "planner";
 
 std::size_t block_index_after(const std::size_t index) {
@@ -372,7 +373,7 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
         if (s_reset_generation.load() != block_generation) {
             return false;
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(kHoldWaitTime == 0 ? 1 : kHoldWaitTime);
     }
     return s_reset_generation.load() == block_generation;
 }
@@ -482,6 +483,41 @@ void planner_task(void*) {
             clear_active_block();
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+            discard_current_block(block);
+            report_queue_drained();
+            continue;
+        }
+        if (block.type == MotionBlockType::ProgramPause) {
+            set_active_block(block);
+            emit_execution_event(ExecutionEventType::BlockStarted, &block);
+            clear_active_block();
+            ++s_completed_block_count;
+            emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+            discard_current_block(block);
+            s_control_state.store(ControlState::Hold);
+            report_queue_drained();
+            continue;
+        }
+        if (block.type == MotionBlockType::Dwell) {
+            set_active_block(block);
+            emit_execution_event(ExecutionEventType::BlockStarted, &block);
+            std::uint32_t remaining = block.dwell_milliseconds;
+            while (remaining != 0 && s_reset_generation.load() == block.reset_generation) {
+                const TickType_t delay = pdMS_TO_TICKS(std::min<std::uint32_t>(remaining, 10));
+                vTaskDelay(delay == 0 ? 1 : delay);
+                remaining = remaining > 10 ? remaining - 10 : 0;
+                while (s_control_state.load() == ControlState::Hold &&
+                       s_reset_generation.load() == block.reset_generation) {
+                    vTaskDelay(kHoldWaitTime == 0 ? 1 : kHoldWaitTime);
+                }
+            }
+            clear_active_block();
+            if (s_reset_generation.load() != block.reset_generation) {
+                emit_execution_event(ExecutionEventType::BlockCancelled, &block);
+            } else {
+                ++s_completed_block_count;
+                emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+            }
             discard_current_block(block);
             report_queue_drained();
             continue;
@@ -603,6 +639,10 @@ bool planner_is_idle() {
     return queue_is_empty && !has_active_block;
 }
 
+bool planner_is_holding() {
+    return s_control_state.load() == ControlState::Hold;
+}
+
 std::size_t planner_free_blocks() {
     if (s_planner_task == nullptr) {
         return 0;
@@ -632,6 +672,20 @@ void planner_wait_for_free_block() {
 
 std::uint64_t planner_completed_block_count() {
     return s_completed_block_count.load();
+}
+
+SubmitResult planner_submit_program_pause() {
+    MotionBlock block = {};
+    block.type = MotionBlockType::ProgramPause;
+    return submit_block(block);
+}
+
+SubmitResult planner_submit_dwell(const std::uint32_t milliseconds) {
+    if (milliseconds == 0) return SubmitResult::Rejected;
+    MotionBlock block = {};
+    block.type = MotionBlockType::Dwell;
+    block.dwell_milliseconds = milliseconds;
+    return submit_block(block);
 }
 
 PlannerDiagnostics planner_diagnostics() {

@@ -18,6 +18,8 @@ constexpr double kJunctionDeviationMm = 0.01;
 enum class MotionBlockType {
     Motion,
     SpindleDisable,
+    ProgramPause,
+    Dwell,
 };
 
 // This is the planner-owned motion representation consumed by the stepper executor.
@@ -38,6 +40,7 @@ struct PlannerBlock {
     double max_junction_speed_sqr = 0.0;
     std::uint32_t reset_generation = 0;
     std::uint64_t execution_id = 0;
+    std::uint32_t dwell_milliseconds = 0;
 };
 
 // Kept while callers migrate from the original block name.
@@ -101,11 +104,14 @@ using ExecutionCallback = void (*)(const ExecutionEvent& event, void* user_data)
 esp_err_t planner_start();
 SubmitResult planner_submit(const MotionBlock& block);
 SubmitResult planner_submit_spindle_disable();
+SubmitResult planner_submit_program_pause();
+SubmitResult planner_submit_dwell(std::uint32_t milliseconds);
 void planner_set_execution_callback(ExecutionCallback callback, void* user_data);
 void planner_request_feed_hold();
 void planner_resume();
 void planner_reset();
 bool planner_is_idle();
+bool planner_is_holding();
 std::size_t planner_free_blocks();
 void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();

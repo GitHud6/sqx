@@ -95,6 +95,7 @@ bool snapshot_parser_state(command::ParserState& state) {
 const char* realtime_state_text(const stepper::MachinePosition& position) {
     if (homing::homing_is_active()) return "Home";
     if (position.state != stepper::PositionState::Known) return "Alarm";
+    if (planner::planner_is_holding()) return "Hold";
     return planner::planner_is_idle() ? "Idle" : "Run";
 }
 
@@ -206,7 +207,8 @@ bool is_jog_command(const char* line, const std::size_t length) {
 }
 
 bool execute_jog_command(const char* payload, const std::size_t payload_length) {
-    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
+    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle() ||
+        planner::planner_is_holding()) {
         return report_status(command::Error::MotionBusy);
     }
     if (stepper::machine_position_state() != stepper::PositionState::Known) {

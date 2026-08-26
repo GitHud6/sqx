@@ -84,6 +84,10 @@ Error parse_g_word(double value, ParsedBlock& parsed) {
             parsed.has_motion = true;
             parsed.motion_mode = value == 0.0 ? MotionMode::Rapid : MotionMode::Linear;
             return Error::Ok;
+        case 4:
+            if (parsed.has_dwell) return Error::ModalGroupViolation;
+            parsed.has_dwell = true;
+            return Error::Ok;
         case 20:
         case 21:
             if (parsed.has_units) return Error::ModalGroupViolation;
@@ -122,7 +126,13 @@ Error parse_m_word(double value, ParsedBlock& parsed) {
     }
 
     switch (static_cast<int>(value)) {
+        case 0:
+        case 1:
+            if (parsed.has_program_pause) return Error::ModalGroupViolation;
+            parsed.has_program_pause = true;
+            return Error::Ok;
         case 2:
+        case 30:
             if (parsed.has_program_end) return Error::ModalGroupViolation;
             parsed.has_program_end = true;
             return Error::Ok;
@@ -214,6 +224,14 @@ Error parse_line(const char* line, std::size_t length, ParsedBlock& parsed) {
             parsed.spindle_speed = value;
             continue;
         }
+        if (letter == 'P') {
+            if (!parsed.has_dwell || parsed.has_dwell_parameter || value < 0.0) {
+                return Error::UnsupportedCommand;
+            }
+            parsed.has_dwell_parameter = true;
+            parsed.dwell_seconds = value;
+            continue;
+        }
         return Error::UnsupportedCommand;
     }
     return in_comment ? Error::BadNumberFormat : Error::Ok;
@@ -254,6 +272,28 @@ Error submit_spindle_disable() {
             return Error::MotionBusy;
         case planner::SubmitResult::Rejected:
             return Error::MotionRejected;
+    }
+    return Error::MotionRejected;
+}
+
+Error submit_program_pause() {
+    switch (planner::planner_submit_program_pause()) {
+        case planner::SubmitResult::Accepted: return Error::Ok;
+        case planner::SubmitResult::Full: return Error::MotionBusy;
+        case planner::SubmitResult::Rejected: return Error::MotionRejected;
+    }
+    return Error::MotionRejected;
+}
+
+Error submit_dwell(const double seconds) {
+    if (!std::isfinite(seconds) || seconds <= 0.0 || seconds > 3600.0) {
+        return Error::ValueOutOfRange;
+    }
+    const double milliseconds = seconds * 1000.0;
+    switch (planner::planner_submit_dwell(static_cast<std::uint32_t>(std::ceil(milliseconds)))) {
+        case planner::SubmitResult::Accepted: return Error::Ok;
+        case planner::SubmitResult::Full: return Error::MotionBusy;
+        case planner::SubmitResult::Rejected: return Error::MotionRejected;
     }
     return Error::MotionRejected;
 }
@@ -359,10 +399,38 @@ Error execute_line_internal(const char* line,
         if (has_axis) return Error::UnsupportedCommand;
         const Error submit_error = submit_spindle_disable();
         if (submit_error != Error::Ok) return submit_error;
+        next_state.motion_mode = MotionMode::Linear;
+        next_state.plane = PlaneMode::XY;
+        next_state.distance_mode = DistanceMode::Absolute;
+        next_state.work_coordinate_system = WorkCoordinateSystem::G54;
+        next_state.work_offset_mm[0] = 0.0;
+        next_state.work_offset_mm[1] = 0.0;
+        next_state.work_offset_mm[2] = 0.0;
         next_state.spindle_mode = SpindleMode::Off;
         motion::MotionRequest no_motion_request = {};
         commit_parser_state(state, next_state, no_motion_request, false);
         return Error::ProgramEnd;
+    }
+
+    if (parsed.has_program_pause) {
+        if (has_axis || parsed.has_dwell || parsed.has_spindle_mode || parsed.has_spindle_speed) {
+            return Error::UnsupportedCommand;
+        }
+        const Error submit_error = submit_program_pause();
+        if (submit_error != Error::Ok) return submit_error;
+        commit_parser_state(state, next_state, request, false);
+        return Error::Ok;
+    }
+
+    if (parsed.has_dwell) {
+        if (has_axis || !parsed.has_dwell_parameter || parsed.has_spindle_mode ||
+            parsed.has_spindle_speed) {
+            return Error::UnsupportedCommand;
+        }
+        const Error submit_error = submit_dwell(parsed.dwell_seconds);
+        if (submit_error != Error::Ok) return submit_error;
+        commit_parser_state(state, next_state, request, false);
+        return Error::Ok;
     }
 
     // Modal-only G00 is valid in file headers. The observed LightBurn trailer
