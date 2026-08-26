@@ -165,6 +165,60 @@ bool report_coordinate_parameters() {
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
+bool report_grbl_settings() {
+    const auto& x_axis = machine::raycube_axis(machine::Axis::X);
+    const auto& y_axis = machine::raycube_axis(machine::Axis::Y);
+    const auto& laser = machine::raycube_laser();
+    static char response[512] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "$0=%u\r\n$1=250\r\n$10=1\r\n$11=%.3f\r\n$20=1\r\n$22=1\r\n$23=0\r\n"
+        "$30=%lu\r\n$31=0\r\n$32=1\r\n$100=%.3f\r\n$101=%.3f\r\n"
+        "$110=%.3f\r\n$111=%.3f\r\n$120=%.3f\r\n$121=%.3f\r\n"
+        "$130=%.3f\r\n$131=%.3f\r\nok\r\n",
+        machine::kStepPulseMicroseconds, planner::kJunctionDeviationMm,
+        static_cast<unsigned long>(laser.max_power), static_cast<double>(x_axis.steps_per_mm),
+        static_cast<double>(y_axis.steps_per_mm), static_cast<double>(x_axis.max_rate_mm_per_min),
+        static_cast<double>(y_axis.max_rate_mm_per_min),
+        static_cast<double>(x_axis.acceleration_mm_per_sec2),
+        static_cast<double>(y_axis.acceleration_mm_per_sec2), static_cast<double>(x_axis.max_travel_mm),
+        static_cast<double>(y_axis.max_travel_mm));
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
+bool parse_jog_command(const char* line,
+                       const std::size_t length,
+                       const char*& payload,
+                       std::size_t& payload_length) {
+    if (line == nullptr || length <= 3 || line[0] != '$' ||
+        std::toupper(static_cast<unsigned char>(line[1])) != 'J' || line[2] != '=') {
+        return false;
+    }
+    payload = line + 3;
+    payload_length = length - 3;
+    return true;
+}
+
+bool is_jog_command(const char* line, const std::size_t length) {
+    return line != nullptr && length >= 2 && line[0] == '$' &&
+           std::toupper(static_cast<unsigned char>(line[1])) == 'J';
+}
+
+bool execute_jog_command(const char* payload, const std::size_t payload_length) {
+    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
+        return report_status(command::Error::MotionBusy);
+    }
+    if (stepper::machine_position_state() != stepper::PositionState::Known) {
+        return report_status(command::Error::PositionUnknown);
+    }
+
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const command::Error result = command::execute_jog_line(payload, payload_length, s_parser_state);
+    xSemaphoreGive(s_parser_mutex);
+    return report_status(result);
+}
+
 bool is_position_command(const char* line, std::size_t length) {
     return line != nullptr && length >= 5 && line[0] == '$' &&
            std::toupper(static_cast<unsigned char>(line[1])) == 'P' &&
@@ -440,6 +494,22 @@ bool command_dispatch(const char* line, std::size_t length) {
     }
     if (equals_ignore_case(line, length, "$#")) {
         return report_coordinate_parameters();
+    }
+    if (equals_ignore_case(line, length, "$$")) {
+        return report_grbl_settings();
+    }
+    if (equals_ignore_case(line, length, "$X")) {
+        // ray2-old returns ok outside Alarm as a no-op. RayCube currently has
+        // no separate Alarm lock, so this must not promote an unknown position.
+        return homing::homing_is_active() ? write_text("error:homing-busy\r\n") : write_text("ok\r\n");
+    }
+    const char* jog_payload = nullptr;
+    std::size_t jog_payload_length = 0;
+    if (parse_jog_command(line, length, jog_payload, jog_payload_length)) {
+        return execute_jog_command(jog_payload, jog_payload_length);
+    }
+    if (is_jog_command(line, length)) {
+        return report_status(command::Error::InvalidJogCommand);
     }
 
     if (is_homing_status_command(line, length)) {

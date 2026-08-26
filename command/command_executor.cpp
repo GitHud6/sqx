@@ -273,32 +273,55 @@ void commit_parser_state(ParserState& state,
 
 }  // namespace
 
-Error execute_line(const char* line, std::size_t length, ParserState& state) {
+Error execute_line_internal(const char* line,
+                            std::size_t length,
+                            ParserState& state,
+                            const bool is_jog) {
     if (length == 0) return Error::Ok;
-    if (line[0] == '$' || line[0] == '[') return Error::SystemCommandUnsupported;
-    if (state.system_state == SystemState::Alarm || state.system_state == SystemState::Jog) return Error::SystemGcLock;
+    if (!is_jog && (line[0] == '$' || line[0] == '[')) return Error::SystemCommandUnsupported;
+    if (!is_jog && (state.system_state == SystemState::Alarm || state.system_state == SystemState::Jog)) {
+        return Error::SystemGcLock;
+    }
 
     ParsedBlock parsed = {};
     const Error result = parse_line(line, length, parsed);
     if (result != Error::Ok) return result;
 
+    const bool has_axis_word = parsed.has_axis[0] || parsed.has_axis[1] || parsed.has_axis[2];
+    if (is_jog) {
+        if (!parsed.has_distance_mode || parsed.distance_mode != DistanceMode::Incremental ||
+            !parsed.has_feed_rate || parsed.feed_rate <= 0.0 || !has_axis_word ||
+            (parsed.has_motion && parsed.motion_mode != MotionMode::Linear) || parsed.has_plane ||
+            parsed.has_cutter_compensation || parsed.has_work_coordinate_system ||
+            parsed.has_spindle_mode || parsed.has_spindle_speed || parsed.has_coolant_off ||
+            parsed.has_program_end) {
+            return Error::InvalidJogCommand;
+        }
+    }
+
     ParserState next_state = state;
-    if (parsed.has_units) next_state.units = parsed.units;
-    if (parsed.has_distance_mode) next_state.distance_mode = parsed.distance_mode;
-    if (parsed.has_motion) next_state.motion_mode = parsed.motion_mode;
-    if (parsed.has_plane) next_state.plane = parsed.plane;
-    if (parsed.has_cutter_compensation) {
-        next_state.cutter_compensation = parsed.cutter_compensation;
+    if (is_jog) {
+        next_state.distance_mode = DistanceMode::Incremental;
+        next_state.motion_mode = MotionMode::Linear;
+        if (parsed.has_units) next_state.units = parsed.units;
+    } else {
+        if (parsed.has_units) next_state.units = parsed.units;
+        if (parsed.has_distance_mode) next_state.distance_mode = parsed.distance_mode;
+        if (parsed.has_motion) next_state.motion_mode = parsed.motion_mode;
+        if (parsed.has_plane) next_state.plane = parsed.plane;
+        if (parsed.has_cutter_compensation) {
+            next_state.cutter_compensation = parsed.cutter_compensation;
+        }
+        if (parsed.has_work_coordinate_system) {
+            next_state.work_coordinate_system = parsed.work_coordinate_system;
+            // G54 is currently the machine-origin work coordinate system. Keep
+            // the offset explicit so a persisted work offset can be added later.
+            next_state.work_offset_mm[0] = 0.0;
+            next_state.work_offset_mm[1] = 0.0;
+            next_state.work_offset_mm[2] = 0.0;
+        }
+        if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
     }
-    if (parsed.has_work_coordinate_system) {
-        next_state.work_coordinate_system = parsed.work_coordinate_system;
-        // G54 is currently the machine-origin work coordinate system. Keep
-        // the offset explicit so a persisted work offset can be added later.
-        next_state.work_offset_mm[0] = 0.0;
-        next_state.work_offset_mm[1] = 0.0;
-        next_state.work_offset_mm[2] = 0.0;
-    }
-    if (parsed.has_spindle_mode) next_state.spindle_mode = parsed.spindle_mode;
 
     const double unit_scale = next_state.units == Units::Inches ? kMillimetersPerInch : 1.0;
     if (parsed.has_feed_rate) {
@@ -314,6 +337,10 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
     request.feed_rate_mm_per_min = next_state.feed_rate_mm_per_min;
     request.spindle_power = next_state.spindle_speed;
     request.spindle_mode = spindle_mode(next_state.spindle_mode);
+    if (is_jog) {
+        request.spindle_power = 0.0;
+        request.spindle_mode = motion::SpindleMode::Off;
+    }
     for (int axis = 0; axis < 3; ++axis) {
         request.start_mm[axis] = state.planned_machine_position_mm[axis];
         request.target_mm[axis] = state.planned_machine_position_mm[axis];
@@ -360,6 +387,7 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
         if (validation_plan.steps[0] == 0 && validation_plan.steps[1] == 0) {
             // No STEP pulse will be emitted. Keep the planned machine position
             // unchanged while committing modal words.
+            if (is_jog) return Error::Ok;
             commit_parser_state(state, next_state, request, false);
             return Error::Ok;
         }
@@ -370,8 +398,25 @@ Error execute_line(const char* line, std::size_t length, ParserState& state) {
         if (submit_error != Error::Ok) return submit_error;
     }
 
+    if (is_jog) {
+        if (has_axis) {
+            for (int axis = 0; axis < 3; ++axis) {
+                state.planned_machine_position_mm[axis] = request.target_mm[axis];
+            }
+        }
+        return Error::Ok;
+    }
+
     commit_parser_state(state, next_state, request, has_axis);
     return Error::Ok;
+}
+
+Error execute_line(const char* line, const std::size_t length, ParserState& state) {
+    return execute_line_internal(line, length, state, false);
+}
+
+Error execute_jog_line(const char* line, const std::size_t length, ParserState& state) {
+    return execute_line_internal(line, length, state, true);
 }
 
 Error sync_parser_position_from_machine(ParserState& state) {
@@ -402,6 +447,7 @@ const char* error_text(Error error) {
         case Error::MotionBusy: return "motion-busy";
         case Error::MotionRejected: return "motion-rejected";
         case Error::PositionUnknown: return "position-unknown";
+        case Error::InvalidJogCommand: return "invalid-jog-command";
         case Error::ProgramEnd: return "program-end";
     }
     return "unknown";

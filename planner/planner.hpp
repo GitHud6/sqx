@@ -13,6 +13,7 @@ namespace ray2::planner {
 
 constexpr std::size_t kPlannerQueueLength = 32;
 constexpr std::size_t kPlannerDiagnosticBlockCount = 3;
+constexpr double kJunctionDeviationMm = 0.01;
 
 enum class MotionBlockType {
     Motion,

@@ -43,7 +43,6 @@ bool s_has_active_block = false;
 std::atomic<std::size_t> s_segment_prepared_blocks = 0;
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
-constexpr double kJunctionDeviationMm = 0.01;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr char kLogTag[] = "planner";
 

@@ -19,6 +19,7 @@ enum class Error {
     MotionBusy,
     MotionRejected,
     PositionUnknown,
+    InvalidJogCommand,
     ProgramEnd,
 };
 
@@ -74,6 +75,8 @@ struct ParsedBlock {
 };
 
 Error execute_line(const char* line, std::size_t length, ParserState& state);
+// Executes a constrained `$J=` payload without changing normal G-code modal state.
+Error execute_jog_line(const char* line, std::size_t length, ParserState& state);
 Error sync_parser_position_from_machine(ParserState& state);
 const char* error_text(Error error);
 
