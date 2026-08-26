@@ -16,6 +16,8 @@ constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 750;
 constexpr std::size_t kStepSegmentLowWater = 16;
+constexpr std::uint32_t kAmassBaseStepRateHz = 8000;
+constexpr std::uint8_t kAmassMaximumLevel = 3;
 
 enum class StepSegmentPhase : std::uint8_t {
     Accelerate,
@@ -30,6 +32,8 @@ struct StepSegment {
     std::int32_t major_steps = 0;
     std::uint32_t duration_us = 0;
     std::uint32_t step_interval_us = 0;
+    // Stage one metadata only. The executor still uses the original interval.
+    std::uint8_t amass_level = 0;
     double start_speed_mm_per_min = 0.0;
     double end_speed_mm_per_min = 0.0;
     // Prepared outside the ISR for status reporting while this segment is active.
@@ -63,6 +67,7 @@ struct SegmentExecutionDiagnostics {
     bool active = false;
     std::uint64_t active_execution_id = 0;
     std::uint32_t active_step_interval_us = 0;
+    std::uint8_t active_amass_level = 0;
     std::uint32_t active_start_speed_tenths_mm_per_min = 0;
     std::uint32_t active_end_speed_tenths_mm_per_min = 0;
     std::size_t pending_completions = 0;
@@ -87,6 +92,9 @@ void stepper_prep_reset();
 bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
+// Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
+std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_us,
+                                        const std::array<std::int32_t, 2>& axis_steps);
 bool stepper_segment_publish(const StepSegment& segment);
 bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
 std::size_t stepper_segment_count();
