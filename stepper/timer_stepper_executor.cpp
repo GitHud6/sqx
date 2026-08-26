@@ -24,14 +24,13 @@ portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
     std::int32_t axis_steps[machine::kAxisCount] = {};
-    std::int32_t major_steps = 0;
-    std::int32_t minor_steps = 0;
-    std::int32_t completed_steps = 0;
-    std::int64_t error = 0;
+    std::int32_t execution_ticks = 0;
+    std::int32_t completed_ticks = 0;
+    std::int64_t axis_error[machine::kAxisCount] = {};
+    std::uint32_t effective_step_interval_us = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
     bool system_motion = false;
-    bool x_is_major = true;
     bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
 };
@@ -42,9 +41,10 @@ MotionState motion_from_segment(const StepSegment& segment) {
     MotionState motion = {};
     motion.axis_steps[0] = segment.axis_steps[0];
     motion.axis_steps[1] = segment.axis_steps[1];
-    motion.major_steps = segment.major_steps;
-    motion.minor_steps = std::min(segment.axis_steps[0], segment.axis_steps[1]);
-    motion.x_is_major = segment.axis_steps[0] >= segment.axis_steps[1];
+    const std::uint32_t amass_scale = 1U << segment.amass_level;
+    motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
+    motion.effective_step_interval_us = std::max<std::uint32_t>(
+        4U, segment.step_interval_us / amass_scale);
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
     motion.system_motion = segment.system_motion;
@@ -63,24 +63,21 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
         return false;
     }
 
-    const machine::Axis major_axis = s_motion.x_is_major ? machine::Axis::X : machine::Axis::Y;
-    const machine::Axis minor_axis = s_motion.x_is_major ? machine::Axis::Y : machine::Axis::X;
-    if (!s_motion.axis_stopped[static_cast<std::size_t>(major_axis)]) {
-        trigger_pulse(static_cast<std::size_t>(major_axis));
-        stepper_record_executed_steps_from_isr(major_axis, 1);
-    }
-    s_motion.error += s_motion.minor_steps;
-    if (s_motion.error * 2 >= s_motion.major_steps) {
-        if (!s_motion.axis_stopped[static_cast<std::size_t>(minor_axis)]) {
-            trigger_pulse(static_cast<std::size_t>(minor_axis));
-            stepper_record_executed_steps_from_isr(minor_axis, 1);
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        s_motion.axis_error[axis] += s_motion.axis_steps[axis];
+        if (s_motion.axis_error[axis] >= s_motion.execution_ticks) {
+            if (!s_motion.axis_stopped[axis]) {
+                const auto current_axis = static_cast<machine::Axis>(axis);
+                trigger_pulse(axis);
+                stepper_record_executed_steps_from_isr(current_axis, 1);
+            }
+            s_motion.axis_error[axis] -= s_motion.execution_ticks;
         }
-        s_motion.error -= s_motion.major_steps;
     }
 
-    ++s_motion.completed_steps;
+    ++s_motion.completed_ticks;
     s_timer_interrupts.fetch_add(1);
-    const bool finished = s_motion.completed_steps == s_motion.major_steps;
+    const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
         const MotionState completed_motion = s_motion;
         if (completed_motion.completes_block) {
@@ -105,7 +102,7 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             laser::laser_apply_segment_power_from_isr(next.laser_power_per_mille,
                                                        next.execution_id);
             stepper_segment_set_active(next);
-            driver::step_timer_driver_update_interval_from_isr(next.step_interval_us);
+            driver::step_timer_driver_update_interval_from_isr(s_motion.effective_step_interval_us);
             if (stepper_segment_needs_refill_from_isr()) {
                 stepper_segment_request_refill_from_isr(&task_woken);
             }
@@ -148,7 +145,8 @@ esp_err_t timer_stepper_executor_init() {
 }
 
 esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
-    if (!s_initialized.load() || segment.major_steps <= 0 || segment.step_interval_us <= 3) {
+    if (!s_initialized.load() || segment.major_steps <= 0 || segment.step_interval_us <= 3 ||
+        segment.amass_level > kAmassMaximumLevel) {
         ESP_LOGE(kLogTag, "TIMER-REJECT reason=invalid-request initialized=%d interval=%lu",
                  s_initialized.load() ? 1 : 0,
                  static_cast<unsigned long>(segment.step_interval_us));
@@ -184,7 +182,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     laser::laser_apply_segment_power_from_isr(segment.laser_power_per_mille,
                                                segment.execution_id);
     stepper_segment_set_active(segment);
-    const esp_err_t result = driver::step_timer_driver_start(segment.step_interval_us);
+    const esp_err_t result = driver::step_timer_driver_start(motion.effective_step_interval_us);
     if (result != ESP_OK) {
         ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) interval=%lu",
                  esp_err_to_name(result), static_cast<long>(segment.axis_steps[0]),

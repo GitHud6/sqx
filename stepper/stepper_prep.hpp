@@ -67,6 +67,7 @@ struct SegmentExecutionDiagnostics {
     bool active = false;
     std::uint64_t active_execution_id = 0;
     std::uint32_t active_step_interval_us = 0;
+    std::uint32_t active_amass_timer_interval_us = 0;
     std::uint8_t active_amass_level = 0;
     std::uint32_t active_start_speed_tenths_mm_per_min = 0;
     std::uint32_t active_end_speed_tenths_mm_per_min = 0;

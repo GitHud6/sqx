@@ -86,6 +86,11 @@ planner 或引入圆弧插补。
 
 - AMASS 只影响 ISR 内的脉冲时序，不改变 planner block、ParserState 或 RMT 驱动边界。
 
+当前实现状态：`timer_stepper_executor` 已改为按每轴误差累积的统一 DDA 执行。对于
+`amass_level=N` 的 segment，执行 tick 数扩展为原主轴步数的 `2^N` 倍，GPTimer 周期缩短为
+原周期的 `1 / 2^N`，而 X/Y 的累计 STEP 数保持 segment 原值。诊断中的
+`interval=原周期->实际timer周期` 用于实机确认；尚待构建和实际步数、轨迹验证。
+
 ### 阶段三：连续短线和灰度文件实机对比
 
 实现内容：

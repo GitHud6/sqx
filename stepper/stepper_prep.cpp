@@ -19,6 +19,7 @@ std::atomic<std::size_t> s_segment_high_water = 0;
 std::atomic<std::uint64_t> s_segment_underflow_count = 0;
 std::atomic<std::uint64_t> s_active_execution_id = 0;
 std::atomic<std::uint32_t> s_active_step_interval_us = 0;
+std::atomic<std::uint32_t> s_active_amass_timer_interval_us = 0;
 std::atomic<std::uint8_t> s_active_amass_level = 0;
 std::atomic<std::uint32_t> s_active_start_speed_tenths_mm_per_min = 0;
 std::atomic<std::uint32_t> s_active_end_speed_tenths_mm_per_min = 0;
@@ -204,6 +205,7 @@ void stepper_prep_reset() {
     s_segment_underflow_count.store(0, std::memory_order_relaxed);
     s_active_execution_id.store(0, std::memory_order_relaxed);
     s_active_step_interval_us.store(0, std::memory_order_relaxed);
+    s_active_amass_timer_interval_us.store(0, std::memory_order_relaxed);
     s_active_amass_level.store(0, std::memory_order_relaxed);
     s_active_start_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
@@ -336,6 +338,10 @@ void stepper_segment_request_refill_from_isr(
 
 void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment) {
     s_active_step_interval_us.store(segment.step_interval_us, std::memory_order_relaxed);
+    s_active_amass_timer_interval_us.store(
+        std::max<std::uint32_t>(4U,
+                                segment.step_interval_us / (1U << segment.amass_level)),
+        std::memory_order_relaxed);
     s_active_amass_level.store(segment.amass_level, std::memory_order_relaxed);
     s_active_start_speed_tenths_mm_per_min.store(
         segment.start_speed_tenths_mm_per_min, std::memory_order_relaxed);
@@ -347,6 +353,7 @@ void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment) {
 void stepper_segment_clear_active_from_isr() {
     s_active_execution_id.store(0, std::memory_order_release);
     s_active_step_interval_us.store(0, std::memory_order_relaxed);
+    s_active_amass_timer_interval_us.store(0, std::memory_order_relaxed);
     s_active_amass_level.store(0, std::memory_order_relaxed);
     s_active_start_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
@@ -392,6 +399,8 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     diagnostics.active_execution_id = s_active_execution_id.load(std::memory_order_acquire);
     diagnostics.active = diagnostics.active_execution_id != 0;
     diagnostics.active_step_interval_us = s_active_step_interval_us.load(std::memory_order_relaxed);
+    diagnostics.active_amass_timer_interval_us =
+        s_active_amass_timer_interval_us.load(std::memory_order_relaxed);
     diagnostics.active_amass_level = s_active_amass_level.load(std::memory_order_relaxed);
     diagnostics.active_start_speed_tenths_mm_per_min =
         s_active_start_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
