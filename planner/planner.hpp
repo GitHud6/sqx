@@ -58,6 +58,21 @@ enum class PlannerBlockState : std::uint8_t {
     Lookahead,
 };
 
+enum class FeedHoldState : std::uint8_t {
+    Running,
+    Requested,
+    Stopped,
+};
+
+struct FeedHoldDiagnostics {
+    FeedHoldState state = FeedHoldState::Running;
+    bool snapshot_valid = false;
+    std::uint64_t checkpoint_execution_id = 0;
+    std::array<std::int64_t, 2> checkpoint_steps = {};
+    std::uint64_t active_execution_id = 0;
+    std::array<std::int64_t, 2> stopped_steps = {};
+};
+
 struct PlannerBlockDiagnostics {
     bool present = false;
     PlannerBlockState state = PlannerBlockState::Lookahead;
@@ -72,6 +87,7 @@ struct PlannerDiagnostics {
     std::size_t queued_blocks = 0;
     std::size_t frozen_blocks = 0;
     std::array<PlannerBlockDiagnostics, kPlannerDiagnosticBlockCount> blocks = {};
+    FeedHoldDiagnostics feed_hold = {};
 };
 
 enum class ExecutionEventType {

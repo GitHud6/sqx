@@ -42,6 +42,25 @@ MotionBlock s_active_block = {};
 bool s_has_active_block = false;
 std::atomic<std::size_t> s_segment_prepared_blocks = 0;
 
+struct FeedHoldCheckpoint {
+    bool valid = false;
+    MotionBlock block = {};
+    stepper::MachinePosition position = {};
+    std::size_t block_tail = 0;
+};
+
+struct FeedHoldSnapshot {
+    bool valid = false;
+    FeedHoldState state = FeedHoldState::Running;
+    FeedHoldCheckpoint checkpoint = {};
+    std::uint64_t active_execution_id = 0;
+    stepper::MachinePosition stopped_position = {};
+};
+
+portMUX_TYPE s_feed_hold_lock = portMUX_INITIALIZER_UNLOCKED;
+FeedHoldCheckpoint s_latest_checkpoint = {};
+FeedHoldSnapshot s_feed_hold_snapshot = {};
+
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
@@ -304,6 +323,64 @@ bool current_block_snapshot(MotionBlock& block) {
     return true;
 }
 
+void record_feed_hold_checkpoint(const MotionBlock& block) {
+    FeedHoldCheckpoint checkpoint = {};
+    checkpoint.valid = true;
+    checkpoint.block = block;
+    checkpoint.position = stepper::machine_position();
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    checkpoint.block_tail = s_block_tail;
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    s_latest_checkpoint = checkpoint;
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
+void capture_feed_hold_snapshot() {
+    MotionBlock active = {};
+    const bool has_active = active_block_snapshot(active);
+    const bool executor_busy = stepper::timer_stepper_executor_is_busy();
+    const stepper::MachinePosition current_position = stepper::machine_position();
+
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    s_feed_hold_snapshot = {};
+    s_feed_hold_snapshot.state = FeedHoldState::Requested;
+    s_feed_hold_snapshot.active_execution_id = has_active ? active.execution_id : 0;
+    s_feed_hold_snapshot.stopped_position = current_position;
+    // An idle Hold must not resurrect the previous job's checkpoint. During a
+    // narrow start-up window the ISR may already be busy before planner has
+    // published the active-block event, so executor activity is also valid.
+    if ((has_active || executor_busy) && s_latest_checkpoint.valid) {
+        s_feed_hold_snapshot.valid = true;
+        s_feed_hold_snapshot.checkpoint = s_latest_checkpoint;
+        if (!has_active) {
+            s_feed_hold_snapshot.active_execution_id = s_latest_checkpoint.block.execution_id;
+        }
+    }
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
+void capture_feed_hold_stop_if_ready() {
+    if (s_control_state.load(std::memory_order_acquire) != ControlState::Hold ||
+        stepper::timer_stepper_executor_is_busy()) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    if (s_feed_hold_snapshot.state == FeedHoldState::Requested) {
+        s_feed_hold_snapshot.stopped_position = stepper::machine_position();
+        s_feed_hold_snapshot.state = FeedHoldState::Stopped;
+    }
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
+void clear_feed_hold_snapshot() {
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    s_feed_hold_snapshot = {};
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
 bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (offset >= s_block_count) {
@@ -423,6 +500,12 @@ void mark_isr_started_block_active() {
 }
 
 bool start_segment_ring() {
+    MotionBlock block = {};
+    if (current_block_snapshot(block)) {
+        // Capture before the first STEP of this block, so a later recovery has
+        // an exact integer-step boundary rather than a planned approximation.
+        record_feed_hold_checkpoint(block);
+    }
     if (stepper::timer_stepper_executor_start_from_segment_ring() != ESP_OK) {
         return false;
     }
@@ -462,6 +545,7 @@ void planner_task(void*) {
         consume_segment_completions();
         fill_segment_ring_from_planner();
         mark_isr_started_block_active();
+        capture_feed_hold_stop_if_ready();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
@@ -585,6 +669,7 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
     stepper::timer_stepper_executor_request_feed_hold();
+    capture_feed_hold_snapshot();
     portENTER_CRITICAL(&s_block_buffer_lock);
     planner_recalculate_locked();
     portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -604,6 +689,9 @@ void planner_resume() {
         s_control_state.store(ControlState::Running);
     }
     stepper::timer_stepper_executor_resume();
+    // The current implementation resumes queued segments directly. The later
+    // checkpoint-replay phase will consume this snapshot instead.
+    clear_feed_hold_snapshot();
     MotionBlock block = {};
     if (active_block_snapshot(block)) {
         emit_execution_event(ExecutionEventType::Resumed, &block);
@@ -621,6 +709,10 @@ void planner_reset() {
     stepper::timer_stepper_executor_stop();
     clear_active_block();
     stepper::stepper_prep_reset();
+    clear_feed_hold_snapshot();
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    s_latest_checkpoint = {};
+    portEXIT_CRITICAL(&s_feed_hold_lock);
     s_segment_prepared_blocks.store(0, std::memory_order_release);
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     TaskHandle_t capacity_waiter = nullptr;
@@ -725,6 +817,15 @@ PlannerDiagnostics planner_diagnostics() {
                                    : PlannerBlockState::Lookahead;
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    diagnostics.feed_hold.state = s_feed_hold_snapshot.state;
+    diagnostics.feed_hold.snapshot_valid = s_feed_hold_snapshot.valid;
+    diagnostics.feed_hold.active_execution_id = s_feed_hold_snapshot.active_execution_id;
+    diagnostics.feed_hold.checkpoint_execution_id =
+        s_feed_hold_snapshot.checkpoint.valid ? s_feed_hold_snapshot.checkpoint.block.execution_id : 0;
+    diagnostics.feed_hold.checkpoint_steps = s_feed_hold_snapshot.checkpoint.position.steps;
+    diagnostics.feed_hold.stopped_steps = s_feed_hold_snapshot.stopped_position.steps;
+    portEXIT_CRITICAL(&s_feed_hold_lock);
     return diagnostics;
 }
 

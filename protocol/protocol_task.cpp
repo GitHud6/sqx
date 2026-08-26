@@ -20,6 +20,10 @@ namespace {
 TaskHandle_t s_protocol_task = nullptr;
 TaskHandle_t s_realtime_task = nullptr;
 
+// `$POS/STATUS` deliberately aggregates protocol, planner and driver snapshots.
+// Its formatting path is deeper than ordinary G-code acknowledgement handling.
+constexpr std::uint32_t kProtocolTaskStackBytes = 6144;
+
 enum class PendingControl : std::uint8_t {
     None,
     Hold,
@@ -179,7 +183,8 @@ esp_err_t protocol_start() {
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(protocol_task, "protocol", 4096, nullptr, 6, &s_protocol_task) != pdPASS) {
+    if (xTaskCreate(protocol_task, "protocol", kProtocolTaskStackBytes, nullptr, 6,
+                    &s_protocol_task) != pdPASS) {
         vTaskDelete(s_realtime_task);
         s_realtime_task = nullptr;
         return ESP_ERR_NO_MEM;

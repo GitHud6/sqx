@@ -109,7 +109,7 @@ protocol_task / realtime task
 
 ### 阶段二：实现低延迟 Hold/Resume
 
-阶段状态：代码实现完成，等待实机验证。
+阶段状态：实时 Hold/Resume 的即时入站与 segment 边界停止已实机验证并提交。受控减速停稳和可恢复重规划转入 `planner/controlled-feed-hold-plan.md`，完成前不得把当前硬停止视为最终 Hold 行为。
 
 #### 实现步骤
 
