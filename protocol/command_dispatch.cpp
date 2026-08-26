@@ -81,6 +81,90 @@ bool equals_ignore_case(const char* text, std::size_t length, const char* expect
     return true;
 }
 
+bool snapshot_parser_state(command::ParserState& state) {
+    if (s_parser_mutex == nullptr) {
+        s_parser_mutex = xSemaphoreCreateMutex();
+        if (s_parser_mutex == nullptr) return false;
+    }
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    state = s_parser_state;
+    xSemaphoreGive(s_parser_mutex);
+    return true;
+}
+
+const char* realtime_state_text(const stepper::MachinePosition& position) {
+    if (homing::homing_is_active()) return "Home";
+    if (position.state != stepper::PositionState::Known) return "Alarm";
+    return planner::planner_is_idle() ? "Idle" : "Run";
+}
+
+const char* motion_mode_text(const command::MotionMode mode) {
+    return mode == command::MotionMode::Rapid ? "G0" : "G1";
+}
+
+const char* distance_mode_text(const command::DistanceMode mode) {
+    return mode == command::DistanceMode::Absolute ? "G90" : "G91";
+}
+
+const char* units_text(const command::Units units) {
+    return units == command::Units::Millimeters ? "G21" : "G20";
+}
+
+const char* spindle_mode_text(const command::SpindleMode mode) {
+    switch (mode) {
+        case command::SpindleMode::Clockwise: return "M3";
+        case command::SpindleMode::CounterClockwise: return "M4";
+        case command::SpindleMode::Off: return "M5";
+    }
+    return "M5";
+}
+
+bool report_build_info() {
+    static constexpr char kBuildInfo[] =
+        "[VER:1.1f.20260826:RayCube-IDF]\r\n"
+        "[OPT:V,32,256]\r\n"
+        "ok\r\n";
+    return write_text(kBuildInfo);
+}
+
+bool report_gcode_modes() {
+    command::ParserState state = {};
+    if (!snapshot_parser_state(state)) return write_text("error:protocol-no-mem\r\n");
+
+    const double feed_rate = state.units == command::Units::Inches
+                                 ? state.feed_rate_mm_per_min / 25.4
+                                 : state.feed_rate_mm_per_min;
+    static char response[192] = {};
+    const int length = state.units == command::Units::Inches
+                           ? std::snprintf(response, sizeof(response),
+                                           "[GC:%s G54 G17 %s %s G94 %s M9 T0 F%.1f S%.0f]\r\nok\r\n",
+                                           motion_mode_text(state.motion_mode), units_text(state.units),
+                                           distance_mode_text(state.distance_mode),
+                                           spindle_mode_text(state.spindle_mode), feed_rate,
+                                           state.spindle_speed)
+                           : std::snprintf(response, sizeof(response),
+                                           "[GC:%s G54 G17 %s %s G94 %s M9 T0 F%.0f S%.0f]\r\nok\r\n",
+                                           motion_mode_text(state.motion_mode), units_text(state.units),
+                                           distance_mode_text(state.distance_mode),
+                                           spindle_mode_text(state.spindle_mode), feed_rate,
+                                           state.spindle_speed);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
+bool report_coordinate_parameters() {
+    command::ParserState state = {};
+    if (!snapshot_parser_state(state)) return write_text("error:protocol-no-mem\r\n");
+
+    static char response[192] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "[G54:%.3f,%.3f,%.3f]\r\n[G92:0.000,0.000,0.000]\r\n[TLO:0.000]\r\nok\r\n",
+        state.work_offset_mm[0], state.work_offset_mm[1], state.work_offset_mm[2]);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
 bool is_position_command(const char* line, std::size_t length) {
     return line != nullptr && length >= 5 && line[0] == '$' &&
            std::toupper(static_cast<unsigned char>(line[1])) == 'P' &&
@@ -322,12 +406,40 @@ bool write_sd_list_entry(const char* path, std::uintmax_t size, bool is_director
 
 }  // namespace
 
+bool command_report_realtime_status() {
+    command::ParserState parser_state = {};
+    if (!snapshot_parser_state(parser_state)) return write_text("error:protocol-no-mem\r\n");
+
+    const stepper::MachinePosition position = stepper::machine_position();
+    const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
+    const double feed_rate = segment.active
+                                 ? static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0
+                                 : 0.0;
+    static char response[160] = {};
+    const int length = std::snprintf(
+        response, sizeof(response), "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f>\r\n",
+        realtime_state_text(position), position.millimeters[0], position.millimeters[1], feed_rate,
+        parser_state.spindle_speed);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
 bool command_dispatch(const char* line, std::size_t length) {
     if (s_parser_mutex == nullptr) {
         s_parser_mutex = xSemaphoreCreateMutex();
         if (s_parser_mutex == nullptr) {
             return write_text("error:protocol-no-mem\r\n");
         }
+    }
+
+    if (equals_ignore_case(line, length, "$I")) {
+        return report_build_info();
+    }
+    if (equals_ignore_case(line, length, "$G")) {
+        return report_gcode_modes();
+    }
+    if (equals_ignore_case(line, length, "$#")) {
+        return report_coordinate_parameters();
     }
 
     if (is_homing_status_command(line, length)) {

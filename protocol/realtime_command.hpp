@@ -21,7 +21,7 @@ struct RealtimeCommandDiagnostics {
 // Returns true only for a recognized single-byte Grbl realtime command.
 bool realtime_command_from_byte(std::uint8_t byte, RealtimeCommand& command);
 
-// Stage one records a received realtime command without applying control behavior.
+// Records a received realtime command. Protocol owns reporting and future control behavior.
 void realtime_command_receive(RealtimeCommand command);
 RealtimeCommandDiagnostics realtime_command_diagnostics();
 

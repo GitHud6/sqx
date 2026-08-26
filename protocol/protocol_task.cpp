@@ -42,6 +42,9 @@ bool protocol_process_byte(LineAssembler& assembler, std::uint8_t byte) {
     RealtimeCommand realtime_command = {};
     if (realtime_command_from_byte(byte, realtime_command)) {
         realtime_command_receive(realtime_command);
+        if (realtime_command == RealtimeCommand::StatusReport) {
+            return command_report_realtime_status();
+        }
         return true;
     }
 
