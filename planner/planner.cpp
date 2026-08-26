@@ -379,6 +379,9 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
 }
 
 void fill_segment_ring_from_planner() {
+    if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold) {
+        return;
+    }
     while (stepper::stepper_segment_free_slots() != 0) {
         if (stepper::stepper_prep_profile().active) {
             stepper::stepper_prep_fill();
@@ -581,6 +584,7 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
 
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
+    stepper::timer_stepper_executor_request_feed_hold();
     portENTER_CRITICAL(&s_block_buffer_lock);
     planner_recalculate_locked();
     portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -590,17 +594,24 @@ void planner_request_feed_hold() {
     } else {
         emit_execution_event(ExecutionEventType::FeedHoldRequested);
     }
+    if (s_planner_task != nullptr) {
+        xTaskNotifyGive(s_planner_task);
+    }
 }
 
 void planner_resume() {
     if (s_control_state.load() == ControlState::Hold) {
         s_control_state.store(ControlState::Running);
     }
+    stepper::timer_stepper_executor_resume();
     MotionBlock block = {};
     if (active_block_snapshot(block)) {
         emit_execution_event(ExecutionEventType::Resumed, &block);
     } else {
         emit_execution_event(ExecutionEventType::Resumed);
+    }
+    if (s_planner_task != nullptr) {
+        xTaskNotifyGive(s_planner_task);
     }
 }
 

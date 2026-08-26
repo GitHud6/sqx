@@ -19,6 +19,7 @@ constexpr char kLogTag[] = "timer_stepper";
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
+std::atomic<bool> s_feed_hold_requested = false;
 std::atomic<std::uint64_t> s_timer_interrupts = 0;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
@@ -93,6 +94,14 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
+        } else if (s_feed_hold_requested.load(std::memory_order_relaxed)) {
+            // Do not consume another immutable segment after Hold. The queued
+            // prefix is retained for Resume and the laser is made safe here.
+            s_busy.store(false);
+            driver::step_timer_driver_stop_from_isr();
+            laser::laser_disable_from_isr();
+            stepper_segment_clear_active_from_isr();
+            stepper_segment_request_refill_from_isr(&task_woken);
         } else if (stepper_segment_consume(next)) {
             for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
                 stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
@@ -203,6 +212,14 @@ esp_err_t timer_stepper_executor_start_from_segment_ring() {
 
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
+void timer_stepper_executor_request_feed_hold() {
+    s_feed_hold_requested.store(true, std::memory_order_release);
+}
+
+void timer_stepper_executor_resume() {
+    s_feed_hold_requested.store(false, std::memory_order_release);
+}
+
 void timer_stepper_executor_stop() {
     if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
@@ -213,6 +230,7 @@ void timer_stepper_executor_stop() {
     motion = s_motion; s_motion = {}; s_busy.store(false);
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
+    s_feed_hold_requested.store(false, std::memory_order_release);
 }
 
 void IRAM_ATTR timer_stepper_executor_stop_from_isr() {

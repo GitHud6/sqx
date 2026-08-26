@@ -148,11 +148,12 @@ Error parse_m_word(double value, ParsedBlock& parsed) {
             if (parsed.has_spindle_mode) return Error::ModalGroupViolation;
             parsed.spindle_mode = SpindleMode::Off;
             break;
+        case 8:
         case 9:
-            if (parsed.has_coolant_off) return Error::ModalGroupViolation;
-            // M9 disables coolant outputs in Grbl. RayCube has no coolant
-            // output, so accept the known-safe command without touching laser state.
-            parsed.has_coolant_off = true;
+            if (parsed.has_coolant_command) return Error::ModalGroupViolation;
+            // ray2-old accepts M8/M9 as Grbl coolant controls. RayCube has no
+            // coolant hardware, so accept either command without touching laser state.
+            parsed.has_coolant_command = true;
             return Error::Ok;
         default:
             return Error::UnsupportedCommand;
@@ -333,7 +334,7 @@ Error execute_line_internal(const char* line,
             !parsed.has_feed_rate || parsed.feed_rate <= 0.0 || !has_axis_word ||
             (parsed.has_motion && parsed.motion_mode != MotionMode::Linear) || parsed.has_plane ||
             parsed.has_cutter_compensation || parsed.has_work_coordinate_system ||
-            parsed.has_spindle_mode || parsed.has_spindle_speed || parsed.has_coolant_off ||
+            parsed.has_spindle_mode || parsed.has_spindle_speed || parsed.has_coolant_command ||
             parsed.has_program_end) {
             return Error::InvalidJogCommand;
         }

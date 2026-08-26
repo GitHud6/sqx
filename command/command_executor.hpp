@@ -69,8 +69,8 @@ struct ParsedBlock {
     bool has_spindle_mode = false;
     SpindleMode spindle_mode = SpindleMode::Off;
     // RayCube has no coolant hardware. This remains separate from M3/M4/M5
-    // so a compatibility M9 cannot alter laser state.
-    bool has_coolant_off = false;
+    // so compatibility M8/M9 commands cannot alter laser state.
+    bool has_coolant_command = false;
     bool has_program_end = false;
     bool has_program_pause = false;
     bool has_dwell = false;

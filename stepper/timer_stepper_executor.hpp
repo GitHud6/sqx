@@ -25,6 +25,10 @@ esp_err_t timer_stepper_executor_init();
 esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment);
 esp_err_t timer_stepper_executor_start_from_segment_ring();
 bool timer_stepper_executor_is_busy();
+// Requests a feed hold at the next completed segment boundary. Queued segments
+// remain intact so the planner can resume them without changing their profile.
+void timer_stepper_executor_request_feed_hold();
+void timer_stepper_executor_resume();
 void timer_stepper_executor_stop();
 void IRAM_ATTR timer_stepper_executor_stop_from_isr();
 // Stops one active system-motion axis. Returns true when no system-motion axis remains.

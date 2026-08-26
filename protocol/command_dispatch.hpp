@@ -2,11 +2,20 @@
 
 #include <cstddef>
 
+#include "esp_err.h"
+
 #include "command_executor.hpp"
 
 namespace ray2::protocol {
 
-bool command_dispatch(const char* line, std::size_t length);
+// Initializes protocol-owned state required by both the normal command task
+// and the UART realtime ingress path.
+esp_err_t command_dispatch_start();
+
+// Returns false only when the UART response could not be written. When
+// capacity_blocked is set, the caller must retain and retry the same line
+// after planner capacity becomes available; no response was emitted.
+bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked);
 
 // Emits one standard Grbl-style realtime status line without an `ok` response.
 bool command_report_realtime_status();

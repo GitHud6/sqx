@@ -16,6 +16,8 @@
 #include "sdcard_driver.hpp"
 #include "rmt_step_pulse_driver.hpp"
 #include "planner.hpp"
+#include "protocol_trace.hpp"
+#include "protocol_tx.hpp"
 #include "realtime_command.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
@@ -28,15 +30,7 @@ namespace ray2::protocol {
 namespace {
 
 bool write_all(const std::uint8_t* data, std::size_t length) {
-    std::size_t offset = 0;
-    while (offset < length) {
-        const int written = ray2::driver::uart0_write(data + offset, length - offset);
-        if (written <= 0) {
-            return false;
-        }
-        offset += static_cast<std::size_t>(written);
-    }
-    return true;
+    return protocol_tx_enqueue_normal(data, length);
 }
 
 bool write_text(const char* text) {
@@ -164,6 +158,33 @@ bool report_coordinate_parameters() {
         state.work_offset_mm[0], state.work_offset_mm[1], state.work_offset_mm[2]);
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
+bool is_protocol_trace_command(const char* line, const std::size_t length) {
+    return equals_ignore_case(line, length, "$PROTOCOL/TRACE");
+}
+
+bool report_protocol_trace() {
+    static ProtocolTraceEntry entries[kProtocolTraceCapacity] = {};
+    const std::size_t count = protocol_trace_snapshot(entries, kProtocolTraceCapacity);
+    for (std::size_t index = 0; index < count; ++index) {
+        const ProtocolTraceEntry& entry = entries[index];
+        char response[160] = {};
+        const char* const result = entry.result == command::Error::Ok ||
+                                           entry.result == command::Error::ProgramEnd
+                                       ? "ok"
+                                       : command::error_text(entry.result);
+        const int length = std::snprintf(
+            response, sizeof(response),
+            "[TRACE:seq=%llu|payload=\"%s\"|truncated=%d|result=%s]\r\n",
+            static_cast<unsigned long long>(entry.sequence), entry.payload,
+            entry.truncated ? 1 : 0, result);
+        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
+            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
+            return false;
+        }
+    }
+    return write_text("ok\r\n");
 }
 
 bool report_grbl_settings() {
@@ -369,12 +390,14 @@ bool report_position_status() {
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
     const RealtimeCommandDiagnostics realtime = realtime_command_diagnostics();
+    const driver::Uart0RxDiagnostics uart = driver::uart0_rx_diagnostics();
+    const ProtocolTxDiagnostics tx = protocol_tx_diagnostics();
 
     // Keep verbose engineering diagnostics out of the protocol task stack.
     static char response[1536] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -420,7 +443,17 @@ bool report_position_status() {
         static_cast<unsigned long long>(realtime.status_report_count),
         static_cast<unsigned long long>(realtime.feed_hold_count),
         static_cast<unsigned long long>(realtime.cycle_start_count),
-        static_cast<unsigned long long>(realtime.reset_count));
+        static_cast<unsigned long long>(realtime.reset_count),
+        static_cast<unsigned long long>(uart.received_bytes),
+        static_cast<unsigned long long>(uart.realtime_bytes),
+        static_cast<unsigned long long>(uart.normal_bytes), uart.queue_high_water_chunks,
+        tx.normal_pending, static_cast<unsigned long long>(tx.normal_enqueued),
+        static_cast<unsigned long long>(tx.normal_sent),
+        static_cast<unsigned long long>(tx.normal_write_failed),
+        static_cast<unsigned long long>(tx.status_published),
+        static_cast<unsigned long long>(tx.status_sent),
+        static_cast<unsigned long long>(tx.status_write_failed),
+        static_cast<unsigned long long>(tx.status_coalesced));
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
@@ -462,6 +495,15 @@ bool write_sd_list_entry(const char* path, std::uintmax_t size, bool is_director
 
 }  // namespace
 
+esp_err_t command_dispatch_start() {
+    if (s_parser_mutex != nullptr) {
+        return ESP_OK;
+    }
+
+    s_parser_mutex = xSemaphoreCreateMutex();
+    return s_parser_mutex == nullptr ? ESP_ERR_NO_MEM : ESP_OK;
+}
+
 bool command_report_realtime_status() {
     command::ParserState parser_state = {};
     if (!snapshot_parser_state(parser_state)) return write_text("error:protocol-no-mem\r\n");
@@ -477,10 +519,12 @@ bool command_report_realtime_status() {
         realtime_state_text(position), position.millimeters[0], position.millimeters[1], feed_rate,
         parser_state.spindle_speed);
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
-           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+           protocol_tx_publish_realtime_status(
+               reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
-bool command_dispatch(const char* line, std::size_t length) {
+bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked) {
+    capacity_blocked = false;
     if (s_parser_mutex == nullptr) {
         s_parser_mutex = xSemaphoreCreateMutex();
         if (s_parser_mutex == nullptr) {
@@ -499,6 +543,9 @@ bool command_dispatch(const char* line, std::size_t length) {
     }
     if (equals_ignore_case(line, length, "$$")) {
         return report_grbl_settings();
+    }
+    if (is_protocol_trace_command(line, length)) {
+        return report_protocol_trace();
     }
     if (equals_ignore_case(line, length, "$X")) {
         // ray2-old returns ok outside Alarm as a no-op. RayCube currently has
@@ -598,6 +645,11 @@ bool command_dispatch(const char* line, std::size_t length) {
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const command::Error result = command::execute_line(line, length, s_parser_state);
     xSemaphoreGive(s_parser_mutex);
+    if (result == command::Error::MotionBusy) {
+        capacity_blocked = true;
+        return true;
+    }
+    protocol_trace_record(line, length, result);
     return report_status(result);
 }
 

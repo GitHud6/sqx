@@ -25,7 +25,7 @@ LightBurn Grbl 设备。
 
 | 类别 | 当前已支持 | 当前缺口 | 所属模块 |
 | --- | --- | --- | --- |
-| 普通直线 G-code | G0/G1、G17、G20/G21、G40、G54、G90/G91、M2、M3/M4/M5、M9 | G2/G3、M30、M0/M1、G4 等 | `command`，部分依赖 `motion/planner` |
+| 普通直线 G-code | G0/G1、G17、G20/G21、G40、G54、G90/G91、M2、M3/M4/M5、M8/M9 | G2/G3、M30、M0/M1、G4 等 | `command`，部分依赖 `motion/planner` |
 | 实时字符 | `?` 标准状态报告；`!`、`~`、`0x18` 的单字节接收分流与计数 | Hold、Resume、Reset 控制语义 | `protocol` / UART 接收路径 |
 | Grbl 主机报告 | `?` 状态行、`$I`、`$G`、`$#` 与工程诊断 `$POS/STATUS` | 更丰富的状态字段与后续控制状态语义 | `protocol` / report 接口 |
 | `$` 系统命令 | `$H`、`$POS/*`、`$SD/*`、`$I`、`$G`、`$#` | `$$`、`$X`、`$J=` | `protocol` / system-command dispatcher |
