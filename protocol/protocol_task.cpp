@@ -6,6 +6,7 @@
 
 #include "command_dispatch.hpp"
 #include "line_assembler.hpp"
+#include "realtime_command.hpp"
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -38,6 +39,12 @@ bool protocol_handle_overflow() {
 }
 
 bool protocol_process_byte(LineAssembler& assembler, std::uint8_t byte) {
+    RealtimeCommand realtime_command = {};
+    if (realtime_command_from_byte(byte, realtime_command)) {
+        realtime_command_receive(realtime_command);
+        return true;
+    }
+
     switch (assembler.push(byte)) {
         case LineEvent::Ready:
             return protocol_handle_ready_line(assembler);

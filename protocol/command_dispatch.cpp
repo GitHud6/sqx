@@ -16,6 +16,7 @@
 #include "sdcard_driver.hpp"
 #include "rmt_step_pulse_driver.hpp"
 #include "planner.hpp"
+#include "realtime_command.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 #include "uart0_driver.hpp"
@@ -227,11 +228,13 @@ bool report_position_status() {
     const planner::PlannerDiagnostics planner_diagnostics = planner::planner_diagnostics();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
+    const RealtimeCommandDiagnostics realtime = realtime_command_diagnostics();
 
-    char response[1280] = {};
+    // Keep verbose engineering diagnostics out of the protocol task stack.
+    static char response[1536] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -273,7 +276,11 @@ bool report_position_status() {
         static_cast<unsigned long long>(rmt.active_retrigger_count[1]),
         static_cast<unsigned long>(rmt.last_status_word[0]),
         static_cast<unsigned long>(rmt.last_status_word[1]),
-        static_cast<unsigned long long>(rmt.invalid_trigger_count));
+        static_cast<unsigned long long>(rmt.invalid_trigger_count),
+        static_cast<unsigned long long>(realtime.status_report_count),
+        static_cast<unsigned long long>(realtime.feed_hold_count),
+        static_cast<unsigned long long>(realtime.cycle_start_count),
+        static_cast<unsigned long long>(realtime.reset_count));
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
