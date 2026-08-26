@@ -384,13 +384,12 @@ const char* feed_hold_state_text(const planner::FeedHoldState state) {
     switch (state) {
         case planner::FeedHoldState::Running: return "running";
         case planner::FeedHoldState::Requested: return "requested";
-        case planner::FeedHoldState::Decelerating: return "decelerating";
         case planner::FeedHoldState::Stopped: return "stopped";
     }
     return "unknown";
 }
 
-bool report_position_status(const bool realtime_response = false) {
+bool report_position_status() {
     const stepper::MachinePosition position = stepper::machine_position();
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const double planned_x = s_parser_state.planned_machine_position_mm[0];
@@ -472,12 +471,8 @@ bool report_position_status(const bool realtime_response = false) {
         static_cast<unsigned long long>(tx.status_sent),
         static_cast<unsigned long long>(tx.status_write_failed),
         static_cast<unsigned long long>(tx.status_coalesced));
-    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response)) return false;
-    if (realtime_response) {
-        return protocol_tx_publish_realtime_status(
-            reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
-    }
-    return write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
 bool set_known_position(const PositionCommand& command) {
@@ -543,10 +538,6 @@ bool command_report_realtime_status() {
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            protocol_tx_publish_realtime_status(
                reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
-}
-
-bool command_report_position_status_realtime() {
-    return report_position_status(true);
 }
 
 bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked) {

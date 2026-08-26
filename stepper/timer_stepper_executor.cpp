@@ -25,42 +25,29 @@ portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
     std::int32_t axis_steps[machine::kAxisCount] = {};
-    bool positive_direction[machine::kAxisCount] = {};
     std::int32_t execution_ticks = 0;
     std::int32_t completed_ticks = 0;
     std::int64_t axis_error[machine::kAxisCount] = {};
     std::uint32_t effective_step_interval_us = 0;
     std::uint64_t execution_id = 0;
-    std::uint32_t start_speed_tenths_mm_per_min = 0;
-    std::uint32_t end_speed_tenths_mm_per_min = 0;
     bool completes_block = false;
-    bool feed_hold_segment = false;
-    bool completes_feed_hold = false;
     bool system_motion = false;
     bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
 };
 
 MotionState s_motion = {};
-StepSegment s_feed_hold_boundary = {};
-std::atomic<bool> s_feed_hold_boundary_valid = false;
 
 MotionState motion_from_segment(const StepSegment& segment) {
     MotionState motion = {};
     motion.axis_steps[0] = segment.axis_steps[0];
     motion.axis_steps[1] = segment.axis_steps[1];
-    motion.positive_direction[0] = segment.positive_direction[0];
-    motion.positive_direction[1] = segment.positive_direction[1];
     const std::uint32_t amass_scale = 1U << segment.amass_level;
     motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
     motion.effective_step_interval_us = std::max<std::uint32_t>(
         4U, segment.step_interval_us / amass_scale);
     motion.execution_id = segment.execution_id;
-    motion.start_speed_tenths_mm_per_min = segment.start_speed_tenths_mm_per_min;
-    motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.completes_block = segment.completes_block;
-    motion.feed_hold_segment = segment.feed_hold_segment;
-    motion.completes_feed_hold = segment.completes_feed_hold;
     motion.system_motion = segment.system_motion;
     return motion;
 }
@@ -107,43 +94,9 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
-        } else if (completed_motion.completes_feed_hold) {
-            s_busy.store(false);
-            driver::step_timer_driver_stop_from_isr();
-            laser::laser_disable_from_isr();
-            stepper_segment_clear_active_from_isr();
-            stepper_segment_request_refill_from_isr(&task_woken);
-        } else if (completed_motion.feed_hold_segment &&
-                   s_feed_hold_requested.load(std::memory_order_relaxed) &&
-                   stepper_feed_hold_segment_consume(next)) {
-            for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-                stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
-                                                next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
-            }
-            s_motion = motion_from_segment(next);
-            laser::laser_disable_from_isr();
-            stepper_segment_set_active(next);
-            driver::step_timer_driver_update_interval_from_isr(s_motion.effective_step_interval_us);
         } else if (s_feed_hold_requested.load(std::memory_order_relaxed)) {
-            s_feed_hold_boundary = {};
-            s_feed_hold_boundary.execution_id = completed_motion.execution_id;
-            s_feed_hold_boundary.axis_steps[0] = completed_motion.axis_steps[0];
-            s_feed_hold_boundary.axis_steps[1] = completed_motion.axis_steps[1];
-            s_feed_hold_boundary.major_steps = completed_motion.execution_ticks;
-            s_feed_hold_boundary.step_interval_us = completed_motion.effective_step_interval_us;
-            s_feed_hold_boundary.start_speed_tenths_mm_per_min =
-                completed_motion.start_speed_tenths_mm_per_min;
-            s_feed_hold_boundary.end_speed_tenths_mm_per_min =
-                completed_motion.end_speed_tenths_mm_per_min;
-            s_feed_hold_boundary.start_speed_mm_per_min =
-                static_cast<double>(completed_motion.start_speed_tenths_mm_per_min) / 10.0;
-            s_feed_hold_boundary.end_speed_mm_per_min =
-                static_cast<double>(completed_motion.end_speed_tenths_mm_per_min) / 10.0;
-            for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-                s_feed_hold_boundary.positive_direction[axis] =
-                    completed_motion.positive_direction[axis];
-            }
-            s_feed_hold_boundary_valid.store(true, std::memory_order_release);
+            // Do not consume another immutable segment after Hold. The queued
+            // prefix is retained for Resume and the laser is made safe here.
             s_busy.store(false);
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
@@ -257,35 +210,14 @@ esp_err_t timer_stepper_executor_start_from_segment_ring() {
     return timer_stepper_executor_start_segment(segment);
 }
 
-esp_err_t timer_stepper_executor_start_feed_hold_segment() {
-    StepSegment segment = {};
-    if (!stepper_feed_hold_segment_consume(segment)) {
-        return ESP_ERR_NOT_FOUND;
-    }
-    return timer_stepper_executor_start_segment(segment);
-}
-
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
 void timer_stepper_executor_request_feed_hold() {
-    s_feed_hold_boundary_valid.store(false, std::memory_order_release);
     s_feed_hold_requested.store(true, std::memory_order_release);
-}
-
-bool timer_stepper_executor_take_feed_hold_boundary(StepSegment& segment) {
-    if (!s_feed_hold_boundary_valid.exchange(false, std::memory_order_acq_rel)) {
-        return false;
-    }
-    portENTER_CRITICAL(&s_motion_lock);
-    segment = s_feed_hold_boundary;
-    portEXIT_CRITICAL(&s_motion_lock);
-    return true;
 }
 
 void timer_stepper_executor_resume() {
     s_feed_hold_requested.store(false, std::memory_order_release);
-    s_feed_hold_boundary_valid.store(false, std::memory_order_release);
-    stepper_feed_hold_segments_reset();
 }
 
 void timer_stepper_executor_stop() {
@@ -299,7 +231,6 @@ void timer_stepper_executor_stop() {
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
     s_feed_hold_requested.store(false, std::memory_order_release);
-    stepper_feed_hold_segments_reset();
 }
 
 void IRAM_ATTR timer_stepper_executor_stop_from_isr() {

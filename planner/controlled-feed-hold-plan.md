@@ -73,34 +73,17 @@ Running / HoldDecelerating / HoldStopped / RecoveringToCheckpoint / Replaying
 
 ## 阶段二：沿原路径受控减速
 
-### 接管边界
-
-`!` 的实时捕获不等于立即中断正在执行的脉冲。暂停请求到达后，必须让
-当前 active segment 完整结束；该 segment 的结束速度、已执行整数步数和运动
-方向是受控减速的唯一入口状态。不得使用整个 block 的 `exit_speed` 替代该值，
-因为一个 block 内可能包含加速、匀速和减速 segment。
-
-当前 active segment 完成后，Timer executor 必须清除 segment ring 中全部尚未开始
-的普通 segment，禁止它们继续被消费。随后由 planner 从这个精确 segment 边界，
-根据未完成的当前 block 和后续原始 block 重新构建减速前缀；stepper prep 再将该
-前缀拆分为新的不可变 segment。
-
-不能仅生成一条沿当前方向的“自定义减速 block”。若制动距离超过当前 block 的剩余
-距离，后续 block 可能发生转向；减速轨迹必须沿原始 block 序列和 junction 约束前进，
-直到速度为零。
-
 ### 实现步骤
 
-1. Hold 开始时立即关闭激光，并阻止新的普通 G-code 和新的 planner segment 供料进入执行窗口；当前 active segment 仍完整执行。
-2. active segment 完成的边界由 executor 原子锁存：实际整数步数、segment end speed、方向与各轴步进比例；然后清除所有尚未开始的普通 segment。
-3. planner 以锁存边界为入口，使用当前 block 的加速度、后续 block 和 junction 约束重新计算减速前缀；减速 segment 只能由任务上下文生成，GPTimer ISR 仅消费不可变 segment。
-4. 减速过程必须沿原始 block 序列的几何路径执行，不能构造任意直线或改写目标坐标。当前 block 剩余距离不足以停稳时，按原 block 序列继续减速；完整经过的 block 正常记账，最终停在某个 block 内或一个 block 边界。
+1. Hold 开始时立即关闭激光，并阻止新的普通 G-code 和新的 planner segment 供料进入执行窗口。
+2. 使用当前实际速度和当前 block 的加速度约束计算减速曲线；减速 segment 只能由任务上下文生成，GPTimer ISR 仅消费不可变 segment。
+3. 减速过程必须沿原始 block 序列的几何路径执行，不能构造任意直线或改写目标坐标。
+4. 当前 block 剩余距离不足以停稳时，按原 block 序列继续减速；完整经过的 block 正常记账，最终停在某个 block 内或一个 block 边界。
 5. 达到零速后停止 Timer，保留检查点和原始 block 数据，发布 `HoldStopped`；不能将 Hold 停稳视为 completion failure 或 Abort。
 
 ### 验收标准
 
 - 中高速直线与雕刻轨迹中发送 `!` 后，电机连续平滑降速，龙门架无硬停止晃动。
-- 暂停延迟上界为当前 active segment 的剩余时间和制动距离；旧 segment ring 中未开始的条目不得继续执行。
 - 减速期间激光保持关闭，停稳距离不随文件剩余长度增加。
 - 减速轨迹不偏离 G-code 路径；无 segment underflow、watchdog、位置失效或重复 completion。
 - 该阶段不恢复雕刻，仅验证受控减速和正确快照；实机通过后提交。

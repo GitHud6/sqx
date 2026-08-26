@@ -24,14 +24,12 @@ struct TimerStepperDiagnostics {
 esp_err_t timer_stepper_executor_init();
 esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment);
 esp_err_t timer_stepper_executor_start_from_segment_ring();
-esp_err_t timer_stepper_executor_start_feed_hold_segment();
 bool timer_stepper_executor_is_busy();
 // Requests a feed hold at the next completed segment boundary. Queued segments
 // remain intact so the planner can resume them without changing their profile.
 void timer_stepper_executor_request_feed_hold();
 void timer_stepper_executor_resume();
 void timer_stepper_executor_stop();
-bool timer_stepper_executor_take_feed_hold_boundary(StepSegment& segment);
 void IRAM_ATTR timer_stepper_executor_stop_from_isr();
 // Stops one active system-motion axis. Returns true when no system-motion axis remains.
 bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(std::size_t axis_index);

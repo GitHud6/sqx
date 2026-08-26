@@ -14,7 +14,6 @@ namespace ray2::stepper {
 
 constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
-constexpr std::size_t kFeedHoldSegmentBufferLength = 16;
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 750;
 constexpr std::size_t kStepSegmentLowWater = 16;
 constexpr std::uint32_t kAmassBaseStepRateHz = 8000;
@@ -46,10 +45,6 @@ struct StepSegment {
     motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     bool completes_block = false;
-    // Dedicated feed-hold segments are generated in task context and never
-    // complete the source planner block.
-    bool feed_hold_segment = false;
-    bool completes_feed_hold = false;
     // System motions use the timer/RMT pulse backend without planner completion.
     bool system_motion = false;
 };
@@ -98,12 +93,6 @@ void stepper_prep_reset();
 bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
-bool stepper_prepare_feed_hold_deceleration(const planner::PlannerBlock& block,
-                                            double start_speed_mm_per_min,
-                                            const std::array<double, 2>& start_position_mm);
-bool IRAM_ATTR stepper_feed_hold_segment_consume(StepSegment& segment);
-void stepper_feed_hold_segments_reset();
-void stepper_segment_discard_pending();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_us,
                                         const std::array<std::int32_t, 2>& axis_steps);

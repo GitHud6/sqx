@@ -31,9 +31,6 @@ std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
 
 StepperProfile s_profile = {};
 planner::PlannerBlock s_source_block = {};
-std::array<StepSegment, kFeedHoldSegmentBufferLength> s_feed_hold_segments = {};
-std::atomic<std::uint32_t> s_feed_hold_head = 0;
-std::atomic<std::uint32_t> s_feed_hold_tail = 0;
 
 static_assert(kStepSegmentBufferLength > 0, "segment ring requires storage");
 static_assert(kStepCompletionBufferLength > 0, "completion ring requires storage");
@@ -216,8 +213,6 @@ void stepper_prep_reset() {
     s_completion_tail.store(0, std::memory_order_relaxed);
     s_profile = {};
     s_source_block = {};
-    s_feed_hold_head.store(0, std::memory_order_relaxed);
-    s_feed_hold_tail.store(0, std::memory_order_relaxed);
 }
 
 bool stepper_prep_start_block(const planner::PlannerBlock& block) {
@@ -290,112 +285,6 @@ std::size_t stepper_prep_fill() {
         s_profile.active = false;
     }
     return generated;
-}
-
-bool stepper_prepare_feed_hold_deceleration(
-    const planner::PlannerBlock& block,
-    const double start_speed_mm_per_min,
-    const std::array<double, 2>& start_position_mm) {
-    if (!block_is_valid(block)) return false;
-    const double entry_speed = start_speed_mm_per_min;
-    const double acceleration = block.acceleration_mm_per_sec2 * 60.0 * 60.0;
-    if (!std::isfinite(entry_speed) || entry_speed <= 0.0 ||
-        !std::isfinite(acceleration) || acceleration <= 0.0) {
-        return false;
-    }
-
-    const double delta_x = block.machine_target_mm[0] - start_position_mm[0];
-    const double delta_y = block.machine_target_mm[1] - start_position_mm[1];
-    const double remaining_mm = std::hypot(delta_x, delta_y);
-    const double required_mm = (entry_speed / 60.0) * (entry_speed / 60.0) /
-                               (2.0 * block.acceleration_mm_per_sec2);
-    if (!std::isfinite(remaining_mm) || remaining_mm <= 0.0 || required_mm > remaining_mm) {
-        return false;
-    }
-    const double ratio = required_mm / remaining_mm;
-    const std::array<double, 2> stop_position = {
-        start_position_mm[0] + delta_x * ratio,
-        start_position_mm[1] + delta_y * ratio,
-    };
-    const std::int32_t total_steps = std::max<std::int32_t>(1,
-        static_cast<std::int32_t>(std::llround(required_mm *
-            std::max(std::abs(block.plan.steps[0] / block.millimeters),
-                     std::abs(block.plan.steps[1] / block.millimeters)))));
-    const std::uint32_t segment_count = std::min<std::uint32_t>(
-        kFeedHoldSegmentBufferLength, static_cast<std::uint32_t>(total_steps));
-    if (segment_count == 0) return false;
-
-    s_feed_hold_head.store(0, std::memory_order_relaxed);
-    for (std::uint32_t index = 0; index < segment_count; ++index) {
-        const std::int32_t first_step = static_cast<std::int32_t>(
-            static_cast<std::int64_t>(total_steps) * index / segment_count);
-        const std::int32_t final_step = static_cast<std::int32_t>(
-            static_cast<std::int64_t>(total_steps) * (index + 1) / segment_count);
-        const double start_distance = required_mm * first_step / total_steps;
-        const double final_distance = required_mm * final_step / total_steps;
-        const double start_speed = std::sqrt(std::max(0.0,
-            entry_speed * entry_speed - 2.0 * acceleration * start_distance));
-        const double final_speed = std::sqrt(std::max(0.0,
-            entry_speed * entry_speed - 2.0 * acceleration * final_distance));
-        const double duration_us = (start_speed - final_speed) * 60000000.0 / acceleration;
-        if (final_step <= first_step || !std::isfinite(duration_us) || duration_us <= 0.0) {
-            return false;
-        }
-
-        StepSegment& segment = s_feed_hold_segments[index];
-        segment.execution_id = block.execution_id;
-        segment.major_steps = final_step - first_step;
-        segment.duration_us = static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us)));
-        segment.step_interval_us = std::max(kMinimumStepIntervalUs,
-            static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us / segment.major_steps))));
-        segment.start_speed_mm_per_min = start_speed;
-        segment.end_speed_mm_per_min = final_speed;
-        segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(start_speed);
-        segment.end_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(final_speed);
-        segment.motion_mode = block.request.motion_mode;
-        segment.spindle_mode = motion::SpindleMode::Off;
-        segment.phase = StepSegmentPhase::Decelerate;
-        segment.feed_hold_segment = true;
-        segment.completes_feed_hold = index + 1 == segment_count;
-        for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {
-            const std::int32_t axis_total = static_cast<std::int32_t>(std::llround(
-                std::abs(stop_position[axis] - start_position_mm[axis]) *
-                machine::raycube_axis(static_cast<machine::Axis>(axis)).steps_per_mm));
-            const std::int32_t axis_first = static_cast<std::int32_t>(
-                static_cast<std::int64_t>(axis_total) * first_step / total_steps);
-            const std::int32_t axis_final = static_cast<std::int32_t>(
-                static_cast<std::int64_t>(axis_total) * final_step / total_steps);
-            segment.axis_steps[axis] = axis_final - axis_first;
-            segment.positive_direction[axis] = stop_position[axis] >= start_position_mm[axis];
-        }
-        const std::array<std::int32_t, machine::kAxisCount> source_steps = {
-            block.plan.steps[0], block.plan.steps[1],
-        };
-        segment.amass_level = stepper_select_amass_level(segment.step_interval_us, source_steps);
-    }
-
-    s_feed_hold_tail.store(0, std::memory_order_relaxed);
-    s_feed_hold_head.store(segment_count, std::memory_order_release);
-    return true;
-}
-
-bool IRAM_ATTR stepper_feed_hold_segment_consume(StepSegment& segment) {
-    const std::uint32_t tail = s_feed_hold_tail.load(std::memory_order_relaxed);
-    const std::uint32_t head = s_feed_hold_head.load(std::memory_order_acquire);
-    if (tail == head) return false;
-    segment = s_feed_hold_segments[tail];
-    s_feed_hold_tail.store(tail + 1, std::memory_order_release);
-    return true;
-}
-
-void stepper_feed_hold_segments_reset() {
-    s_feed_hold_head.store(0, std::memory_order_relaxed);
-    s_feed_hold_tail.store(0, std::memory_order_relaxed);
-}
-
-void stepper_segment_discard_pending() {
-    const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
-    s_segment_tail.store(head, std::memory_order_release);
 }
 
 bool stepper_segment_publish(const StepSegment& segment) {
