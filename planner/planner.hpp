@@ -61,6 +61,7 @@ enum class PlannerBlockState : std::uint8_t {
 enum class FeedHoldState : std::uint8_t {
     Running,
     Requested,
+    Decelerating,
     Stopped,
 };
 

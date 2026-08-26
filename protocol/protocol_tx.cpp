@@ -13,7 +13,7 @@ namespace ray2::protocol {
 namespace {
 
 constexpr std::size_t kNormalTxQueueLength = 4;
-constexpr std::size_t kRealtimeStatusCapacity = 256;
+constexpr std::size_t kRealtimeStatusCapacity = kProtocolTxMessageCapacity;
 constexpr std::size_t kNormalMessagesPerStatus = 4;
 
 struct TxMessage {
@@ -65,6 +65,15 @@ void protocol_tx_task(void*) {
 
         while (true) {
             bool sent_any = false;
+            if (take_realtime_status(realtime_status)) {
+                if (ray2::driver::uart0_write_all(realtime_status.data, realtime_status.length)) {
+                    s_status_sent.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    s_status_write_failed.fetch_add(1, std::memory_order_relaxed);
+                }
+                sent_any = true;
+            }
+
             for (std::size_t index = 0; index < kNormalMessagesPerStatus; ++index) {
                 if (xQueueReceive(s_normal_tx_queue, &normal_message, 0) != pdTRUE) {
                     break;
@@ -75,15 +84,6 @@ void protocol_tx_task(void*) {
                     s_normal_write_failed.fetch_add(1, std::memory_order_relaxed);
                 }
                 xQueueSend(s_free_tx_queue, &normal_message, portMAX_DELAY);
-                sent_any = true;
-            }
-
-            if (take_realtime_status(realtime_status)) {
-                if (ray2::driver::uart0_write_all(realtime_status.data, realtime_status.length)) {
-                    s_status_sent.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    s_status_write_failed.fetch_add(1, std::memory_order_relaxed);
-                }
                 sent_any = true;
             }
 

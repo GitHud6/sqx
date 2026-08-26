@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "timer_stepper_executor.hpp"
+#include "laser_driver.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
@@ -54,7 +55,10 @@ struct FeedHoldSnapshot {
     FeedHoldState state = FeedHoldState::Running;
     FeedHoldCheckpoint checkpoint = {};
     std::uint64_t active_execution_id = 0;
+    MotionBlock active_block = {};
+    double requested_speed_mm_per_min = 0.0;
     stepper::MachinePosition stopped_position = {};
+    double boundary_speed_mm_per_min = 0.0;
 };
 
 portMUX_TYPE s_feed_hold_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -341,12 +345,17 @@ void capture_feed_hold_snapshot() {
     MotionBlock active = {};
     const bool has_active = active_block_snapshot(active);
     const bool executor_busy = stepper::timer_stepper_executor_is_busy();
+    const auto segment = stepper::stepper_segment_diagnostics();
     const stepper::MachinePosition current_position = stepper::machine_position();
 
     portENTER_CRITICAL(&s_feed_hold_lock);
     s_feed_hold_snapshot = {};
     s_feed_hold_snapshot.state = FeedHoldState::Requested;
     s_feed_hold_snapshot.active_execution_id = has_active ? active.execution_id : 0;
+    s_feed_hold_snapshot.active_block = active;
+    s_feed_hold_snapshot.requested_speed_mm_per_min = std::max(
+        static_cast<double>(segment.active_start_speed_tenths_mm_per_min),
+        static_cast<double>(segment.active_end_speed_tenths_mm_per_min)) / 10.0;
     s_feed_hold_snapshot.stopped_position = current_position;
     // An idle Hold must not resurrect the previous job's checkpoint. During a
     // narrow start-up window the ISR may already be busy before planner has
@@ -356,9 +365,41 @@ void capture_feed_hold_snapshot() {
         s_feed_hold_snapshot.checkpoint = s_latest_checkpoint;
         if (!has_active) {
             s_feed_hold_snapshot.active_execution_id = s_latest_checkpoint.block.execution_id;
+            s_feed_hold_snapshot.active_block = s_latest_checkpoint.block;
         }
     }
     portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
+bool prepare_feed_hold_deceleration() {
+    static MotionBlock deceleration = {};
+    stepper::StepSegment boundary = {};
+    if (!stepper::timer_stepper_executor_take_feed_hold_boundary(boundary)) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    if (s_feed_hold_snapshot.state != FeedHoldState::Requested ||
+        !s_feed_hold_snapshot.valid || s_feed_hold_snapshot.active_execution_id == 0) {
+        portEXIT_CRITICAL(&s_feed_hold_lock);
+        return false;
+    }
+    deceleration = s_feed_hold_snapshot.active_block;
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+
+    const stepper::MachinePosition position = stepper::machine_position();
+    const double speed = boundary.end_speed_mm_per_min;
+    if (speed <= 0.0 || !stepper::stepper_prepare_feed_hold_deceleration(
+            deceleration, speed, {position.millimeters[0], position.millimeters[1]})) {
+        return false;
+    }
+    stepper::stepper_segment_discard_pending();
+    stepper::stepper_prep_cancel_block();
+    if (stepper::timer_stepper_executor_start_feed_hold_segment() != ESP_OK) return false;
+    portENTER_CRITICAL(&s_feed_hold_lock);
+        s_feed_hold_snapshot.boundary_speed_mm_per_min = speed;
+        s_feed_hold_snapshot.state = FeedHoldState::Decelerating;
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+    return true;
 }
 
 void capture_feed_hold_stop_if_ready() {
@@ -368,7 +409,8 @@ void capture_feed_hold_stop_if_ready() {
     }
 
     portENTER_CRITICAL(&s_feed_hold_lock);
-    if (s_feed_hold_snapshot.state == FeedHoldState::Requested) {
+    if (s_feed_hold_snapshot.state == FeedHoldState::Requested ||
+        s_feed_hold_snapshot.state == FeedHoldState::Decelerating) {
         s_feed_hold_snapshot.stopped_position = stepper::machine_position();
         s_feed_hold_snapshot.state = FeedHoldState::Stopped;
     }
@@ -545,6 +587,9 @@ void planner_task(void*) {
         consume_segment_completions();
         fill_segment_ring_from_planner();
         mark_isr_started_block_active();
+        if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold) {
+            prepare_feed_hold_deceleration();
+        }
         capture_feed_hold_stop_if_ready();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -668,8 +713,9 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
 
 void planner_request_feed_hold() {
     s_control_state.store(ControlState::Hold);
-    stepper::timer_stepper_executor_request_feed_hold();
+    laser::laser_set_motion_output_permitted(false);
     capture_feed_hold_snapshot();
+    stepper::timer_stepper_executor_request_feed_hold();
     portENTER_CRITICAL(&s_block_buffer_lock);
     planner_recalculate_locked();
     portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -689,6 +735,7 @@ void planner_resume() {
         s_control_state.store(ControlState::Running);
     }
     stepper::timer_stepper_executor_resume();
+    laser::laser_set_motion_output_permitted(true);
     // The current implementation resumes queued segments directly. The later
     // checkpoint-replay phase will consume this snapshot instead.
     clear_feed_hold_snapshot();
@@ -709,6 +756,7 @@ void planner_reset() {
     stepper::timer_stepper_executor_stop();
     clear_active_block();
     stepper::stepper_prep_reset();
+    laser::laser_set_motion_output_permitted(true);
     clear_feed_hold_snapshot();
     portENTER_CRITICAL(&s_feed_hold_lock);
     s_latest_checkpoint = {};

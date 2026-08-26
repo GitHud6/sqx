@@ -1,6 +1,7 @@
 #include "protocol_task.hpp"
 
 #include <atomic>
+#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -23,6 +24,7 @@ TaskHandle_t s_realtime_task = nullptr;
 // `$POS/STATUS` deliberately aggregates protocol, planner and driver snapshots.
 // Its formatting path is deeper than ordinary G-code acknowledgement handling.
 constexpr std::uint32_t kProtocolTaskStackBytes = 6144;
+constexpr std::uint32_t kRealtimeTaskStackBytes = 6144;
 
 enum class PendingControl : std::uint8_t {
     None,
@@ -32,7 +34,20 @@ enum class PendingControl : std::uint8_t {
 };
 
 std::atomic<bool> s_status_report_pending = false;
+std::atomic<bool> s_position_status_pending = false;
 std::atomic<PendingControl> s_control_pending = PendingControl::None;
+
+bool protocol_urgent_line_handler(const char* line, const std::size_t length, void*) {
+    constexpr char kPositionStatus[] = "$POS/STATUS";
+    if (!planner::planner_is_holding() || line == nullptr ||
+        length != sizeof(kPositionStatus) - 1 ||
+        std::memcmp(line, kPositionStatus, sizeof(kPositionStatus) - 1) != 0) {
+        return false;
+    }
+    s_position_status_pending.store(true, std::memory_order_release);
+    if (s_realtime_task != nullptr) xTaskNotifyGive(s_realtime_task);
+    return true;
+}
 
 bool protocol_write_all(const std::uint8_t* data, std::size_t length) {
     return protocol_tx_enqueue_normal(data, length);
@@ -121,16 +136,36 @@ void protocol_task(void*) {
     ray2::driver::Uart0RxChunk chunk = {};
     QueueHandle_t rx_queue = ray2::driver::uart0_rx_queue();
     LineAssembler assembler;
+    std::size_t chunk_index = 0;
+    bool chunk_pending = false;
 
     while (true) {
-        if (xQueueReceive(rx_queue, &chunk, portMAX_DELAY) != pdTRUE) {
-            continue;
+        // Feed hold suspends normal G-code interpretation. The UART RX task
+        // continues buffering bytes, while realtime ingress still handles
+        // '?', '~', '!' and reset independently. This keeps ParserState at
+        // the pause boundary instead of advancing planned coordinates ahead
+        // of the machine.
+        while (planner::planner_is_holding()) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+        }
+        if (!chunk_pending) {
+            if (xQueueReceive(rx_queue, &chunk, portMAX_DELAY) != pdTRUE) {
+                continue;
+            }
+            chunk_index = 0;
+            chunk_pending = true;
         }
 
-        for (std::size_t index = 0; index < chunk.length; ++index) {
-            if (!protocol_process_byte(assembler, chunk.data[index])) {
+        for (; chunk_index < chunk.length; ++chunk_index) {
+            if (planner::planner_is_holding()) {
                 break;
             }
+            if (!protocol_process_byte(assembler, chunk.data[chunk_index])) {
+                break;
+            }
+        }
+        if (chunk_index == chunk.length) {
+            chunk_pending = false;
         }
     }
 }
@@ -158,6 +193,9 @@ void realtime_task(void*) {
         if (s_status_report_pending.exchange(false, std::memory_order_acq_rel)) {
             protocol_handle_realtime_command(RealtimeCommand::StatusReport);
         }
+        if (s_position_status_pending.exchange(false, std::memory_order_acq_rel)) {
+            command_report_position_status_realtime();
+        }
     }
 }
 
@@ -179,7 +217,8 @@ esp_err_t protocol_start() {
         return tx_start_result;
     }
 
-    if (xTaskCreate(realtime_task, "realtime", 3072, nullptr, 7, &s_realtime_task) != pdPASS) {
+    if (xTaskCreate(realtime_task, "realtime", kRealtimeTaskStackBytes, nullptr, 7,
+                    &s_realtime_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -196,7 +235,13 @@ esp_err_t protocol_start() {
         s_realtime_task = nullptr;
         return ESP_ERR_INVALID_STATE;
     }
-
+    if (ray2::driver::uart0_set_urgent_line_handler(protocol_urgent_line_handler, nullptr) != ESP_OK) {
+        vTaskDelete(s_protocol_task);
+        s_protocol_task = nullptr;
+        vTaskDelete(s_realtime_task);
+        s_realtime_task = nullptr;
+        return ESP_ERR_INVALID_STATE;
+    }
     return ESP_OK;
 }
 
