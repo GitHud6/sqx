@@ -1,51 +1,97 @@
-# motion
+# 运动请求模块
 
-阶段三状态：命令解析闭环已接入并完成基础实机验证。`protocol_task` 将完整行交给 `command_dispatch()`，由 `execute_line()` 构造请求并调用 `motion_submit()`；只有运动执行成功才返回 `ok` 并提交解析状态。Planner 满载产生的 `Busy` 结果将在后续 Planner 阶段实现。
+`motion` 是 G-code 解析层与 `planner` 之间的运动请求边界。它将已解析的直线运动语义转为
+可规划的 `PlannerBlock`，但不直接发 STEP 脉冲、不操作 GPIO，也不等待物理运动完成。
 
-阶段四约束：`command` 只有在 `motion_submit()` 返回 `Accepted` 后才提交位置、模态、进给和激光状态；解析失败、`Busy` 或 `Rejected` 都不会改写正式解析状态。
+## 文件职责
 
-阶段一状态：已实现 `MotionExecutionPlan`。它按 RayCube 的 `steps_per_mm` 将每轴毫米位移四舍五入为整数步数，并记录正负方向。当前校验 RayCube X/Y 行程、每轴最大进给和 Z 轴为零；仍不调用 `stepper`。
+| 文件 | 职责 |
+| --- | --- |
+| `motion_request.hpp` | 定义 `MotionRequest`、`MotionExecutionPlan`、运动类型和激光模式。 |
+| `motion_submit.hpp/.cpp` | 校验请求，换算 X/Y 步数和方向，创建 `PlannerBlock` 并提交给 planner。 |
 
-阶段二状态：单轴真实执行已完成历史验证；执行权现已迁移到 `planner_task`。
+## 调用链路
 
-阶段四状态：已实现进给对应的步频计算。步频按路径长度与主轴步数推导，并限制在 10 Hz 到 10000 Hz；当前不包含加速度曲线。
+```text
+完整 G-code 行
+  -> command::execute_line()
+  -> MotionRequest
+  -> motion_submit()
+  -> planner_submit()
+  -> planner / stepper_prep / GPTimer / RMT
+```
 
-阶段五状态：已实现最小 XY 直线插补。执行器以步数较大的轴为主轴，使用整数误差累加分配另一轴 STEP 脉冲；X/Y 使用相同的主步间隔，且只使能参与本次运动的轴。
+`Accepted` 只表示 block 已安全进入 planner；它不表示电机已经开始或完成运动。调用方只有在
+`Accepted` 后才能提交对应的解析器坐标和模态状态。
 
-阶段六状态：已接入 `planner` block 队列。`motion_submit()` 的 `Accepted` 表示请求已经安全入队，`Busy` 表示队列已满，`Rejected` 表示参数非法或 Planner 未启动；物理 STEP 执行改由 `planner_task` 独占完成。
-
-本模块是 G-code 解析层与后续 Planner 之间的运动请求边界。
-
-当前 `motion_submit()` 已校验请求、建立执行计划并尝试提交 Planner。它不直接操作 stepper，不执行加速度规划，也不驱动激光 PWM。
-
-## 当前接口
+## 数据契约
 
 `MotionRequest` 包含：
 
-- 运动类型：Rapid 或 Linear
-- 起点和绝对目标，单位为毫米
-- 当前有效进给，单位为 mm/min
-- 当前行生效的激光功率 `S`
-- 预留的主轴模式
+- `Rapid` 或 `Linear` 运动模式；
+- 起点与目标机床坐标，单位为 mm；
+- 当前进给，单位为 mm/min；
+- 当前行生效的 S 功率和主轴模式；
+- `has_motion` 标记。
 
-当前只有 `command` 层调用 `motion_submit()`。`planner` 的 FreeRTOS 队列承担生产者与执行器之间的并发边界；以后增加 APP、SD 或其他命令来源时，应继续统一经过本提交接口。
+`MotionExecutionPlan` 是对请求的离散化结果：
 
-## 后续实施步骤与验收标准
+- X/Y/Z 每轴的绝对步数；
+- 每轴正负方向；
+- 初始主步间隔。
 
-### 步骤一：替换为 Planner 提交
+最终的加减速、junction 速度、segment 周期和 AMASS 由下游模块决定，`motion` 不得在这里
+复制这些策略。
 
-实现 Planner 空间检查、软限位检查和 block 入队。
+## 校验与换算
 
-验收标准：Planner 接受的请求才返回 `Accepted`；满载返回 `Busy`；越界或非法参数返回 `Rejected`。
+`motion_submit()` 会执行以下工作：
 
-### 步骤二：接入速度与加速度规划
+1. 检查请求、坐标、F 和 S 均为有限且合法的数值。
+2. 检查 X/Y 起点和目标均在 RayCube 幅面内，且进给不超过每轴限制。
+3. 按 `machine::raycube_axis()` 的 `steps_per_mm` 将 XY 位移换算为整数步数和方向。
+4. 拒绝 Z 位移；当前机型只支持 Cartesian XY。
+5. 根据路径长度、进给和主轴步数计算初始 step interval。
+6. 构造携带起止坐标、路径长度、单位方向、目标速度和轴约束加速度的 `PlannerBlock`。
 
-使用 RayCube 的每轴 `steps_per_mm`、最大速度和加速度生成可执行 block。
+`Rapid` 使用模块定义的快速移动速度，并受 X/Y 最大速度限制；`Linear` 使用请求中的 F 值。
 
-验收标准：请求中的目标、F、加速度约束被完整传入 Planner，且连续短行不会丢失顺序或 S 值。
+没有实际 XY 步数的 G-code 行不应进入本模块创建空 block；这类模态或功率更新由 `command`
+层处理。
 
-### 步骤三：接入步进执行器
+## 返回语义
 
-将 Planner block 转换为 STEP/DIR 时序，交给 `stepper` 执行。
+| 结果 | 含义 | 上游行为 |
+| --- | --- | --- |
+| `Accepted` | block 已进入 planner。 | 提交 ParserState，并回复 `ok`。 |
+| `Busy` | planner block ring 已满。 | 不提交 ParserState；由协议层按背压策略处理。 |
+| `Rejected` | 请求非法、越界、Z 位移、规划器未就绪或拒绝 block。 | 不提交 ParserState，并返回对应错误。 |
 
-验收标准：stepper 只执行 Planner 已确认的 block；急停、错误和队列耗尽时电机回到安全状态。
+## 模块边界
+
+上游依赖：
+
+- `command`：负责词法、G-code 模态、工作坐标到机床坐标转换和 ParserState 事务。
+- `machine`：提供幅面、步距、速度和加速度限制。
+
+下游依赖：
+
+- `planner`：唯一的 block 接收者。
+
+`motion` 不拥有实际位置。已规划位置由 parser/planner 保持连续，实际执行位置仅由实际 STEP
+脉冲路径累计；归零、Reset 或执行失败后的可信度由 `stepper`、`planner` 与 `homing` 协同维护。
+
+本模块不得反向依赖 `protocol`、`sd`、`laser`、RMT、GPTimer 或 GPIO 驱动。
+
+## 当前范围
+
+- 已支持：RayCube 的 `G0/G1` Cartesian XY 运动请求。
+- 未支持：Z 运动、圆弧 `G2/G3`、其他运动学模型。
+- 机床坐标的实际原点由 `$H` 建立；`G54` 的工作坐标转换在 `command` 层完成。
+
+## 验收重点
+
+- `G1 X20 Y10 F600` 能形成正确的 X/Y 步数、方向和目标坐标。
+- 幅面边界内的目标被接受，越界目标被拒绝且不污染后续解析器坐标。
+- planner 满时返回 `Busy`，不丢失或覆盖未执行 block。
+- 连续短线请求保持入队顺序，S 值和主轴模式与来源请求绑定。

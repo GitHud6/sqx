@@ -1,101 +1,184 @@
-# stepper
+# 步进运动执行模块
 
-本模块拥有步进执行语义、DIR/DISABLE GPIO 和实际位置累计，并向 Planner 提供最小执行接口；STEP 脉冲由 driver 层的 RMT 外设输出。
+`stepper` 负责把 planner/segment 产生的运动数据转换为实际的 STEP/DIR/ENABLE 执行，
+并维护基于已发出 STEP 脉冲的开环机床位置。
 
-当前已实现 GPIO 初始化、使能/禁用、方向写入和单脉冲输出。正式命令经由 `motion` 和 `planner` 调用本模块；`protocol` 与 `command` 不直接写入 STEP、DIR 或 DISABLE GPIO。
+本目录包含步进 GPIO、位置状态、segment 生产、Timer 执行器和 AMASS 细分逻辑。RMT 与
+GPTimer 的底层外设配置属于 `driver` 模块；本模块只通过 driver 接口使用它们。
 
-当前 STEP 时序由 `timer_stepper_executor` 执行：它保存 Bresenham、DIR/ENABLE、实际步数和完成通知；GPTimer 与 RMT 单脉冲外设访问分别由 `driver/step_timer_driver` 和 `driver/rmt_step_pulse_driver` 独占。`stepper` 不再创建 RMT TX 通道、RMT transaction queue 或 RMT stream task。
+## 文件职责
 
-后续实现顺序：
+| 文件 | 职责 |
+| --- | --- |
+| `stepper_driver.hpp/.cpp` | 初始化 STEP/DIR/ENABLE GPIO，设置方向和使能，维护实际执行步数与位置可信度。 |
+| `stepper_prep.hpp/.cpp` | 将已规划的 `PlannerBlock` 按速度 profile 拆成固定容量的 `StepSegment` ring。 |
+| `timer_stepper_executor.hpp/.cpp` | 使用 step timer 的 ISR 消费 segment，执行 DDA/AMASS，触发 RMT 单脉冲并发布完成事件。 |
 
-1. `stepper_init()`：已实现，配置 RayCube X/Y 三组输出，并立即禁用两轴。
-2. `stepper_set_enabled()`：已实现，按机型配置处理高有效禁用引脚。
-3. `stepper_set_direction()`：已实现，写入方向；方向建立时间将在脉冲阶段的调用方处理。
-4. `stepper_pulse()`：已实现，输出满足最小 3 us 宽度的单个 STEP 脉冲。
+## 运行链路
 
-本模块不承担 mm 到步数的换算、加减速、插补、前瞻或队列管理；这些属于后续 `motion` 和 `planner` 模块。
+```text
+planner PlannerBlock
+        |
+        v
+stepper_prep
+  - 梯形/三角形速度 profile
+  - StepSegment
+  - 激光功率与 AMASS 元数据
+        |
+        v
+SPSC StepSegment ring
+        |
+        v
+GPTimer ISR
+  - DDA / AMASS 步数分配
+  - DIR 更新
+  - 触发 RMT 单 STEP 脉冲
+  - 累计实际执行位置
+        |
+        v
+driver: step timer + RMT + GPIO
+```
 
-## Stepper Prep 与 Segment Buffer
+任务上下文负责生产 segment 和处理完成通知；ISR 只消费已经发布的不可变 segment，不能
+访问 planner、文件系统、日志、LEDC 或阻塞 API。
 
-`stepper_prep` 是 Planner 与未来连续 segment 执行器之间的预处理层。它只接受已经完成前瞻规划的
-`PlannerBlock`，基于 entry、nominal、exit speed 和加速度生成加速、匀速、减速 profile，
-再切分为目标时长约 `750 us` 的 `StepSegment`。
+## STEP/DIR/ENABLE 所有权
 
-segment ring 固定为 64 槽，目标是为后续执行后端提供约 `48 ms` 的连续 STEP 时序预算。每个
-segment 保存来源 `execution_id`、X/Y 步数、起止速度、持续时间、按 M3/M4 规则计算的功率、profile 阶段和 block 完成标志。
-分段时按主步边界计算各轴累计步数，保证一个来源 block 的所有 segment 合计后仍严格等于原始
-X/Y 步数。
+`stepper_driver` 是 STEP、DIR、ENABLE GPIO 的唯一业务层写入者：
 
-当前状态：profile 与 segment ring 已实现并加入构建目标，但旧的“每个 segment 一笔 RMT
-transaction”后端已删除。连续 segment 消费、跨 block 供料和激光功率边界将在后续独立阶段重新
-接入，不能回退到旧 RMT stream 模型。
+- `stepper_init()` 配置 RayCube 轴 GPIO，STEP 初始为低电平，轴初始为禁用；
+- `stepper_set_direction()` 和 ISR 版本负责逻辑方向到实际 DIR 电平的映射；
+- `stepper_set_enabled()` 负责单轴使能和关闭；
+- 普通 `stepper_pulse()` 只作为同步/兼容路径，连续运动使用 Timer ISR + RMT 后端。
 
-## 单轴硬件打通计划
+底层 RMT 通道和 Timer 外设不得在本模块重复初始化。具体 GPIO 编号、电平和脉冲宽度均从
+`machine::raycube_axis()` 读取。
 
-目标是验证 RayCube 的 X、Y 步进驱动电气链路可控，不是实现 G-code 运动。完成前，`protocol`、`command`、`motion` 和 `planner` 都不得调用本模块。
+## 开环位置模型
 
-### 阶段一：安全初始化
+设备没有编码器，因此位置是根据实际执行路径累计的开环模型：
 
-在 `stepper_init()` 中遍历 `machine::raycube_axis()` 提供的两个轴配置：
+```text
+实际发出 STEP
+  -> 按当前 DIR 累计 machine_position_steps
+  -> steps / steps_per_mm
+  -> machine_position_mm
+```
 
-1. 将 STEP、DIR、DISABLE 都配置为 GPIO 输出。
-2. 将 STEP 写为其空闲电平，当前为低电平。
-3. 将 DIR 写为固定初始方向。
-4. 按 `disable_active_high` 将两个轴写为禁用状态。
-5. 只有上述步骤全部成功后，初始化才返回 `ESP_OK`。
+位置状态为：
 
-验收标准：刷写后设备静止；测量两个 DISABLE 引脚均处于禁用电平；STEP 输出保持低电平。
+- `Unknown`：尚未建立可信原点；
+- `Known`：已通过归零或明确位置设置建立基准；
+- `Invalidated`：Reset、执行失败、下溢或取消后不能再相信当前位置。
 
-结束改动标准：不创建持续运行的 FreeRTOS 任务，不产生 STEP 脉冲；仅一次性硬件测试任务可初始化 stepper。
+规划目标位置不得直接覆盖实际位置。`stepper_record_executed_steps_from_isr()` 只能在
+对应 STEP 已由执行器触发后调用。Reset 或硬件执行异常后，必须重新通过 `$H` 或明确的
+位置设置建立坐标基准。
 
-阶段状态：代码已完成，尚未接入 `app_main`，未进行构建或实机验收。
+## StepSegment ring
 
-### 阶段二：使能和方向控制
+`stepper_prep` 使用固定容量的 SPSC ring：
 
-实现 `stepper_set_enabled()` 与 `stepper_set_direction()`：
+- 容量：64 个 segment；
+- 目标单段时间：约 750 µs；
+- 低水位：16 个；
+- 生产者：planner task；
+- 消费者：Timer ISR；
+- segment 发布后不可修改，消费完成后才能推进 tail。
 
-1. 根据 `disable_active_high` 将逻辑“使能”翻译为正确的 GPIO 电平。
-2. 根据 `direction_inverted` 将逻辑方向翻译为正确的 DIR 电平。
-3. 对非法轴编号返回 `ESP_ERR_INVALID_ARG`。
-4. 只有 `stepper_init()` 成功后才允许写入引脚；否则返回 `ESP_ERR_INVALID_STATE`。
+发布使用 release 语义，消费使用 acquire 语义。ISR 不使用 mutex、FreeRTOS queue、动态
+内存或日志。低水位只通知任务补料；ring 为空时属于真实下溢，必须停止 Timer、停止后续
+脉冲、发布故障完成事件并进入安全状态。
 
-验收标准：手动调用使能/禁用后，驱动器保持力状态可观察；更改方向不会产生 STEP 脉冲。
+## Segment 生成
 
-结束改动标准：不将使能状态和运动位置写入 protocol 或 parser 状态。
+`stepper_prep_start_block()` 从 PlannerBlock 的入口速度、出口速度、目标速度、加速度和
+路径长度计算梯形或三角形 profile。`stepper_prep_fill()` 按主轴步数和累计距离生成 segment，
+每个 segment 固化：
 
-阶段状态：代码已完成，尚未接入测试入口，未进行构建或实机验收。
+- X/Y 步数和方向；
+- duration 与原始 step interval；
+- 起止速度和加减速阶段；
+- 激光功率、主轴模式和 execution id；
+- 是否为 block 的最后一个 segment。
 
-### 阶段三：单脉冲输出
+stepper_prep 只消费 planner 已确定的 profile，不重新计算 junction，也不访问硬件。
 
-实现 `stepper_pulse()`：
+## AMASS 与 DDA
 
-1. 将指定轴的 STEP 写为有效电平。
-2. 使用 ROM 延时保持至少 `kStepPulseMicroseconds`，RayCube 当前为 3 us。
-3. 将 STEP 恢复为空闲电平。
-4. 该函数只输出一个脉冲，不循环、不计算距离、不等待队列。
+对于多轴低步频 segment，AMASS 根据原始 block 的多轴步数和 step interval 选择 0~3 级。
+Timer executor 将一个 segment 的执行 tick 扩展为 `2^level` 倍，并使用每轴误差累积的
+统一 DDA 分散 STEP：
 
-验收标准：逻辑分析仪或示波器观察到正确极性、宽度不小于 3 us 的单脉冲；在电机使能且低频调用时，电机只移动一个微步。
+```text
+每个 timer tick:
+  axis_error[axis] += axis_steps[axis]
+  error >= execution_ticks -> 触发该轴一个 STEP
+```
 
-结束改动标准：不在普通 FreeRTOS 任务中用循环连续调用此函数，不宣称其具备实时运动能力。
+AMASS 不改变 X/Y 的总步数、方向、路径长度或最终坐标，只改善低频多轴脉冲的时间分布。
+单轴运动保持 `amass=0`。实际 Timer 周期为原 segment interval 除以 `2^level`，并受
+STEP 安全最小周期限制。
 
-阶段状态：代码已完成，使用 `esp_rom_delay_us()` 保持 STEP 高电平至少 3 us；尚未接入测试入口，未进行构建或实机验收。
+## Timer 执行器
 
-### 阶段四：受控点动测试入口
+`timer_stepper_executor` 是非阻塞 segment 执行器：
 
-在单独的测试入口中，以低频、固定次数调用阶段二和阶段三接口：
+1. 任务从 segment ring 装载首段并设置方向、使能和激光 segment 状态。
+2. 启动 step timer 后立即返回，不等待整个 block。
+3. Timer ISR 执行 DDA/AMASS，并调用 driver 的 RMT 单脉冲触发接口。
+4. 当前 segment 完成时，ISR 直接消费下一 segment，避免任务调度造成段间空洞。
+5. block 的最后 segment 完成后写入 completion ring，通知 planner task 回收 block。
 
-1. 先初始化，确认两轴禁用。
-2. 一次仅使能 X 或 Y 轴。
-3. 设置方向，等待方向建立时间。
-4. 以保守间隔输出固定步数，例如 80 步。
-5. 再次禁用该轴，并等待人工确认后才测试另一轴和反方向。
+RMT 只负责固定宽度的单个 STEP 脉冲，不承担 block、segment、加速度或队列调度。
 
-验收标准：X/Y 分别能正反运动；80 步约为 1 mm；上电、测试结束、异常路径均回到禁用状态。
+## 执行完成与异常
 
-结束改动标准：该测试入口仅用于实机校验，验收完成后不作为正式 protocol 功能保留。
+- segment 完成：ISR 发布 `SegmentCompletion`，planner task 后续回收对应 block；
+- segment ring 下溢：停止 Timer、关闭激光并发布 faulted completion；
+- Reset/Hold/执行错误：停止 Timer 和 RMT，关闭激光，必要时关闭轴并使位置失效；
+- 连续运动：轴保持使能，只有 planner、segment、执行器均空闲并经过空闲延时后才关闭；
+- 归零 system motion：允许按轴停止，某一限位触发后仅停止对应轴，两轴均完成后结束。
 
-阶段状态：实机验证已通过。临时测试程序及 `app_main` 调用已删除；当前启动路径不会操作电机。后续应由 `motion` 模块提供新的、明确受控的测试入口。
+## 诊断
 
-## 后续边界
+`stepper_segment_diagnostics()` 提供：
 
-单轴测试通过后才创建 `motion` 模块。`motion` 负责 mm 到整数步数和直线插补；`planner` 负责 block 缓冲、前瞻及速度曲线；stepper 仅执行已确定的 STEP/DIR 时序。
+- segment 当前水位、容量和历史高水位；
+- 下溢次数；
+- 当前 execution id；
+- 原始 interval、AMASS level 和实际 Timer interval；
+- 当前 segment 起止速度；
+- 待处理 completion 数量。
+
+`timer_stepper_executor_diagnostics()` 提供初始化、Timer 运行状态和 Timer ISR 计数。
+这些数据通过 `$POS/STATUS` 供实机观察，不应恢复逐脉冲或逐 segment 高频日志。
+
+## 模块边界
+
+上游依赖：`machine` 提供轴参数，`planner` 提供已完成前瞻的 block。
+
+协作模块：
+
+- `driver`：拥有 GPTimer、RMT 和底层外设寄存器；
+- `planner`：拥有 block ring、前瞻、冻结边界和 block 完成语义；
+- `laser`：拥有 PWM/Enable，并在 segment 生命周期中处理激光安全状态；
+- `homing`：提交 system motion 并根据限位中断停止轴。
+
+本模块不得解析 G-code、读取 SD/UART、执行 junction 规划、访问文件系统或直接实现 RMT
+寄存器配置。
+
+## 当前范围
+
+- 已支持 RayCube Cartesian XY 的 G0/G1 直线执行；
+- 已支持梯形/三角形 profile、连续 segment ring 和 AMASS；
+- 已支持开环位置累计、归零路径、Reset/异常失效和完成通知；
+- 未支持 Z 轴、G2/G3 圆弧和编码器闭环反馈。
+
+## 验收重点
+
+- 单轴、XY 非等比直线、连续短线、90 度转弯和反向运动的最终步数正确；
+- AMASS 双轴低速运行无尖啸，且不改变目标距离；
+- segment ring 正常运行无 underflow，Timer ISR 不触发 watchdog；
+- segment 边界无任务调度级空洞，电机不会在连续 block 间反复使能/禁用；
+- Reset、Hold、执行失败、下溢和归零限位都能停止脉冲、关闭激光并给出正确位置状态。
