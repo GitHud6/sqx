@@ -29,6 +29,7 @@ struct MotionState {
     std::int32_t completed_ticks = 0;
     std::int64_t axis_error[machine::kAxisCount] = {};
     std::uint32_t effective_step_interval_us = 0;
+    std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
     bool system_motion = false;
@@ -46,6 +47,7 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
     motion.effective_step_interval_us = std::max<std::uint32_t>(
         4U, segment.step_interval_us / amass_scale);
+    motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
     motion.system_motion = segment.system_motion;
@@ -81,6 +83,14 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
         const MotionState completed_motion = s_motion;
+        StepSegment completed_segment = {};
+        completed_segment.execution_id = completed_motion.execution_id;
+        completed_segment.axis_steps = {completed_motion.axis_steps[0], completed_motion.axis_steps[1]};
+        completed_segment.major_steps = completed_motion.axis_steps[0] > completed_motion.axis_steps[1]
+                                            ? completed_motion.axis_steps[0]
+                                            : completed_motion.axis_steps[1];
+        completed_segment.end_speed_tenths_mm_per_min = completed_motion.end_speed_tenths_mm_per_min;
+        stepper_prep_record_segment_completed_from_isr(completed_segment);
         if (completed_motion.completes_block) {
             const SegmentCompletion completion = {
                 .execution_id = completed_motion.execution_id,
@@ -95,12 +105,13 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
         } else if (s_feed_hold_requested.load(std::memory_order_relaxed)) {
-            // Do not consume another immutable segment after Hold. The queued
-            // prefix is retained for Resume and the laser is made safe here.
+            // The executor only ends the active segment. The persistent prep
+            // context owns the later deceleration and resume work.
             s_busy.store(false);
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
+            stepper_prep_record_hold_boundary_from_isr();
             stepper_segment_request_refill_from_isr(&task_woken);
         } else if (stepper_segment_consume(next)) {
             for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
@@ -218,6 +229,7 @@ void timer_stepper_executor_request_feed_hold() {
 
 void timer_stepper_executor_resume() {
     s_feed_hold_requested.store(false, std::memory_order_release);
+    stepper_prep_clear_hold_boundary();
 }
 
 void timer_stepper_executor_stop() {

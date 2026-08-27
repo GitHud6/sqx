@@ -462,10 +462,9 @@ void fill_segment_ring_from_planner() {
     while (stepper::stepper_segment_free_slots() != 0) {
         if (stepper::stepper_prep_profile().active) {
             stepper::stepper_prep_fill();
-            if (stepper::stepper_prep_profile().active) {
-                return;
-            }
-            continue;
+            // A block remains prep-owned until its final segment has been
+            // physically emitted. Do not prebuild later blocks into the cache.
+            return;
         }
 
         MotionBlock candidate = {};
@@ -527,11 +526,20 @@ void consume_segment_completions() {
             clear_active_block();
         }
         if (completion.status == stepper::SegmentCompletionStatus::Completed) {
+            if (!stepper::stepper_prep_complete_block(completion.execution_id)) {
+                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+                emit_execution_event(ExecutionEventType::BlockFailed, &block);
+                stepper::stepper_prep_cancel_block();
+                discard_current_block(block);
+                report_queue_drained();
+                continue;
+            }
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
         } else {
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
+            stepper::stepper_prep_cancel_block();
         }
         discard_current_block(block);
         report_queue_drained();
@@ -689,8 +697,8 @@ void planner_resume() {
         s_control_state.store(ControlState::Running);
     }
     stepper::timer_stepper_executor_resume();
-    // The current implementation resumes queued segments directly. The later
-    // checkpoint-replay phase will consume this snapshot instead.
+    // Stage one retains the existing cache. Stage three will regenerate it
+    // from the persistent prep context after a controlled stop.
     clear_feed_hold_snapshot();
     MotionBlock block = {};
     if (active_block_snapshot(block)) {

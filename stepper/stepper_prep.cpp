@@ -31,6 +31,13 @@ std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
 
 StepperProfile s_profile = {};
 planner::PlannerBlock s_source_block = {};
+std::atomic<std::uint64_t> s_context_execution_id = 0;
+std::atomic<std::int32_t> s_context_total_major_steps = 0;
+std::atomic<std::int32_t> s_context_executed_major_steps = 0;
+std::array<std::atomic<std::int32_t>, machine::kAxisCount> s_context_executed_axis_steps = {};
+std::atomic<std::uint32_t> s_context_current_speed_tenths_mm_per_min = 0;
+std::atomic<bool> s_context_generation_complete = false;
+std::atomic<bool> s_context_hold_boundary = false;
 
 static_assert(kStepSegmentBufferLength > 0, "segment ring requires storage");
 static_assert(kStepCompletionBufferLength > 0, "completion ring requires storage");
@@ -211,6 +218,15 @@ void stepper_prep_reset() {
     s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_completion_head.store(0, std::memory_order_relaxed);
     s_completion_tail.store(0, std::memory_order_relaxed);
+    s_context_execution_id.store(0, std::memory_order_relaxed);
+    s_context_total_major_steps.store(0, std::memory_order_relaxed);
+    s_context_executed_major_steps.store(0, std::memory_order_relaxed);
+    for (auto& steps : s_context_executed_axis_steps) {
+        steps.store(0, std::memory_order_relaxed);
+    }
+    s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+    s_context_generation_complete.store(false, std::memory_order_relaxed);
+    s_context_hold_boundary.store(false, std::memory_order_relaxed);
     s_profile = {};
     s_source_block = {};
 }
@@ -262,13 +278,33 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         .accelerate_distance_mm = accelerate_distance,
         .decelerate_after_mm = block.millimeters - decelerate_distance,
         .active = true,
+        .generation_complete = false,
     };
+    s_context_total_major_steps.store(block.step_event_count, std::memory_order_relaxed);
+    s_context_executed_major_steps.store(0, std::memory_order_relaxed);
+    for (auto& steps : s_context_executed_axis_steps) {
+        steps.store(0, std::memory_order_relaxed);
+    }
+    s_context_current_speed_tenths_mm_per_min.store(
+        speed_to_tenths_mm_per_min(entry_speed), std::memory_order_relaxed);
+    s_context_generation_complete.store(false, std::memory_order_relaxed);
+    s_context_hold_boundary.store(false, std::memory_order_relaxed);
+    s_context_execution_id.store(block.execution_id, std::memory_order_release);
     return true;
 }
 
 void stepper_prep_cancel_block() {
     s_profile = {};
     s_source_block = {};
+    s_context_execution_id.store(0, std::memory_order_release);
+    s_context_total_major_steps.store(0, std::memory_order_relaxed);
+    s_context_executed_major_steps.store(0, std::memory_order_relaxed);
+    for (auto& steps : s_context_executed_axis_steps) {
+        steps.store(0, std::memory_order_relaxed);
+    }
+    s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+    s_context_generation_complete.store(false, std::memory_order_relaxed);
+    s_context_hold_boundary.store(false, std::memory_order_relaxed);
 }
 
 std::size_t stepper_prep_fill() {
@@ -282,9 +318,44 @@ std::size_t stepper_prep_fill() {
         ++generated;
     }
     if (s_profile.next_segment_index == s_profile.total_segments) {
-        s_profile.active = false;
+        // The final segment being published does not mean it has executed.
+        s_profile.generation_complete = true;
+        s_context_generation_complete.store(true, std::memory_order_release);
     }
     return generated;
+}
+
+bool stepper_prep_complete_block(const std::uint64_t execution_id) {
+    if (!s_profile.active || s_profile.execution_id != execution_id ||
+        !s_profile.generation_complete ||
+        s_context_executed_major_steps.load(std::memory_order_acquire) !=
+            s_context_total_major_steps.load(std::memory_order_acquire)) {
+        return false;
+    }
+    stepper_prep_cancel_block();
+    return true;
+}
+
+void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment) {
+    if (segment.execution_id == 0 ||
+        s_context_execution_id.load(std::memory_order_relaxed) != segment.execution_id) {
+        return;
+    }
+    s_context_executed_major_steps.fetch_add(segment.major_steps, std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        s_context_executed_axis_steps[axis].fetch_add(segment.axis_steps[axis],
+                                                       std::memory_order_relaxed);
+    }
+    s_context_current_speed_tenths_mm_per_min.store(
+        segment.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+}
+
+void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr() {
+    s_context_hold_boundary.store(true, std::memory_order_release);
+}
+
+void stepper_prep_clear_hold_boundary() {
+    s_context_hold_boundary.store(false, std::memory_order_release);
 }
 
 bool stepper_segment_publish(const StepSegment& segment) {
@@ -412,6 +483,24 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
 
 const StepperProfile& stepper_prep_profile() {
     return s_profile;
+}
+
+StepperPrepDiagnostics stepper_prep_diagnostics() {
+    StepperPrepDiagnostics diagnostics = {};
+    diagnostics.execution_id = s_context_execution_id.load(std::memory_order_acquire);
+    diagnostics.active = diagnostics.execution_id != 0;
+    diagnostics.generation_complete =
+        s_context_generation_complete.load(std::memory_order_acquire);
+    diagnostics.hold_boundary = s_context_hold_boundary.load(std::memory_order_acquire);
+    diagnostics.total_major_steps = s_context_total_major_steps.load(std::memory_order_relaxed);
+    diagnostics.executed_major_steps = s_context_executed_major_steps.load(std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        diagnostics.executed_axis_steps[axis] =
+            s_context_executed_axis_steps[axis].load(std::memory_order_relaxed);
+    }
+    diagnostics.current_speed_tenths_mm_per_min =
+        s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
+    return diagnostics;
 }
 
 }  // namespace ray2::stepper

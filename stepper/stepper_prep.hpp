@@ -87,12 +87,30 @@ struct StepperProfile {
     double accelerate_distance_mm = 0.0;
     double decelerate_after_mm = 0.0;
     bool active = false;
+    bool generation_complete = false;
+};
+
+// Segment entries are disposable cache. This persistent context is retained
+// until the executor confirms that the entire source block was emitted.
+struct StepperPrepDiagnostics {
+    bool active = false;
+    bool generation_complete = false;
+    bool hold_boundary = false;
+    std::uint64_t execution_id = 0;
+    std::int32_t total_major_steps = 0;
+    std::int32_t executed_major_steps = 0;
+    std::array<std::int32_t, 2> executed_axis_steps = {};
+    std::uint32_t current_speed_tenths_mm_per_min = 0;
 };
 
 void stepper_prep_reset();
 bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
+bool stepper_prep_complete_block(std::uint64_t execution_id);
+void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment);
+void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr();
+void stepper_prep_clear_hold_boundary();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_us,
                                         const std::array<std::int32_t, 2>& axis_steps);
@@ -114,5 +132,6 @@ bool stepper_completion_consume(SegmentCompletion& completion);
 SegmentExecutionDiagnostics stepper_segment_diagnostics();
 
 const StepperProfile& stepper_prep_profile();
+StepperPrepDiagnostics stepper_prep_diagnostics();
 
 }  // namespace ray2::stepper
