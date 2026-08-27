@@ -309,26 +309,15 @@ Error validate_arc_request(const ParsedBlock& parsed,
     return Error::Ok;
 }
 
-Error build_ij_arc_requests(const ParsedBlock& parsed,
-                            const motion::MotionRequest& request,
-                            const double unit_scale,
-                            std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
-                            std::size_t& count) {
-    const Error validation = validate_arc_request(parsed, request, unit_scale);
-    if (validation != Error::Ok) return validation;
-    if (parsed.has_arc_radius) return Error::UnsupportedCommand;
-
-    const double offset_x = parsed.has_arc_offset[0] ? parsed.arc_offset[0] * unit_scale : 0.0;
-    const double offset_y = parsed.has_arc_offset[1] ? parsed.arc_offset[1] * unit_scale : 0.0;
-    const double center_x = request.start_mm[0] + offset_x;
-    const double center_y = request.start_mm[1] + offset_y;
-    const double radius = std::hypot(offset_x, offset_y);
+double arc_sweep(const motion::MotionRequest& request,
+                 const double center_x,
+                 const double center_y,
+                 const bool clockwise) {
     const double start_angle = std::atan2(request.start_mm[1] - center_y,
                                           request.start_mm[0] - center_x);
     const double end_angle = std::atan2(request.target_mm[1] - center_y,
                                         request.target_mm[0] - center_x);
     double sweep = end_angle - start_angle;
-    const bool clockwise = parsed.motion_mode == MotionMode::ArcClockwise;
     if (clockwise) {
         if (sweep >= 0.0) sweep -= kTwoPi;
     } else if (sweep <= 0.0) {
@@ -337,6 +326,19 @@ Error build_ij_arc_requests(const ParsedBlock& parsed,
     if (std::abs(sweep) < kArcCoincidentPointToleranceMm) {
         sweep = clockwise ? -kTwoPi : kTwoPi;
     }
+    return sweep;
+}
+
+Error build_arc_requests(const motion::MotionRequest& request,
+                         const double center_x,
+                         const double center_y,
+                         const double sweep,
+                         std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
+                         std::size_t& count) {
+    const double radius = std::hypot(request.start_mm[0] - center_x,
+                                     request.start_mm[1] - center_y);
+    const double start_angle = std::atan2(request.start_mm[1] - center_y,
+                                          request.start_mm[0] - center_x);
 
     const double error_ratio = std::max(-1.0, std::min(
         1.0, 1.0 - kArcMaximumChordErrorMm / radius));
@@ -366,6 +368,72 @@ Error build_ij_arc_requests(const ParsedBlock& parsed,
         previous = chord;
     }
     return Error::Ok;
+}
+
+Error build_ij_arc_requests(const ParsedBlock& parsed,
+                            const motion::MotionRequest& request,
+                            const double unit_scale,
+                            std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
+                            std::size_t& count) {
+    const Error validation = validate_arc_request(parsed, request, unit_scale);
+    if (validation != Error::Ok) return validation;
+    if (parsed.has_arc_radius) return Error::UnsupportedCommand;
+    const double center_x = request.start_mm[0] +
+                            (parsed.has_arc_offset[0] ? parsed.arc_offset[0] * unit_scale : 0.0);
+    const double center_y = request.start_mm[1] +
+                            (parsed.has_arc_offset[1] ? parsed.arc_offset[1] * unit_scale : 0.0);
+    const double sweep = arc_sweep(request, center_x, center_y,
+                                   parsed.motion_mode == MotionMode::ArcClockwise);
+    return build_arc_requests(request, center_x, center_y, sweep, requests, count);
+}
+
+Error build_r_arc_requests(const ParsedBlock& parsed,
+                           const motion::MotionRequest& request,
+                           const double unit_scale,
+                           std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
+                           std::size_t& count) {
+    const Error validation = validate_arc_request(parsed, request, unit_scale);
+    if (validation != Error::Ok) return validation;
+    if (!parsed.has_arc_radius) return Error::ArcInvalid;
+
+    const double radius = std::abs(parsed.arc_radius * unit_scale);
+    const double dx = request.target_mm[0] - request.start_mm[0];
+    const double dy = request.target_mm[1] - request.start_mm[1];
+    const double chord = std::hypot(dx, dy);
+    const double midpoint_x = (request.start_mm[0] + request.target_mm[0]) * 0.5;
+    const double midpoint_y = (request.start_mm[1] + request.target_mm[1]) * 0.5;
+    const double height_squared = radius * radius - chord * chord * 0.25;
+    if (height_squared < -kArcCoincidentPointToleranceMm) return Error::ArcInvalid;
+    const double height = std::sqrt(std::max(0.0, height_squared));
+    const double normal_x = -dy / chord;
+    const double normal_y = dx / chord;
+    const bool clockwise = parsed.motion_mode == MotionMode::ArcClockwise;
+    const bool long_arc = parsed.arc_radius < 0.0;
+
+    const double centers[2][2] = {
+        {midpoint_x + normal_x * height, midpoint_y + normal_y * height},
+        {midpoint_x - normal_x * height, midpoint_y - normal_y * height},
+    };
+    double selected_x = 0.0;
+    double selected_y = 0.0;
+    double selected_sweep = 0.0;
+    bool selected = false;
+    for (const auto& center : centers) {
+        const double sweep = arc_sweep(request, center[0], center[1], clockwise);
+        const bool candidate_is_long = std::abs(sweep) > 3.14159265358979323846 +
+                                       kArcCoincidentPointToleranceMm;
+        const bool is_semicircle = std::abs(std::abs(sweep) - 3.14159265358979323846) <=
+                                    kArcCoincidentPointToleranceMm;
+        if (is_semicircle || candidate_is_long == long_arc) {
+            selected_x = center[0];
+            selected_y = center[1];
+            selected_sweep = sweep;
+            selected = true;
+            break;
+        }
+    }
+    if (!selected) return Error::ArcInvalid;
+    return build_arc_requests(request, selected_x, selected_y, selected_sweep, requests, count);
 }
 
 motion::SpindleMode spindle_mode(SpindleMode mode) {
@@ -533,8 +601,11 @@ Error execute_line_internal(const char* line,
         }
         std::array<motion::MotionRequest, kArcMaximumSegments> arc_requests = {};
         std::size_t arc_request_count = 0;
-        const Error arc_error = build_ij_arc_requests(
-            parsed, request, unit_scale, arc_requests, arc_request_count);
+        const Error arc_error = parsed.has_arc_radius
+                                    ? build_r_arc_requests(parsed, request, unit_scale,
+                                                           arc_requests, arc_request_count)
+                                    : build_ij_arc_requests(parsed, request, unit_scale,
+                                                            arc_requests, arc_request_count);
         if (arc_error != Error::Ok) return arc_error;
         switch (motion::motion_submit_batch(arc_requests.data(), arc_request_count)) {
             case motion::MotionSubmitResult::Accepted:
