@@ -20,6 +20,8 @@ std::atomic<std::uint64_t> s_received_bytes = 0;
 std::atomic<std::uint64_t> s_realtime_bytes = 0;
 std::atomic<std::uint64_t> s_normal_bytes = 0;
 std::atomic<std::size_t> s_queue_high_water_chunks = 0;
+std::atomic<bool> s_discard_normal_input_requested = false;
+std::atomic<std::uint32_t> s_normal_input_generation = 0;
 
 esp_err_t uart0_init() {
     const uart_config_t config = {
@@ -71,11 +73,21 @@ void uart0_rx_task(void*) {
             normal_chunk.data[normal_chunk.length++] = byte;
         }
 
+        // A realtime abort can arrive in this same chunk.  The UART task owns
+        // both the driver RX buffer and the normal protocol queue, so it is
+        // the only task allowed to discard them together.
+        if (s_discard_normal_input_requested.exchange(false, std::memory_order_acq_rel)) {
+            normal_chunk.length = 0;
+            xQueueReset(s_rx_queue);
+            uart_flush_input(UART_NUM_0);
+        }
+
         if (normal_chunk.length == 0) {
             continue;
         }
 
         s_normal_bytes.fetch_add(normal_chunk.length, std::memory_order_relaxed);
+        normal_chunk.generation = s_normal_input_generation.load(std::memory_order_acquire);
         xQueueSend(s_rx_queue, &normal_chunk, portMAX_DELAY);
 
         const std::size_t queued_chunks = static_cast<std::size_t>(uxQueueMessagesWaiting(s_rx_queue));
@@ -146,6 +158,15 @@ Uart0RxDiagnostics uart0_rx_diagnostics() {
         .normal_bytes = s_normal_bytes.load(std::memory_order_relaxed),
         .queue_high_water_chunks = s_queue_high_water_chunks.load(std::memory_order_relaxed),
     };
+}
+
+void uart0_discard_pending_normal_input() {
+    s_normal_input_generation.fetch_add(1, std::memory_order_acq_rel);
+    s_discard_normal_input_requested.store(true, std::memory_order_release);
+}
+
+std::uint32_t uart0_normal_input_generation() {
+    return s_normal_input_generation.load(std::memory_order_acquire);
 }
 
 int uart0_write_unlocked(const std::uint8_t* data, const std::size_t length) {

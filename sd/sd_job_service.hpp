@@ -22,9 +22,11 @@ enum class JobFault {
     OpenFailed,
     ReadFailed,
     CommandRejected,
+    Aborted,
 };
 
 esp_err_t sd_job_start(const char* path);
+void sd_job_request_abort();
 JobState sd_job_state();
 bool sd_job_is_active();
 const char* sd_job_state_text(JobState state);

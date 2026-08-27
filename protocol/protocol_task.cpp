@@ -11,6 +11,7 @@
 #include "planner.hpp"
 #include "protocol_tx.hpp"
 #include "realtime_command.hpp"
+#include "sd_job_service.hpp"
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -28,11 +29,11 @@ enum class PendingControl : std::uint8_t {
     None,
     Hold,
     Resume,
-    Reset,
 };
 
 std::atomic<bool> s_status_report_pending = false;
 std::atomic<PendingControl> s_control_pending = PendingControl::None;
+std::atomic<bool> s_abort_pending = false;
 
 bool protocol_write_all(const std::uint8_t* data, std::size_t length) {
     return protocol_tx_enqueue_normal(data, length);
@@ -40,6 +41,13 @@ bool protocol_write_all(const std::uint8_t* data, std::size_t length) {
 
 bool protocol_handle_ready_line(LineAssembler& assembler) {
     while (true) {
+        // `planner_wait_for_free_block()` is allowed to sleep while a stream
+        // is full.  Ctrl-X must also cancel that partially handled line once
+        // planner_reset() wakes the capacity waiter.
+        if (s_abort_pending.exchange(false, std::memory_order_acq_rel)) {
+            assembler.reset_line();
+            return true;
+        }
         bool capacity_blocked = false;
         const bool dispatched = command_dispatch(
             assembler.line(), assembler.length(), capacity_blocked);
@@ -56,6 +64,17 @@ bool protocol_handle_overflow() {
     return protocol_write_all(kOverflow, sizeof(kOverflow) - 1);
 }
 
+void protocol_execute_abort() {
+    // Ctrl-X is safety termination, not a queued Hold/Resume control.  Run
+    // this from the UART ingress task so a stopped Hold cannot starve it.
+    ray2::sd::sd_job_request_abort();
+    planner::planner_reset();
+    s_abort_pending.store(true, std::memory_order_release);
+    s_status_report_pending.store(false, std::memory_order_release);
+    ray2::driver::uart0_discard_pending_normal_input();
+    protocol_tx_abort_flush();
+}
+
 bool protocol_handle_realtime_command(const RealtimeCommand realtime_command) {
     if (realtime_command == RealtimeCommand::StatusReport) {
         return command_report_realtime_status();
@@ -64,6 +83,8 @@ bool protocol_handle_realtime_command(const RealtimeCommand realtime_command) {
         planner::planner_request_feed_hold();
     } else if (realtime_command == RealtimeCommand::CycleStart) {
         planner::planner_resume();
+    } else if (realtime_command == RealtimeCommand::Reset) {
+        protocol_execute_abort();
     }
     return true;
 }
@@ -86,7 +107,10 @@ bool protocol_uart_ingress_handler(const std::uint8_t byte, void*) {
             s_control_pending.store(PendingControl::Resume, std::memory_order_release);
             break;
         case RealtimeCommand::Reset:
-            s_control_pending.store(PendingControl::Reset, std::memory_order_release);
+            // Ctrl-X cannot share the deferred control mailbox. It must not
+            // wait behind, or be lost beside, a completed feed hold.
+            s_control_pending.store(PendingControl::None, std::memory_order_release);
+            protocol_execute_abort();
             break;
     }
 
@@ -127,7 +151,21 @@ void protocol_task(void*) {
             continue;
         }
 
+        // A packet tagged before Ctrl-X is obsolete. New packets must remain
+        // usable immediately after the reset, including the first `$H` or
+        // `$POS/STATUS` sent by a host.
+        if (chunk.generation != ray2::driver::uart0_normal_input_generation()) {
+            assembler.reset_line();
+            continue;
+        }
+
         for (std::size_t index = 0; index < chunk.length; ++index) {
+            if (s_abort_pending.exchange(false, std::memory_order_acq_rel)) {
+                assembler.reset_line();
+                if (chunk.generation != ray2::driver::uart0_normal_input_generation()) {
+                    break;
+                }
+            }
             if (!protocol_process_byte(assembler, chunk.data[index])) {
                 break;
             }
@@ -147,9 +185,6 @@ void realtime_task(void*) {
                 break;
             case PendingControl::Resume:
                 protocol_handle_realtime_command(RealtimeCommand::CycleStart);
-                break;
-            case PendingControl::Reset:
-                // Reset/Abort cleanup is intentionally implemented in phase three.
                 break;
             case PendingControl::None:
                 break;

@@ -28,6 +28,8 @@ bool protocol_tx_enqueue_normal(const std::uint8_t* data, std::size_t length);
 
 // Replaces any unsent realtime status packet with the newest snapshot.
 bool protocol_tx_publish_realtime_status(const std::uint8_t* data, std::size_t length);
+// Drops unsent ordinary replies and status packets after Abort.
+void protocol_tx_abort_flush();
 ProtocolTxDiagnostics protocol_tx_diagnostics();
 
 }  // namespace ray2::protocol

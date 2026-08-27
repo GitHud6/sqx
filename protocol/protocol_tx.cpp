@@ -164,6 +164,19 @@ bool protocol_tx_publish_realtime_status(const std::uint8_t* data, const std::si
     return true;
 }
 
+void protocol_tx_abort_flush() {
+    if (s_normal_tx_queue != nullptr && s_free_tx_queue != nullptr) {
+        TxMessage* message = nullptr;
+        while (xQueueReceive(s_normal_tx_queue, &message, 0) == pdTRUE) {
+            xQueueSend(s_free_tx_queue, &message, 0);
+        }
+    }
+    portENTER_CRITICAL(&s_realtime_status_lock);
+    s_realtime_status_pending = false;
+    s_realtime_status_length = 0;
+    portEXIT_CRITICAL(&s_realtime_status_lock);
+}
+
 ProtocolTxDiagnostics protocol_tx_diagnostics() {
     return {
         .normal_pending = s_normal_tx_queue == nullptr

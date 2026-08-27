@@ -124,6 +124,8 @@ segment-ring 直接恢复路径；这避免将空缓存误判为执行失败。�
 
 ## 阶段四：Abort 隔离与回归
 
+阶段状态：代码已实现，等待实机验收。
+
 ### 实现步骤
 
 1. 保持 `0x18` 独立：立即停止 timer/RMT，关闭激光，清空 planner、prep、segment 与供料残留，使位置 invalidated。

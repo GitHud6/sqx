@@ -26,6 +26,7 @@ std::atomic<JobState> s_job_state = JobState::Idle;
 std::atomic<JobFault> s_job_fault = JobFault::None;
 std::atomic<command::Error> s_job_command_error = command::Error::Ok;
 std::atomic<std::uint32_t> s_job_current_line = 0;
+std::atomic<bool> s_abort_requested = false;
 char s_job_path[kJobPathCapacity] = {};
 
 // The gzip dictionary is 32 KiB. Keep reader storage outside the 4 KiB job
@@ -76,7 +77,9 @@ void log_position(const char* lifecycle) {
 void finish_job(JobState state,
                 JobFault fault = JobFault::None,
                 command::Error command_error = command::Error::Ok) {
-    if (state == JobState::Faulted) {
+    // A realtime Ctrl-X has already synchronously reset motion before asking
+    // the SD feeder to exit. Avoid a second concurrent executor reset here.
+    if (state == JobState::Faulted && fault != JobFault::Aborted) {
         ray2::planner::planner_reset();
     }
     log_position(state == JobState::Completed ? "completed" : "faulted");
@@ -108,6 +111,11 @@ void sd_job_task(void*) {
     char line[kGcodeLineCapacity] = {};
     bool program_ended = false;
     while (true) {
+        if (s_abort_requested.load(std::memory_order_acquire)) {
+            reader->close();
+            finish_job(JobState::Faulted, JobFault::Aborted);
+            return;
+        }
         if (reader->read_line(line, sizeof(line))) {
             s_job_current_line.fetch_add(1);
             if (line[0] == '\0') {
@@ -115,6 +123,11 @@ void sd_job_task(void*) {
             }
 
             while (true) {
+                if (s_abort_requested.load(std::memory_order_acquire)) {
+                    reader->close();
+                    finish_job(JobState::Faulted, JobFault::Aborted);
+                    return;
+                }
                 const command::Error result =
                     ray2::protocol::command_dispatch_external(line, std::strlen(line));
                 if (result == command::Error::Ok) {
@@ -156,6 +169,10 @@ void sd_job_task(void*) {
     s_job_state.store(JobState::Draining);
     log_position("draining");
     while (ray2::planner::planner_free_blocks() != ray2::planner::kPlannerQueueLength) {
+        if (s_abort_requested.load(std::memory_order_acquire)) {
+            finish_job(JobState::Faulted, JobFault::Aborted);
+            return;
+        }
         vTaskDelay(pdMS_TO_TICKS(2));
     }
     finish_job(JobState::Completed);
@@ -186,12 +203,19 @@ esp_err_t sd_job_start(const char* path) {
     s_job_fault.store(JobFault::None);
     s_job_command_error.store(command::Error::Ok);
     s_job_current_line.store(0);
+    s_abort_requested.store(false, std::memory_order_release);
 
     if (xTaskCreate(sd_job_task, "sd_job", 4096, nullptr, 5, &s_job_task) != pdPASS) {
         s_job_state.store(JobState::Faulted);
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+void sd_job_request_abort() {
+    if (sd_job_is_active()) {
+        s_abort_requested.store(true, std::memory_order_release);
+    }
 }
 
 JobState sd_job_state() {
@@ -229,6 +253,7 @@ const char* sd_job_fault_text(JobFault fault) {
         case JobFault::OpenFailed: return "open-failed";
         case JobFault::ReadFailed: return "read-failed";
         case JobFault::CommandRejected: return "command-rejected";
+        case JobFault::Aborted: return "aborted";
     }
     return "unknown";
 }
