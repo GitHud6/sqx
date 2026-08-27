@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "planner.hpp"
+#include "motion_profile.hpp"
 
 namespace ray2::stepper {
 
@@ -88,6 +89,7 @@ struct StepperProfile {
     double acceleration_mm_per_min2 = 0.0;
     double accelerate_distance_mm = 0.0;
     double decelerate_after_mm = 0.0;
+    MotionProfile motion_profile = {};
     bool active = false;
     bool generation_complete = false;
     bool feed_hold = false;
@@ -106,6 +108,7 @@ struct StepperPrepDiagnostics {
     std::int32_t executed_major_steps = 0;
     std::array<std::int32_t, 2> executed_axis_steps = {};
     std::uint32_t current_speed_tenths_mm_per_min = 0;
+    MotionProfileMode profile_mode = MotionProfileMode::Trapezoid;
 };
 
 void stepper_prep_reset();

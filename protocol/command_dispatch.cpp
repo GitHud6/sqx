@@ -120,6 +120,14 @@ const char* spindle_mode_text(const command::SpindleMode mode) {
     return "M5";
 }
 
+const char* motion_profile_mode_text(const stepper::MotionProfileMode mode) {
+    switch (mode) {
+        case stepper::MotionProfileMode::Trapezoid: return "trapezoid";
+        case stepper::MotionProfileMode::SCurve: return "s-curve";
+    }
+    return "unknown";
+}
+
 bool report_build_info() {
     static constexpr char kBuildInfo[] =
         "[VER:1.1f.20260826:RayCube-IDF]\r\n"
@@ -414,7 +422,7 @@ bool report_position_status() {
     static char response[1792] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f)|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f)|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -433,6 +441,7 @@ bool report_position_status() {
         static_cast<long long>(planner_diagnostics.feed_hold.stopped_steps[0]),
         static_cast<long long>(planner_diagnostics.feed_hold.stopped_steps[1]),
         prep.active ? 1 : 0, prep.generation_complete ? 1 : 0, prep.hold_boundary ? 1 : 0,
+        motion_profile_mode_text(prep.profile_mode),
         static_cast<unsigned long long>(prep.execution_id),
         static_cast<long>(prep.executed_major_steps), static_cast<long>(prep.total_major_steps),
         static_cast<long>(prep.executed_axis_steps[0]), static_cast<long>(prep.executed_axis_steps[1]),

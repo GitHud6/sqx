@@ -82,52 +82,27 @@ bool block_is_valid(const planner::PlannerBlock& block) {
            block.acceleration_mm_per_sec2 > 0.0;
 }
 
-double speed_at_distance(const double distance_mm) {
-    const double acceleration = s_profile.acceleration_mm_per_min2;
-    if (distance_mm < s_profile.accelerate_distance_mm) {
-        return std::sqrt(s_profile.entry_speed_mm_per_min * s_profile.entry_speed_mm_per_min +
-                         2.0 * acceleration * distance_mm);
-    }
-    if (distance_mm < s_profile.decelerate_after_mm) {
-        return s_profile.nominal_speed_mm_per_min;
-    }
-    const double distance_to_end = s_profile.length_mm - distance_mm;
-    return std::sqrt(std::max(s_profile.exit_speed_mm_per_min * s_profile.exit_speed_mm_per_min,
-                              s_profile.exit_speed_mm_per_min * s_profile.exit_speed_mm_per_min +
-                                  2.0 * acceleration * distance_to_end));
+bool apply_trapezoid_profile(const MotionProfileInput& input, StepperProfile& profile) {
+    MotionProfile motion_profile = {};
+    if (!motion_profile_build_trapezoid(input, motion_profile)) return false;
+    profile.motion_profile = motion_profile;
+    profile.length_mm = motion_profile.length_mm;
+    profile.entry_speed_mm_per_min = motion_profile.entry_speed_mm_per_min;
+    profile.nominal_speed_mm_per_min = motion_profile.nominal_speed_mm_per_min;
+    profile.exit_speed_mm_per_min = motion_profile.exit_speed_mm_per_min;
+    profile.acceleration_mm_per_min2 = motion_profile.acceleration_mm_per_min2;
+    profile.accelerate_distance_mm = motion_profile.accelerate_distance_mm;
+    profile.decelerate_after_mm = motion_profile.decelerate_after_mm;
+    return true;
 }
 
 StepSegmentPhase phase_at_distance(const double distance_mm) {
-    if (distance_mm < s_profile.accelerate_distance_mm) {
-        return StepSegmentPhase::Accelerate;
+    switch (motion_profile_phase_at_distance(s_profile.motion_profile, distance_mm)) {
+        case MotionProfilePhase::Accelerate: return StepSegmentPhase::Accelerate;
+        case MotionProfilePhase::Cruise: return StepSegmentPhase::Cruise;
+        case MotionProfilePhase::Decelerate: return StepSegmentPhase::Decelerate;
     }
-    if (distance_mm < s_profile.decelerate_after_mm) {
-        return StepSegmentPhase::Cruise;
-    }
-    return StepSegmentPhase::Decelerate;
-}
-
-double time_at_distance_us(const double distance_mm) {
-    const double acceleration = s_profile.acceleration_mm_per_min2;
-    const double clamped_distance = std::clamp(distance_mm, 0.0, s_profile.length_mm);
-    const double accelerate_time_us =
-        (s_profile.nominal_speed_mm_per_min - s_profile.entry_speed_mm_per_min) *
-        60000000.0 / acceleration;
-    if (clamped_distance <= s_profile.accelerate_distance_mm) {
-        return (speed_at_distance(clamped_distance) - s_profile.entry_speed_mm_per_min) *
-            60000000.0 / acceleration;
-    }
-    if (clamped_distance <= s_profile.decelerate_after_mm) {
-        return accelerate_time_us +
-            (clamped_distance - s_profile.accelerate_distance_mm) * 60000000.0 /
-                s_profile.nominal_speed_mm_per_min;
-    }
-    const double cruise_time_us =
-        (s_profile.decelerate_after_mm - s_profile.accelerate_distance_mm) * 60000000.0 /
-        s_profile.nominal_speed_mm_per_min;
-    return accelerate_time_us + cruise_time_us +
-        (s_profile.nominal_speed_mm_per_min - speed_at_distance(clamped_distance)) *
-            60000000.0 / acceleration;
+    return StepSegmentPhase::Cruise;
 }
 
 StepSegment build_segment(const std::uint32_t segment_index) {
@@ -138,9 +113,10 @@ StepSegment build_segment(const std::uint32_t segment_index) {
         (static_cast<std::int64_t>(total_steps) * (segment_index + 1)) / s_profile.total_segments);
     const double start_distance = s_profile.length_mm * first_step / total_steps;
     const double final_distance = s_profile.length_mm * final_step / total_steps;
-    const double start_speed = speed_at_distance(start_distance);
-    const double final_speed = speed_at_distance(final_distance);
-    const double duration_us = time_at_distance_us(final_distance) - time_at_distance_us(start_distance);
+    const double start_speed = motion_profile_speed_at_distance(s_profile.motion_profile, start_distance);
+    const double final_speed = motion_profile_speed_at_distance(s_profile.motion_profile, final_distance);
+    const double duration_us = motion_profile_time_at_distance_us(s_profile.motion_profile, final_distance) -
+                               motion_profile_time_at_distance_us(s_profile.motion_profile, start_distance);
 
     StepSegment segment = {};
     segment.execution_id = s_profile.execution_id;
@@ -253,31 +229,18 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
 
     const double entry_speed = std::sqrt(std::max(0.0, block.entry_speed_sqr));
     const double exit_speed = std::sqrt(std::max(0.0, block.exit_speed_sqr));
-    const double nominal_speed = block.programmed_rate_mm_per_min;
-    const double acceleration = block.acceleration_mm_per_sec2 * 60.0 * 60.0;
-    double accelerate_distance = std::max(0.0,
-        (nominal_speed * nominal_speed - entry_speed * entry_speed) / (2.0 * acceleration));
-    double decelerate_distance = std::max(0.0,
-        (nominal_speed * nominal_speed - exit_speed * exit_speed) / (2.0 * acceleration));
-    double peak_speed = nominal_speed;
-    if (accelerate_distance + decelerate_distance > block.millimeters) {
-        peak_speed = std::sqrt(std::max(0.0,
-            (2.0 * acceleration * block.millimeters + entry_speed * entry_speed +
-             exit_speed * exit_speed) / 2.0));
-        accelerate_distance = std::max(0.0,
-            (peak_speed * peak_speed - entry_speed * entry_speed) / (2.0 * acceleration));
-        decelerate_distance = std::max(0.0,
-            (peak_speed * peak_speed - exit_speed * exit_speed) / (2.0 * acceleration));
+    StepperProfile profile = {};
+    if (!apply_trapezoid_profile({
+                                      .length_mm = block.millimeters,
+                                      .entry_speed_mm_per_min = entry_speed,
+                                      .nominal_speed_mm_per_min = block.programmed_rate_mm_per_min,
+                                      .exit_speed_mm_per_min = exit_speed,
+                                      .acceleration_mm_per_min2 = block.acceleration_mm_per_sec2 * 60.0 * 60.0,
+                                  }, profile)) {
+        return false;
     }
-    const double accelerate_time_us =
-        (peak_speed - entry_speed) * 60000000.0 / acceleration;
-    const double cruise_distance = std::max(0.0, block.millimeters - accelerate_distance - decelerate_distance);
-    const double cruise_time_us = cruise_distance * 60000000.0 / peak_speed;
-    const double decelerate_time_us =
-        (peak_speed - exit_speed) * 60000000.0 / acceleration;
-    const double total_time_us = accelerate_time_us + cruise_time_us + decelerate_time_us;
     const std::uint32_t target_segments = static_cast<std::uint32_t>(std::max(
-        1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)));
+        1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)));
 
     s_source_block = block;
     s_original_source_block = block;
@@ -286,13 +249,14 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         .total_major_steps = block.step_event_count,
         .total_segments = std::min(target_segments, static_cast<std::uint32_t>(block.step_event_count)),
         .next_segment_index = 0,
-        .length_mm = block.millimeters,
-        .entry_speed_mm_per_min = entry_speed,
-        .nominal_speed_mm_per_min = peak_speed,
-        .exit_speed_mm_per_min = exit_speed,
-        .acceleration_mm_per_min2 = acceleration,
-        .accelerate_distance_mm = accelerate_distance,
-        .decelerate_after_mm = block.millimeters - decelerate_distance,
+        .length_mm = profile.length_mm,
+        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
+        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
+        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
+        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
+        .accelerate_distance_mm = profile.accelerate_distance_mm,
+        .decelerate_after_mm = profile.decelerate_after_mm,
+        .motion_profile = profile.motion_profile,
         .active = true,
         .generation_complete = false,
         .feed_hold = false,
@@ -402,21 +366,31 @@ bool stepper_prep_begin_feed_hold() {
     s_source_block = residual;
     const double exit_speed = stops_here ? 0.0 :
         std::sqrt(std::max(0.0, speed * speed - 2.0 * acceleration * residual.millimeters));
-    const double total_time_us = (speed - exit_speed) * 60000000.0 / acceleration;
+    StepperProfile profile = {};
+    if (!apply_trapezoid_profile({
+                                      .length_mm = residual.millimeters,
+                                      .entry_speed_mm_per_min = speed,
+                                      .nominal_speed_mm_per_min = speed,
+                                      .exit_speed_mm_per_min = exit_speed,
+                                      .acceleration_mm_per_min2 = acceleration,
+                                  }, profile)) {
+        return false;
+    }
     s_profile = {
         .execution_id = residual.execution_id,
         .total_major_steps = travel_steps,
         .total_segments = std::min<std::uint32_t>(
             static_cast<std::uint32_t>(travel_steps),
-            static_cast<std::uint32_t>(std::max(1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)))),
+            static_cast<std::uint32_t>(std::max(1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)))),
         .next_segment_index = 0,
-        .length_mm = residual.millimeters,
-        .entry_speed_mm_per_min = speed,
-        .nominal_speed_mm_per_min = speed,
-        .exit_speed_mm_per_min = exit_speed,
-        .acceleration_mm_per_min2 = acceleration,
-        .accelerate_distance_mm = 0.0,
-        .decelerate_after_mm = 0.0,
+        .length_mm = profile.length_mm,
+        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
+        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
+        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
+        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
+        .accelerate_distance_mm = profile.accelerate_distance_mm,
+        .decelerate_after_mm = profile.decelerate_after_mm,
+        .motion_profile = profile.motion_profile,
         .active = true,
         .generation_complete = false,
         .feed_hold = true,
@@ -467,39 +441,32 @@ bool stepper_prep_resume_from_hold() {
                            s_original_source_block.step_event_count;
     const double entry_speed = 0.0;
     const double exit_speed = std::sqrt(std::max(0.0, residual.exit_speed_sqr));
-    const double acceleration = residual.acceleration_mm_per_sec2 * 60.0 * 60.0;
-    const double nominal_speed = residual.programmed_rate_mm_per_min;
-    double accelerate_distance = std::max(0.0,
-        (nominal_speed * nominal_speed - entry_speed * entry_speed) / (2.0 * acceleration));
-    double decelerate_distance = std::max(0.0,
-        (nominal_speed * nominal_speed - exit_speed * exit_speed) / (2.0 * acceleration));
-    double peak_speed = nominal_speed;
-    if (accelerate_distance + decelerate_distance > residual.millimeters) {
-        peak_speed = std::sqrt(std::max(0.0,
-            (2.0 * acceleration * residual.millimeters + exit_speed * exit_speed) / 2.0));
-        accelerate_distance = peak_speed * peak_speed / (2.0 * acceleration);
-        decelerate_distance = std::max(0.0,
-            (peak_speed * peak_speed - exit_speed * exit_speed) / (2.0 * acceleration));
+    StepperProfile profile = {};
+    if (!apply_trapezoid_profile({
+                                      .length_mm = residual.millimeters,
+                                      .entry_speed_mm_per_min = entry_speed,
+                                      .nominal_speed_mm_per_min = residual.programmed_rate_mm_per_min,
+                                      .exit_speed_mm_per_min = exit_speed,
+                                      .acceleration_mm_per_min2 = residual.acceleration_mm_per_sec2 * 60.0 * 60.0,
+                                  }, profile)) {
+        return false;
     }
-    const double total_time_us =
-        (peak_speed - entry_speed + peak_speed - exit_speed) * 60000000.0 / acceleration +
-        std::max(0.0, residual.millimeters - accelerate_distance - decelerate_distance) *
-            60000000.0 / peak_speed;
     s_source_block = residual;
     s_profile = {
         .execution_id = residual.execution_id,
         .total_major_steps = remaining_steps,
         .total_segments = std::min<std::uint32_t>(
             static_cast<std::uint32_t>(remaining_steps),
-            static_cast<std::uint32_t>(std::max(1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)))),
+            static_cast<std::uint32_t>(std::max(1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)))),
         .next_segment_index = 0,
-        .length_mm = residual.millimeters,
-        .entry_speed_mm_per_min = entry_speed,
-        .nominal_speed_mm_per_min = peak_speed,
-        .exit_speed_mm_per_min = exit_speed,
-        .acceleration_mm_per_min2 = acceleration,
-        .accelerate_distance_mm = accelerate_distance,
-        .decelerate_after_mm = residual.millimeters - decelerate_distance,
+        .length_mm = profile.length_mm,
+        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
+        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
+        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
+        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
+        .accelerate_distance_mm = profile.accelerate_distance_mm,
+        .decelerate_after_mm = profile.decelerate_after_mm,
+        .motion_profile = profile.motion_profile,
         .active = true,
         .generation_complete = false,
         .feed_hold = false,
@@ -688,6 +655,7 @@ StepperPrepDiagnostics stepper_prep_diagnostics() {
     }
     diagnostics.current_speed_tenths_mm_per_min =
         s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
+    diagnostics.profile_mode = s_profile.motion_profile.mode;
     return diagnostics;
 }
 
