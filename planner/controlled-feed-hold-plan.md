@@ -65,6 +65,9 @@ Running / HoldRequested / HoldDecelerating / HoldComplete
 
 阶段状态：代码已实现，等待实机验收。
 
+在阶段三的重算恢复完成前，`~` 对已停稳的实时 Feed Hold 保持 Hold，不能落入旧的
+segment-ring 直接恢复路径；这避免将空缓存误判为执行失败。程序暂停不受此限制。
+
 ### 实现步骤
 
 1. 将当前 `FeedHoldSnapshot` 限定为诊断信息，不参与恢复决策。
@@ -81,6 +84,8 @@ Running / HoldRequested / HoldDecelerating / HoldComplete
 - 不增加逐脉冲日志；实机验证通过后提交。
 
 ## 阶段二：沿路径强制减速
+
+阶段状态：代码已实现，等待实机验收。
 
 ### 实现步骤
 

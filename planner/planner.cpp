@@ -363,7 +363,7 @@ void capture_feed_hold_snapshot() {
 
 void capture_feed_hold_stop_if_ready() {
     if (s_control_state.load(std::memory_order_acquire) != ControlState::Hold ||
-        stepper::timer_stepper_executor_is_busy()) {
+        stepper::timer_stepper_executor_is_busy() || !stepper::stepper_prep_hold_complete()) {
         return;
     }
 
@@ -379,6 +379,13 @@ void clear_feed_hold_snapshot() {
     portENTER_CRITICAL(&s_feed_hold_lock);
     s_feed_hold_snapshot = {};
     portEXIT_CRITICAL(&s_feed_hold_lock);
+}
+
+bool feed_hold_is_stopped() {
+    portENTER_CRITICAL(&s_feed_hold_lock);
+    const bool stopped = s_feed_hold_snapshot.state == FeedHoldState::Stopped;
+    portEXIT_CRITICAL(&s_feed_hold_lock);
+    return stopped;
 }
 
 bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
@@ -457,6 +464,23 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
 
 void fill_segment_ring_from_planner() {
     if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold) {
+        if (stepper::stepper_prep_hold_boundary_pending()) {
+            // Old cached segments carry the pre-hold profile and are invalid
+            // once the actual boundary speed has been captured.
+            stepper::stepper_segment_discard_pending();
+            stepper::stepper_prep_begin_feed_hold();
+        }
+        if (!stepper::stepper_prep_profile().active) {
+            MotionBlock candidate = {};
+            if (queued_block_snapshot(0, candidate) && candidate.type == MotionBlockType::Motion &&
+                stepper::stepper_prep_continue_feed_hold(candidate)) {
+                s_segment_prepared_blocks.fetch_add(1, std::memory_order_release);
+            }
+        }
+        if (stepper::stepper_prep_profile().active &&
+            !stepper::stepper_prep_profile().generation_complete) {
+            stepper::stepper_prep_fill();
+        }
         return;
     }
     while (stepper::stepper_segment_free_slots() != 0) {
@@ -556,6 +580,12 @@ void planner_task(void*) {
         capture_feed_hold_stop_if_ready();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+
+        if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold &&
+            stepper::stepper_segment_count() != 0) {
+            start_segment_ring();
             continue;
         }
 
@@ -693,6 +723,12 @@ void planner_request_feed_hold() {
 }
 
 void planner_resume() {
+    if (feed_hold_is_stopped()) {
+        // Stage three owns re-planning the retained partial block. Until then,
+        // a Cycle Start must leave this Hold intact rather than attempting the
+        // obsolete empty-segment-ring resume path.
+        return;
+    }
     if (s_control_state.load() == ControlState::Hold) {
         s_control_state.store(ControlState::Running);
     }

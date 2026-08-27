@@ -32,6 +32,8 @@ struct MotionState {
     std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
+    bool feed_hold = false;
+    bool ends_feed_hold = false;
     bool system_motion = false;
     bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
@@ -50,6 +52,8 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
+    motion.feed_hold = segment.feed_hold;
+    motion.ends_feed_hold = segment.ends_feed_hold;
     motion.system_motion = segment.system_motion;
     return motion;
 }
@@ -104,7 +108,14 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
-        } else if (s_feed_hold_requested.load(std::memory_order_relaxed)) {
+        } else if (completed_motion.ends_feed_hold) {
+            s_busy.store(false);
+            driver::step_timer_driver_stop_from_isr();
+            laser::laser_disable_from_isr();
+            stepper_segment_clear_active_from_isr();
+            stepper_prep_record_hold_complete_from_isr();
+            stepper_segment_request_refill_from_isr(&task_woken);
+        } else if (s_feed_hold_requested.load(std::memory_order_relaxed) && !completed_motion.feed_hold) {
             // The executor only ends the active segment. The persistent prep
             // context owns the later deceleration and resume work.
             s_busy.store(false);

@@ -45,6 +45,8 @@ struct StepSegment {
     motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     bool completes_block = false;
+    bool feed_hold = false;
+    bool ends_feed_hold = false;
     // System motions use the timer/RMT pulse backend without planner completion.
     bool system_motion = false;
 };
@@ -88,6 +90,9 @@ struct StepperProfile {
     double decelerate_after_mm = 0.0;
     bool active = false;
     bool generation_complete = false;
+    bool feed_hold = false;
+    bool ends_feed_hold = false;
+    bool completes_source_block = true;
 };
 
 // Segment entries are disposable cache. This persistent context is retained
@@ -108,14 +113,20 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
 bool stepper_prep_complete_block(std::uint64_t execution_id);
+bool stepper_prep_begin_feed_hold();
+bool stepper_prep_continue_feed_hold(const planner::PlannerBlock& block);
+bool stepper_prep_hold_boundary_pending();
+bool stepper_prep_hold_complete();
 void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment);
 void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr();
+void IRAM_ATTR stepper_prep_record_hold_complete_from_isr();
 void stepper_prep_clear_hold_boundary();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_us,
                                         const std::array<std::int32_t, 2>& axis_steps);
 bool stepper_segment_publish(const StepSegment& segment);
 bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
+void stepper_segment_discard_pending();
 std::size_t stepper_segment_count();
 std::size_t stepper_segment_free_slots();
 void IRAM_ATTR stepper_segment_record_underflow_from_isr();
