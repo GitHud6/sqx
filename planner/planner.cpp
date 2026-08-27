@@ -28,6 +28,9 @@ std::size_t s_block_head = 0;
 std::size_t s_block_tail = 0;
 std::size_t s_block_planned = 0;
 std::size_t s_block_count = 0;
+// Once the preceding motion block leaves the ring, preserve its exit speed as
+// the immutable entry boundary for the newly exposed queue head.
+double s_tail_entry_speed_sqr = 0.0;
 portMUX_TYPE s_block_buffer_lock = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t s_capacity_waiter = nullptr;
 std::atomic<ControlState> s_control_state = ControlState::Running;
@@ -140,7 +143,9 @@ void planner_recalculate_locked() {
     MotionBlock* previous = frozen_blocks == 0
                                 ? nullptr
                                 : &s_block_buffer[(mutable_tail + kPlannerQueueLength - 1) % kPlannerQueueLength];
-    const double frozen_exit_speed_sqr = previous == nullptr ? 0.0 : previous->exit_speed_sqr;
+    const double frozen_exit_speed_sqr = previous == nullptr
+                                             ? s_tail_entry_speed_sqr
+                                             : previous->exit_speed_sqr;
 
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
         MotionBlock& block = s_block_buffer[index];
@@ -155,6 +160,8 @@ void planner_recalculate_locked() {
                 block.max_entry_speed_sqr = std::min(
                     std::min(nominal_sqr, nominal_speed_sqr(*previous)),
                     block.max_junction_speed_sqr);
+            } else if (offset == 0) {
+                block.max_entry_speed_sqr = frozen_exit_speed_sqr;
             }
         }
         previous = &block;
@@ -428,9 +435,9 @@ bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
     return true;
 }
 
-void discard_current_block(const MotionBlock& block);
+void discard_current_block(const MotionBlock& block, bool preserve_exit_speed = false);
 
-void discard_current_block(const MotionBlock& block) {
+void discard_current_block(const MotionBlock& block, const bool preserve_exit_speed) {
     TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count != 0) {
@@ -439,6 +446,9 @@ void discard_current_block(const MotionBlock& block) {
             current.reset_generation == block.reset_generation) {
             s_block_tail = block_index_after(s_block_tail);
             --s_block_count;
+            s_tail_entry_speed_sqr = preserve_exit_speed && s_block_count != 0
+                                          ? std::max(0.0, current.exit_speed_sqr)
+                                          : 0.0;
             const std::size_t prepared = s_segment_prepared_blocks.load(std::memory_order_acquire);
             if (prepared != 0) {
                 s_segment_prepared_blocks.store(prepared - 1, std::memory_order_release);
@@ -585,6 +595,9 @@ void consume_segment_completions() {
             }
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
+            discard_current_block(block, true);
+            report_queue_drained();
+            continue;
         } else {
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
@@ -806,6 +819,7 @@ void planner_reset() {
     s_block_tail = 0;
     s_block_planned = 0;
     s_block_count = 0;
+    s_tail_entry_speed_sqr = 0.0;
     capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     if (capacity_waiter != nullptr) {
