@@ -16,6 +16,8 @@ namespace {
 constexpr double kMillimetersPerInch = 25.4;
 constexpr double kMaxFeedRateMmPerMin = 12000.0;
 constexpr double kMaxSpindlePower = 1000.0;
+constexpr double kArcRadiusToleranceMm = 0.01;
+constexpr double kArcCoincidentPointToleranceMm = 0.000001;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
@@ -80,9 +82,14 @@ Error parse_g_word(double value, ParsedBlock& parsed) {
     switch (static_cast<int>(value)) {
         case 0:
         case 1:
+        case 2:
+        case 3:
             if (parsed.has_motion) return Error::ModalGroupViolation;
             parsed.has_motion = true;
-            parsed.motion_mode = value == 0.0 ? MotionMode::Rapid : MotionMode::Linear;
+            parsed.motion_mode = value == 0.0 ? MotionMode::Rapid
+                               : value == 1.0 ? MotionMode::Linear
+                               : value == 2.0 ? MotionMode::ArcClockwise
+                                              : MotionMode::ArcCounterClockwise;
             return Error::Ok;
         case 4:
             if (parsed.has_dwell) return Error::ModalGroupViolation;
@@ -211,6 +218,19 @@ Error parse_line(const char* line, std::size_t length, ParsedBlock& parsed) {
             parsed.axis_value[axis] = value;
             continue;
         }
+        if (letter == 'I' || letter == 'J') {
+            const int arc_axis = letter == 'I' ? 0 : 1;
+            if (parsed.has_arc_offset[arc_axis]) return Error::WordRepeated;
+            parsed.has_arc_offset[arc_axis] = true;
+            parsed.arc_offset[arc_axis] = value;
+            continue;
+        }
+        if (letter == 'R') {
+            if (parsed.has_arc_radius) return Error::WordRepeated;
+            parsed.has_arc_radius = true;
+            parsed.arc_radius = value;
+            continue;
+        }
         if (letter == 'F') {
             if (parsed.has_feed_rate) return Error::WordRepeated;
             if (value < 0.0) return Error::NegativeValue;
@@ -240,6 +260,47 @@ Error parse_line(const char* line, std::size_t length, ParsedBlock& parsed) {
 
 motion::MotionType motion_type(MotionMode mode) {
     return mode == MotionMode::Linear ? motion::MotionType::Linear : motion::MotionType::Rapid;
+}
+
+bool is_arc_motion(const MotionMode mode) {
+    return mode == MotionMode::ArcClockwise || mode == MotionMode::ArcCounterClockwise;
+}
+
+Error validate_arc_request(const ParsedBlock& parsed,
+                           const motion::MotionRequest& request,
+                           const double unit_scale) {
+    const bool has_ij = parsed.has_arc_offset[0] || parsed.has_arc_offset[1];
+    if (parsed.has_arc_radius && has_ij) return Error::ArcInvalid;
+    if (!parsed.has_arc_radius && !has_ij) return Error::ArcInvalid;
+
+    const double start_x = request.start_mm[0];
+    const double start_y = request.start_mm[1];
+    const double end_x = request.target_mm[0];
+    const double end_y = request.target_mm[1];
+    const double chord = std::hypot(end_x - start_x, end_y - start_y);
+    if (!std::isfinite(chord)) return Error::ArcInvalid;
+
+    if (parsed.has_arc_radius) {
+        const double radius = std::abs(parsed.arc_radius * unit_scale);
+        if (!std::isfinite(radius) || radius <= kArcCoincidentPointToleranceMm ||
+            chord <= kArcCoincidentPointToleranceMm || chord > 2.0 * radius + kArcRadiusToleranceMm) {
+            return Error::ArcInvalid;
+        }
+        return Error::Ok;
+    }
+
+    const double offset_x = parsed.has_arc_offset[0] ? parsed.arc_offset[0] * unit_scale : 0.0;
+    const double offset_y = parsed.has_arc_offset[1] ? parsed.arc_offset[1] * unit_scale : 0.0;
+    const double radius = std::hypot(offset_x, offset_y);
+    if (!std::isfinite(radius) || radius <= kArcCoincidentPointToleranceMm) return Error::ArcInvalid;
+
+    const double center_x = start_x + offset_x;
+    const double center_y = start_y + offset_y;
+    const double end_radius = std::hypot(end_x - center_x, end_y - center_y);
+    if (!std::isfinite(end_radius) || std::abs(end_radius - radius) > kArcRadiusToleranceMm) {
+        return Error::ArcInvalid;
+    }
+    return Error::Ok;
 }
 
 motion::SpindleMode spindle_mode(SpindleMode mode) {
@@ -340,6 +401,11 @@ Error execute_line_internal(const char* line,
         }
     }
 
+    const bool has_arc_parameters = parsed.has_arc_offset[0] || parsed.has_arc_offset[1] ||
+                                    parsed.has_arc_radius;
+    const bool arc_motion = parsed.has_motion && is_arc_motion(parsed.motion_mode);
+    if (has_arc_parameters && !arc_motion) return Error::UnsupportedCommand;
+
     ParserState next_state = state;
     if (is_jog) {
         next_state.distance_mode = DistanceMode::Incremental;
@@ -394,6 +460,17 @@ Error execute_line_internal(const char* line,
         request.target_mm[axis] = next_state.distance_mode == DistanceMode::Absolute
                                       ? value_mm + next_state.work_offset_mm[axis]
                                       : state.planned_machine_position_mm[axis] + value_mm;
+    }
+
+    if (arc_motion) {
+        // Phase one deliberately stops after parser and geometry validation.
+        // Until phase two can atomically reserve and submit every chord, a
+        // valid arc must not update modal position or submit a partial path.
+        if (stepper::machine_position_state() != stepper::PositionState::Known) {
+            return Error::PositionUnknown;
+        }
+        const Error arc_error = validate_arc_request(parsed, request, unit_scale);
+        return arc_error == Error::Ok ? Error::UnsupportedCommand : arc_error;
     }
 
     if (parsed.has_program_end) {
@@ -515,6 +592,7 @@ const char* error_text(Error error) {
         case Error::NoAxisWords: return "no-axis-words";
         case Error::MotionBusy: return "motion-busy";
         case Error::MotionRejected: return "motion-rejected";
+        case Error::ArcInvalid: return "arc-invalid";
         case Error::PositionUnknown: return "position-unknown";
         case Error::InvalidJogCommand: return "invalid-jog-command";
         case Error::ProgramEnd: return "program-end";

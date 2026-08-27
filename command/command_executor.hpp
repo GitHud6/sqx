@@ -18,6 +18,7 @@ enum class Error {
     NoAxisWords,
     MotionBusy,
     MotionRejected,
+    ArcInvalid,
     PositionUnknown,
     InvalidJogCommand,
     ProgramEnd,
@@ -26,7 +27,7 @@ enum class Error {
 enum class SystemState { Idle, Alarm, Jog };
 enum class DistanceMode { Absolute, Incremental };
 enum class Units { Millimeters, Inches };
-enum class MotionMode { Rapid, Linear };
+enum class MotionMode { Rapid, Linear, ArcClockwise, ArcCounterClockwise };
 enum class PlaneMode { XY };
 enum class CutterCompensation { Disabled };
 enum class WorkCoordinateSystem { G54 };
@@ -62,6 +63,10 @@ struct ParsedBlock {
     WorkCoordinateSystem work_coordinate_system = WorkCoordinateSystem::G54;
     bool has_axis[3] = {};
     double axis_value[3] = {};
+    bool has_arc_offset[2] = {};
+    double arc_offset[2] = {};
+    bool has_arc_radius = false;
+    double arc_radius = 0.0;
     bool has_feed_rate = false;
     double feed_rate = 0.0;
     bool has_spindle_speed = false;
