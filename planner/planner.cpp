@@ -312,6 +312,31 @@ SubmitResult submit_block(MotionBlock block) {
     return SubmitResult::Accepted;
 }
 
+SubmitResult submit_blocks(const MotionBlock* const blocks, const std::size_t count) {
+    if (blocks == nullptr || count == 0 || count > kPlannerQueueLength || s_planner_task == nullptr) {
+        return SubmitResult::Rejected;
+    }
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    if (count > kPlannerQueueLength - s_block_count) {
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        return SubmitResult::Full;
+    }
+    const std::uint32_t reset_generation = s_reset_generation.load();
+    for (std::size_t index = 0; index < count; ++index) {
+        MotionBlock block = blocks[index];
+        block.reset_generation = reset_generation;
+        block.execution_id = s_next_execution_id.fetch_add(1);
+        s_block_buffer[s_block_head] = block;
+        s_block_head = (s_block_head + 1) % kPlannerQueueLength;
+        ++s_block_count;
+    }
+    planner_recalculate_locked();
+    s_queue_drain_reported.store(false);
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    xTaskNotifyGive(s_planner_task);
+    return SubmitResult::Accepted;
+}
+
 bool current_block_snapshot(MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count == 0) {
@@ -696,6 +721,16 @@ SubmitResult planner_submit(const MotionBlock& block) {
         return SubmitResult::Rejected;
     }
     return submit_block(block);
+}
+
+SubmitResult planner_submit_batch(const MotionBlock* const blocks, const std::size_t count) {
+    if (blocks == nullptr || count == 0 || count > kPlannerQueueLength) return SubmitResult::Rejected;
+    for (std::size_t index = 0; index < count; ++index) {
+        if (blocks[index].type != MotionBlockType::Motion || blocks[index].plan.step_interval_us == 0) {
+            return SubmitResult::Rejected;
+        }
+    }
+    return submit_blocks(blocks, count);
 }
 
 SubmitResult planner_submit_spindle_disable() {

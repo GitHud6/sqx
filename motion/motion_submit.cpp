@@ -1,6 +1,7 @@
 #include "motion_submit.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -14,6 +15,10 @@ namespace {
 MotionRequest s_last_request = {};
 MotionExecutionPlan s_last_plan = {};
 std::uint64_t s_submitted_count = 0;
+// Command dispatch serializes G-code submission. Keep the arc batch workspace
+// out of the protocol task stack, where 32 full PlannerBlock instances would
+// exceed the task's available headroom.
+std::array<planner::PlannerBlock, planner::kPlannerQueueLength> s_batch_blocks = {};
 
 constexpr std::uint32_t kMinStepFrequencyHz = 10;
 constexpr std::uint32_t kMaxStepFrequencyHz = 10000;
@@ -127,6 +132,39 @@ bool build_execution_plan_impl(const MotionRequest& request, MotionExecutionPlan
     return true;
 }
 
+bool make_planner_block(const MotionRequest& request,
+                        const MotionExecutionPlan& plan,
+                        planner::PlannerBlock& block) {
+    block = {.request = request, .plan = plan};
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        block.machine_start_mm[axis] = request.start_mm[axis];
+        block.machine_target_mm[axis] = request.target_mm[axis];
+    }
+    block.step_event_count = std::max(plan.steps[0], plan.steps[1]);
+    const double delta_x = request.target_mm[0] - request.start_mm[0];
+    const double delta_y = request.target_mm[1] - request.start_mm[1];
+    block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
+    if (block.millimeters <= 0.0) return false;
+    block.programmed_rate_mm_per_min = request.motion_mode == MotionType::Rapid
+                                            ? kRapidRateMmPerMin
+                                            : request.feed_rate_mm_per_min;
+    block.unit_vector[0] = delta_x / block.millimeters;
+    block.unit_vector[1] = delta_y / block.millimeters;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (plan.steps[axis] == 0) continue;
+        const double axis_component = std::abs(block.unit_vector[axis]);
+        if (axis_component == 0.0) continue;
+        const double axis_limited_acceleration =
+            machine::raycube_axis(static_cast<machine::Axis>(axis)).acceleration_mm_per_sec2 /
+            axis_component;
+        if (block.acceleration_mm_per_sec2 == 0.0 ||
+            axis_limited_acceleration < block.acceleration_mm_per_sec2) {
+            block.acceleration_mm_per_sec2 = axis_limited_acceleration;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 bool build_execution_plan(const MotionRequest& request, MotionExecutionPlan& plan) {
@@ -139,42 +177,8 @@ MotionSubmitResult motion_submit(const MotionRequest& request) {
         return MotionSubmitResult::Rejected;
     }
 
-    planner::PlannerBlock block = {
-        .request = request,
-        .plan = plan,
-    };
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        block.machine_start_mm[axis] = request.start_mm[axis];
-        block.machine_target_mm[axis] = request.target_mm[axis];
-    }
-    block.step_event_count = std::max(plan.steps[0], plan.steps[1]);
-    const double delta_x = request.target_mm[0] - request.start_mm[0];
-    const double delta_y = request.target_mm[1] - request.start_mm[1];
-    block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
-    block.programmed_rate_mm_per_min = request.motion_mode == MotionType::Rapid
-                                            ? kRapidRateMmPerMin
-                                            : request.feed_rate_mm_per_min;
-    if (block.millimeters > 0.0) {
-        block.unit_vector[0] = delta_x / block.millimeters;
-        block.unit_vector[1] = delta_y / block.millimeters;
-    }
-
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (plan.steps[axis] == 0) {
-            continue;
-        }
-        const double axis_component = std::abs(block.unit_vector[axis]);
-        if (axis_component == 0.0) {
-            continue;
-        }
-        const double axis_limited_acceleration =
-            machine::raycube_axis(static_cast<machine::Axis>(axis)).acceleration_mm_per_sec2 /
-            axis_component;
-        if (block.acceleration_mm_per_sec2 == 0.0 ||
-            axis_limited_acceleration < block.acceleration_mm_per_sec2) {
-            block.acceleration_mm_per_sec2 = axis_limited_acceleration;
-        }
-    }
+    planner::PlannerBlock block = {};
+    if (!make_planner_block(request, plan, block)) return MotionSubmitResult::Rejected;
     switch (planner::planner_submit(block)) {
         case planner::SubmitResult::Accepted:
             break;
@@ -189,6 +193,31 @@ MotionSubmitResult motion_submit(const MotionRequest& request) {
     s_last_plan = plan;
     ++s_submitted_count;
     return MotionSubmitResult::Accepted;
+}
+
+MotionSubmitResult motion_submit_batch(const MotionRequest* const requests, const std::size_t count) {
+    if (requests == nullptr || count == 0 || count > planner::kPlannerQueueLength) {
+        return MotionSubmitResult::Rejected;
+    }
+    MotionExecutionPlan final_plan = {};
+    for (std::size_t index = 0; index < count; ++index) {
+        MotionExecutionPlan plan = {};
+        if (!build_execution_plan_impl(requests[index], plan) ||
+            !make_planner_block(requests[index], plan, s_batch_blocks[index])) {
+            return MotionSubmitResult::Rejected;
+        }
+        if (index + 1 == count) final_plan = plan;
+    }
+    switch (planner::planner_submit_batch(s_batch_blocks.data(), count)) {
+        case planner::SubmitResult::Accepted:
+            s_last_request = requests[count - 1];
+            s_last_plan = final_plan;
+            s_submitted_count += count;
+            return MotionSubmitResult::Accepted;
+        case planner::SubmitResult::Full: return MotionSubmitResult::Busy;
+        case planner::SubmitResult::Rejected: return MotionSubmitResult::Rejected;
+    }
+    return MotionSubmitResult::Rejected;
 }
 
 const MotionExecutionPlan& last_motion_plan() {

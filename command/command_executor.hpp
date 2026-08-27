@@ -19,6 +19,7 @@ enum class Error {
     MotionBusy,
     MotionRejected,
     ArcInvalid,
+    ArcTooComplex,
     PositionUnknown,
     InvalidJogCommand,
     ProgramEnd,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "motion_request.hpp"
@@ -13,6 +14,7 @@ enum class MotionSubmitResult {
 };
 
 MotionSubmitResult motion_submit(const MotionRequest& request);
+MotionSubmitResult motion_submit_batch(const MotionRequest* requests, std::size_t count);
 bool build_execution_plan(const MotionRequest& request, MotionExecutionPlan& plan);
 const MotionRequest& last_motion_request();
 const MotionExecutionPlan& last_motion_plan();

@@ -94,7 +94,13 @@ const char* realtime_state_text(const stepper::MachinePosition& position) {
 }
 
 const char* motion_mode_text(const command::MotionMode mode) {
-    return mode == command::MotionMode::Rapid ? "G0" : "G1";
+    switch (mode) {
+        case command::MotionMode::Rapid: return "G0";
+        case command::MotionMode::Linear: return "G1";
+        case command::MotionMode::ArcClockwise: return "G2";
+        case command::MotionMode::ArcCounterClockwise: return "G3";
+    }
+    return "G1";
 }
 
 const char* distance_mode_text(const command::DistanceMode mode) {

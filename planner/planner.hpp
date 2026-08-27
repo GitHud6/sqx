@@ -119,6 +119,9 @@ using ExecutionCallback = void (*)(const ExecutionEvent& event, void* user_data)
 
 esp_err_t planner_start();
 SubmitResult planner_submit(const MotionBlock& block);
+// Atomically appends all blocks or none. Used by decomposed motion commands
+// such as an arc, where a partial prefix would corrupt parser position.
+SubmitResult planner_submit_batch(const MotionBlock* blocks, std::size_t count);
 SubmitResult planner_submit_spindle_disable();
 SubmitResult planner_submit_program_pause();
 SubmitResult planner_submit_dwell(std::uint32_t milliseconds);

@@ -1,5 +1,7 @@
 #include "command_executor.hpp"
 
+#include <array>
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -18,6 +20,10 @@ constexpr double kMaxFeedRateMmPerMin = 12000.0;
 constexpr double kMaxSpindlePower = 1000.0;
 constexpr double kArcRadiusToleranceMm = 0.01;
 constexpr double kArcCoincidentPointToleranceMm = 0.000001;
+constexpr double kArcMaximumChordErrorMm = 0.01;
+constexpr double kArcMaximumChordLengthMm = 1.0;
+constexpr std::size_t kArcMaximumSegments = planner::kPlannerQueueLength;
+constexpr double kTwoPi = 6.28318530717958647692;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
@@ -303,6 +309,65 @@ Error validate_arc_request(const ParsedBlock& parsed,
     return Error::Ok;
 }
 
+Error build_ij_arc_requests(const ParsedBlock& parsed,
+                            const motion::MotionRequest& request,
+                            const double unit_scale,
+                            std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
+                            std::size_t& count) {
+    const Error validation = validate_arc_request(parsed, request, unit_scale);
+    if (validation != Error::Ok) return validation;
+    if (parsed.has_arc_radius) return Error::UnsupportedCommand;
+
+    const double offset_x = parsed.has_arc_offset[0] ? parsed.arc_offset[0] * unit_scale : 0.0;
+    const double offset_y = parsed.has_arc_offset[1] ? parsed.arc_offset[1] * unit_scale : 0.0;
+    const double center_x = request.start_mm[0] + offset_x;
+    const double center_y = request.start_mm[1] + offset_y;
+    const double radius = std::hypot(offset_x, offset_y);
+    const double start_angle = std::atan2(request.start_mm[1] - center_y,
+                                          request.start_mm[0] - center_x);
+    const double end_angle = std::atan2(request.target_mm[1] - center_y,
+                                        request.target_mm[0] - center_x);
+    double sweep = end_angle - start_angle;
+    const bool clockwise = parsed.motion_mode == MotionMode::ArcClockwise;
+    if (clockwise) {
+        if (sweep >= 0.0) sweep -= kTwoPi;
+    } else if (sweep <= 0.0) {
+        sweep += kTwoPi;
+    }
+    if (std::abs(sweep) < kArcCoincidentPointToleranceMm) {
+        sweep = clockwise ? -kTwoPi : kTwoPi;
+    }
+
+    const double error_ratio = std::max(-1.0, std::min(
+        1.0, 1.0 - kArcMaximumChordErrorMm / radius));
+    const double error_angle = 2.0 * std::acos(error_ratio);
+    const double chord_ratio = std::max(0.0, std::min(
+        1.0, kArcMaximumChordLengthMm / (2.0 * radius)));
+    const double chord_angle = 2.0 * std::asin(chord_ratio);
+    const double maximum_angle = std::min(error_angle, chord_angle);
+    if (!std::isfinite(maximum_angle) || maximum_angle <= 0.0) return Error::ArcInvalid;
+    count = static_cast<std::size_t>(std::ceil(std::abs(sweep) / maximum_angle));
+    if (count == 0 || count > requests.size()) return Error::ArcTooComplex;
+
+    motion::MotionRequest previous = request;
+    previous.motion_mode = motion::MotionType::Linear;
+    previous.target_mm[0] = request.start_mm[0];
+    previous.target_mm[1] = request.start_mm[1];
+    for (std::size_t index = 0; index < count; ++index) {
+        const double fraction = static_cast<double>(index + 1) / static_cast<double>(count);
+        const double angle = start_angle + sweep * fraction;
+        motion::MotionRequest chord = previous;
+        chord.start_mm[0] = previous.target_mm[0];
+        chord.start_mm[1] = previous.target_mm[1];
+        chord.target_mm[0] = index + 1 == count ? request.target_mm[0] : center_x + radius * std::cos(angle);
+        chord.target_mm[1] = index + 1 == count ? request.target_mm[1] : center_y + radius * std::sin(angle);
+        chord.has_motion = true;
+        requests[index] = chord;
+        previous = chord;
+    }
+    return Error::Ok;
+}
+
 motion::SpindleMode spindle_mode(SpindleMode mode) {
     switch (mode) {
         case SpindleMode::Off: return motion::SpindleMode::Off;
@@ -463,14 +528,22 @@ Error execute_line_internal(const char* line,
     }
 
     if (arc_motion) {
-        // Phase one deliberately stops after parser and geometry validation.
-        // Until phase two can atomically reserve and submit every chord, a
-        // valid arc must not update modal position or submit a partial path.
         if (stepper::machine_position_state() != stepper::PositionState::Known) {
             return Error::PositionUnknown;
         }
-        const Error arc_error = validate_arc_request(parsed, request, unit_scale);
-        return arc_error == Error::Ok ? Error::UnsupportedCommand : arc_error;
+        std::array<motion::MotionRequest, kArcMaximumSegments> arc_requests = {};
+        std::size_t arc_request_count = 0;
+        const Error arc_error = build_ij_arc_requests(
+            parsed, request, unit_scale, arc_requests, arc_request_count);
+        if (arc_error != Error::Ok) return arc_error;
+        switch (motion::motion_submit_batch(arc_requests.data(), arc_request_count)) {
+            case motion::MotionSubmitResult::Accepted:
+                commit_parser_state(state, next_state, request, true);
+                return Error::Ok;
+            case motion::MotionSubmitResult::Busy: return Error::MotionBusy;
+            case motion::MotionSubmitResult::Rejected: return Error::MotionRejected;
+        }
+        return Error::MotionRejected;
     }
 
     if (parsed.has_program_end) {
@@ -593,6 +666,7 @@ const char* error_text(Error error) {
         case Error::MotionBusy: return "motion-busy";
         case Error::MotionRejected: return "motion-rejected";
         case Error::ArcInvalid: return "arc-invalid";
+        case Error::ArcTooComplex: return "arc-too-complex";
         case Error::PositionUnknown: return "position-unknown";
         case Error::InvalidJogCommand: return "invalid-jog-command";
         case Error::ProgramEnd: return "program-end";
