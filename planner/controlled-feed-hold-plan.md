@@ -105,6 +105,8 @@ segment-ring 直接恢复路径；这避免将空缓存误判为执行失败。�
 
 ## 阶段三：停稳后重算并继续
 
+阶段状态：代码已实现，等待实机验收。
+
 ### 实现步骤
 
 1. 在 `HoldComplete` 调用等价于 `plan_cycle_reinitialize()` 的接口：以仍在队首的部分执行 block 为起点，重置可变 entry/exit speed 与冻结边界，重新进行 junction 前瞻。

@@ -31,6 +31,7 @@ std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
 
 StepperProfile s_profile = {};
 planner::PlannerBlock s_source_block = {};
+planner::PlannerBlock s_original_source_block = {};
 std::atomic<std::uint64_t> s_context_execution_id = 0;
 std::atomic<std::int32_t> s_context_total_major_steps = 0;
 std::atomic<std::int32_t> s_context_executed_major_steps = 0;
@@ -242,6 +243,7 @@ void stepper_prep_reset() {
     s_context_hold_carry_speed.store(0, std::memory_order_relaxed);
     s_profile = {};
     s_source_block = {};
+    s_original_source_block = {};
 }
 
 bool stepper_prep_start_block(const planner::PlannerBlock& block) {
@@ -278,6 +280,7 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)));
 
     s_source_block = block;
+    s_original_source_block = block;
     s_profile = {
         .execution_id = block.execution_id,
         .total_major_steps = block.step_event_count,
@@ -314,6 +317,7 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
 void stepper_prep_cancel_block() {
     s_profile = {};
     s_source_block = {};
+    s_original_source_block = {};
     s_context_execution_id.store(0, std::memory_order_release);
     s_context_total_major_steps.store(0, std::memory_order_relaxed);
     s_context_executed_major_steps.store(0, std::memory_order_relaxed);
@@ -438,6 +442,76 @@ bool stepper_prep_hold_boundary_pending() {
 
 bool stepper_prep_hold_complete() {
     return s_context_hold_complete.load(std::memory_order_acquire);
+}
+
+bool stepper_prep_resume_from_hold() {
+    if (!stepper_prep_hold_complete() || !s_profile.active ||
+        s_context_execution_id.load(std::memory_order_acquire) == 0) {
+        return false;
+    }
+    const std::int32_t total_steps = s_context_total_major_steps.load(std::memory_order_acquire);
+    const std::int32_t executed_steps = s_context_executed_major_steps.load(std::memory_order_acquire);
+    const std::int32_t remaining_steps = total_steps - executed_steps;
+    if (!block_is_valid(s_original_source_block) || remaining_steps <= 0) {
+        return false;
+    }
+
+    planner::PlannerBlock residual = s_original_source_block;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        residual.plan.steps[axis] = std::max<std::int32_t>(
+            0, s_original_source_block.plan.steps[axis] -
+                   s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
+    }
+    residual.step_event_count = remaining_steps;
+    residual.millimeters = s_original_source_block.millimeters * remaining_steps /
+                           s_original_source_block.step_event_count;
+    const double entry_speed = 0.0;
+    const double exit_speed = std::sqrt(std::max(0.0, residual.exit_speed_sqr));
+    const double acceleration = residual.acceleration_mm_per_sec2 * 60.0 * 60.0;
+    const double nominal_speed = residual.programmed_rate_mm_per_min;
+    double accelerate_distance = std::max(0.0,
+        (nominal_speed * nominal_speed - entry_speed * entry_speed) / (2.0 * acceleration));
+    double decelerate_distance = std::max(0.0,
+        (nominal_speed * nominal_speed - exit_speed * exit_speed) / (2.0 * acceleration));
+    double peak_speed = nominal_speed;
+    if (accelerate_distance + decelerate_distance > residual.millimeters) {
+        peak_speed = std::sqrt(std::max(0.0,
+            (2.0 * acceleration * residual.millimeters + exit_speed * exit_speed) / 2.0));
+        accelerate_distance = peak_speed * peak_speed / (2.0 * acceleration);
+        decelerate_distance = std::max(0.0,
+            (peak_speed * peak_speed - exit_speed * exit_speed) / (2.0 * acceleration));
+    }
+    const double total_time_us =
+        (peak_speed - entry_speed + peak_speed - exit_speed) * 60000000.0 / acceleration +
+        std::max(0.0, residual.millimeters - accelerate_distance - decelerate_distance) *
+            60000000.0 / peak_speed;
+    s_source_block = residual;
+    s_profile = {
+        .execution_id = residual.execution_id,
+        .total_major_steps = remaining_steps,
+        .total_segments = std::min<std::uint32_t>(
+            static_cast<std::uint32_t>(remaining_steps),
+            static_cast<std::uint32_t>(std::max(1.0, std::ceil(total_time_us / kStepSegmentTargetDurationUs)))),
+        .next_segment_index = 0,
+        .length_mm = residual.millimeters,
+        .entry_speed_mm_per_min = entry_speed,
+        .nominal_speed_mm_per_min = peak_speed,
+        .exit_speed_mm_per_min = exit_speed,
+        .acceleration_mm_per_min2 = acceleration,
+        .accelerate_distance_mm = accelerate_distance,
+        .decelerate_after_mm = residual.millimeters - decelerate_distance,
+        .active = true,
+        .generation_complete = false,
+        .feed_hold = false,
+        .ends_feed_hold = false,
+        .completes_source_block = true,
+    };
+    s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_release);
+    s_context_generation_complete.store(false, std::memory_order_release);
+    s_context_hold_boundary.store(false, std::memory_order_release);
+    s_context_feed_hold_active.store(false, std::memory_order_release);
+    s_context_hold_complete.store(false, std::memory_order_release);
+    return true;
 }
 
 void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment) {

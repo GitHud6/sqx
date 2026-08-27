@@ -648,6 +648,14 @@ void planner_task(void*) {
             continue;
         }
         if (!start_segment_ring()) {
+            const auto prep = stepper::stepper_prep_diagnostics();
+            if (prep.active && prep.execution_id == block.execution_id) {
+                // A resumed partial block owns its geometry in prep. An empty
+                // ring is a producer scheduling gap, never an execution
+                // failure or permission to discard the planner head.
+                vTaskDelay(1);
+                continue;
+            }
             if (s_reset_generation.load() != block.reset_generation) {
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
                 emit_execution_event(ExecutionEventType::BlockCancelled, &block);
@@ -724,17 +732,15 @@ void planner_request_feed_hold() {
 
 void planner_resume() {
     if (feed_hold_is_stopped()) {
-        // Stage three owns re-planning the retained partial block. Until then,
-        // a Cycle Start must leave this Hold intact rather than attempting the
-        // obsolete empty-segment-ring resume path.
-        return;
+        const bool has_partial_block = stepper::stepper_prep_diagnostics().active;
+        if (has_partial_block && !stepper::stepper_prep_resume_from_hold()) {
+            return;
+        }
     }
     if (s_control_state.load() == ControlState::Hold) {
         s_control_state.store(ControlState::Running);
     }
     stepper::timer_stepper_executor_resume();
-    // Stage one retains the existing cache. Stage three will regenerate it
-    // from the persistent prep context after a controlled stop.
     clear_feed_hold_snapshot();
     MotionBlock block = {};
     if (active_block_snapshot(block)) {
