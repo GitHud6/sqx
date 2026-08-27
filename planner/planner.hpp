@@ -86,6 +86,7 @@ struct PlannerBlockDiagnostics {
 struct PlannerDiagnostics {
     std::size_t queued_blocks = 0;
     std::size_t frozen_blocks = 0;
+    std::uint64_t coalesced_short_blocks = 0;
     std::array<PlannerBlockDiagnostics, kPlannerDiagnosticBlockCount> blocks = {};
     FeedHoldDiagnostics feed_hold = {};
 };

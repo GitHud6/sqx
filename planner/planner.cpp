@@ -36,6 +36,7 @@ TaskHandle_t s_capacity_waiter = nullptr;
 std::atomic<ControlState> s_control_state = ControlState::Running;
 std::atomic<std::uint32_t> s_reset_generation = 0;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
+std::atomic<std::uint64_t> s_coalesced_short_block_count = 0;
 std::atomic<std::uint64_t> s_next_execution_id = 1;
 std::atomic<bool> s_queue_drain_reported = false;
 portMUX_TYPE s_execution_event_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -65,6 +66,8 @@ FeedHoldCheckpoint s_latest_checkpoint = {};
 FeedHoldSnapshot s_feed_hold_snapshot = {};
 
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
+constexpr double kCoalescingDirectionCosine = 0.999999;
+constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
 constexpr char kLogTag[] = "planner";
@@ -88,6 +91,64 @@ bool is_plannable_motion(const MotionBlock& block) {
 
 double nominal_speed_sqr(const MotionBlock& block) {
     return block.programmed_rate_mm_per_min * block.programmed_rate_mm_per_min;
+}
+
+bool coalesce_tail_block_locked(const MotionBlock& candidate) {
+    const std::size_t frozen_blocks = std::min(
+        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    if (s_block_count - frozen_blocks < 2 ||
+        candidate.type != MotionBlockType::Motion ||
+        candidate.request.motion_mode != motion::MotionType::Linear) {
+        return false;
+    }
+
+    MotionBlock& tail = s_block_buffer[(s_block_head + kPlannerQueueLength - 1) % kPlannerQueueLength];
+    if (tail.type != MotionBlockType::Motion ||
+        tail.request.motion_mode != motion::MotionType::Linear ||
+        tail.request.spindle_mode != candidate.request.spindle_mode ||
+        tail.request.spindle_power != candidate.request.spindle_power ||
+        tail.request.feed_rate_mm_per_min != candidate.request.feed_rate_mm_per_min ||
+        std::hypot(tail.machine_target_mm[0] - candidate.machine_start_mm[0],
+                   tail.machine_target_mm[1] - candidate.machine_start_mm[1]) > 0.000001) {
+        return false;
+    }
+
+    const double direction_dot = tail.unit_vector[0] * candidate.unit_vector[0] +
+                                 tail.unit_vector[1] * candidate.unit_vector[1];
+    if (direction_dot < kCoalescingDirectionCosine) return false;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (tail.plan.steps[axis] != 0 && candidate.plan.steps[axis] != 0 &&
+            tail.plan.positive_direction[axis] != candidate.plan.positive_direction[axis]) {
+            return false;
+        }
+    }
+
+    const double merged_dx = candidate.machine_target_mm[0] - tail.machine_start_mm[0];
+    const double merged_dy = candidate.machine_target_mm[1] - tail.machine_start_mm[1];
+    const double merged_length = std::hypot(merged_dx, merged_dy);
+    if (!std::isfinite(merged_length) || merged_length <= 0.0) return false;
+    const double deviation = std::abs(
+        merged_dx * (tail.machine_target_mm[1] - tail.machine_start_mm[1]) -
+        merged_dy * (tail.machine_target_mm[0] - tail.machine_start_mm[0])) / merged_length;
+    if (deviation > kCoalescingMaximumDeviationMm) return false;
+
+    tail.machine_target_mm = candidate.machine_target_mm;
+    tail.request.target_mm[0] = candidate.request.target_mm[0];
+    tail.request.target_mm[1] = candidate.request.target_mm[1];
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        tail.plan.steps[axis] += candidate.plan.steps[axis];
+        if (candidate.plan.steps[axis] != 0) {
+            tail.plan.positive_direction[axis] = candidate.plan.positive_direction[axis];
+        }
+    }
+    tail.step_event_count = std::max(tail.plan.steps[0], tail.plan.steps[1]);
+    tail.millimeters = merged_length;
+    tail.unit_vector[0] = merged_dx / merged_length;
+    tail.unit_vector[1] = merged_dy / merged_length;
+    tail.acceleration_mm_per_sec2 = std::min(
+        tail.acceleration_mm_per_sec2, candidate.acceleration_mm_per_sec2);
+    s_coalesced_short_block_count.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& current) {
@@ -303,12 +364,19 @@ SubmitResult submit_block(MotionBlock block) {
         return SubmitResult::Rejected;
     }
     block.reset_generation = s_reset_generation.load();
-    block.execution_id = s_next_execution_id.fetch_add(1);
     portENTER_CRITICAL(&s_block_buffer_lock);
+    if (coalesce_tail_block_locked(block)) {
+        planner_recalculate_locked();
+        s_queue_drain_reported.store(false);
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        xTaskNotifyGive(s_planner_task);
+        return SubmitResult::Accepted;
+    }
     if (s_block_count == kPlannerQueueLength) {
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return SubmitResult::Full;
     }
+    block.execution_id = s_next_execution_id.fetch_add(1);
     s_block_buffer[s_block_head] = block;
     s_block_head = (s_block_head + 1) % kPlannerQueueLength;
     ++s_block_count;
@@ -820,6 +888,7 @@ void planner_reset() {
     s_block_planned = 0;
     s_block_count = 0;
     s_tail_entry_speed_sqr = 0.0;
+    s_coalesced_short_block_count.store(0, std::memory_order_relaxed);
     capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     if (capacity_waiter != nullptr) {
@@ -898,6 +967,8 @@ PlannerDiagnostics planner_diagnostics() {
     diagnostics.queued_blocks = s_block_count;
     diagnostics.frozen_blocks = std::min(
         s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    diagnostics.coalesced_short_blocks =
+        s_coalesced_short_block_count.load(std::memory_order_relaxed);
     for (std::size_t offset = 0; offset < diagnostics.blocks.size() && offset < s_block_count; ++offset) {
         const std::size_t index = (s_block_tail + offset) % kPlannerQueueLength;
         const MotionBlock& block = s_block_buffer[index];
