@@ -46,6 +46,19 @@ bool valid_coordinate(double value, double max_travel) {
     return std::isfinite(value) && value >= 0.0 && value <= max_travel;
 }
 
+bool quantize_absolute_steps(const double position_mm,
+                             const float steps_per_mm,
+                             std::int64_t& steps) {
+    const double scaled = position_mm * static_cast<double>(steps_per_mm);
+    if (!std::isfinite(scaled) ||
+        scaled < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
+        scaled > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+        return false;
+    }
+    steps = std::llround(scaled);
+    return true;
+}
+
 std::uint32_t step_interval_us(const MotionRequest& request,
                                const MotionExecutionPlan& plan) {
     const auto& x_hardware = machine::raycube_axis(machine::Axis::X);
@@ -99,14 +112,21 @@ bool build_execution_plan_impl(const MotionRequest& request, MotionExecutionPlan
             return false;
         }
 
-        const double delta_mm = request.target_mm[axis] - request.start_mm[axis];
-        const double step_count = std::abs(delta_mm) * hardware.steps_per_mm;
-        if (!std::isfinite(step_count) || step_count > std::numeric_limits<std::int32_t>::max()) {
+        std::int64_t start_steps = 0;
+        std::int64_t target_steps = 0;
+        if (!quantize_absolute_steps(request.start_mm[axis], hardware.steps_per_mm, start_steps) ||
+            !quantize_absolute_steps(request.target_mm[axis], hardware.steps_per_mm, target_steps)) {
             log_rejection(axis == 0 ? "x-step-count" : "y-step-count", request, &candidate);
             return false;
         }
-        candidate.steps[axis] = static_cast<std::int32_t>(std::lround(step_count));
-        candidate.positive_direction[axis] = delta_mm >= 0.0;
+        const std::int64_t delta_steps = target_steps - start_steps;
+        if (delta_steps < -std::numeric_limits<std::int32_t>::max() ||
+            delta_steps > std::numeric_limits<std::int32_t>::max()) {
+            log_rejection(axis == 0 ? "x-step-count" : "y-step-count", request, &candidate);
+            return false;
+        }
+        candidate.steps[axis] = static_cast<std::int32_t>(std::abs(delta_steps));
+        candidate.positive_direction[axis] = delta_steps >= 0;
     }
 
     if (request.start_mm[2] != 0.0 || request.target_mm[2] != 0.0) {

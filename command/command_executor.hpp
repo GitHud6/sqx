@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace ray2::command {
 
@@ -84,10 +85,21 @@ struct ParsedBlock {
     double dwell_seconds = 0.0;
 };
 
+struct ArcDiagnostics {
+    std::uint64_t accepted_count = 0;
+    double chord_error_mm = 0.0;
+    double maximum_chord_length_mm = 0.0;
+    double last_radius_mm = 0.0;
+    double last_sweep_degrees = 0.0;
+    double last_chord_length_mm = 0.0;
+    std::size_t last_segment_count = 0;
+};
+
 Error execute_line(const char* line, std::size_t length, ParserState& state);
 // Executes a constrained `$J=` payload without changing normal G-code modal state.
 Error execute_jog_line(const char* line, std::size_t length, ParserState& state);
 Error sync_parser_position_from_machine(ParserState& state);
+ArcDiagnostics arc_diagnostics();
 const char* error_text(Error error);
 
 }  // namespace ray2::command

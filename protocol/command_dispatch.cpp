@@ -404,6 +404,7 @@ bool report_position_status() {
     const planner::PlannerDiagnostics planner_diagnostics = planner::planner_diagnostics();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const stepper::StepperPrepDiagnostics prep = stepper::stepper_prep_diagnostics();
+    const command::ArcDiagnostics arc = command::arc_diagnostics();
     const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
     const RealtimeCommandDiagnostics realtime = realtime_command_diagnostics();
     const driver::Uart0RxDiagnostics uart = driver::uart0_rx_diagnostics();
@@ -413,7 +414,7 @@ bool report_position_status() {
     static char response[1792] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f)|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f)|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -435,6 +436,9 @@ bool report_position_status() {
         static_cast<long>(prep.executed_major_steps), static_cast<long>(prep.total_major_steps),
         static_cast<long>(prep.executed_axis_steps[0]), static_cast<long>(prep.executed_axis_steps[1]),
         static_cast<double>(prep.current_speed_tenths_mm_per_min) / 10.0,
+        static_cast<unsigned long long>(arc.accepted_count), arc.chord_error_mm,
+        arc.maximum_chord_length_mm, arc.last_radius_mm, arc.last_sweep_degrees,
+        arc.last_chord_length_mm, arc.last_segment_count,
         planner_block_state_text(planner_diagnostics.blocks[0].state),
         static_cast<unsigned long long>(planner_diagnostics.blocks[0].execution_id),
         planner_diagnostics.blocks[0].entry_speed_mm_per_min,

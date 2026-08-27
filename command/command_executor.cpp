@@ -2,6 +2,7 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -20,10 +21,21 @@ constexpr double kMaxFeedRateMmPerMin = 12000.0;
 constexpr double kMaxSpindlePower = 1000.0;
 constexpr double kArcRadiusToleranceMm = 0.01;
 constexpr double kArcCoincidentPointToleranceMm = 0.000001;
-constexpr double kArcMaximumChordErrorMm = 0.01;
-constexpr double kArcMaximumChordLengthMm = 1.0;
+// The XY step is 0.0125 mm. Avoid generating sub-step chord error that the
+// mechanics cannot reproduce and that fragments the planner into short blocks.
+constexpr double kArcMaximumChordErrorMm = 0.05;
+constexpr double kArcMaximumChordLengthMm = 2.0;
 constexpr std::size_t kArcMaximumSegments = planner::kPlannerQueueLength;
 constexpr double kTwoPi = 6.28318530717958647692;
+// `execute_line()` is called from both protocol and SD tasks. The parser
+// mutex serializes those calls, so keep the fixed arc workspace here instead
+// of consuming roughly 2 KiB from the SD task's 4 KiB stack.
+std::array<motion::MotionRequest, kArcMaximumSegments> s_arc_requests = {};
+std::atomic<std::uint64_t> s_arc_accepted_count = 0;
+std::atomic<double> s_arc_last_radius_mm = 0.0;
+std::atomic<double> s_arc_last_sweep_degrees = 0.0;
+std::atomic<double> s_arc_last_chord_length_mm = 0.0;
+std::atomic<std::size_t> s_arc_last_segment_count = 0;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
@@ -329,12 +341,19 @@ double arc_sweep(const motion::MotionRequest& request,
     return sweep;
 }
 
+struct ArcGeometry {
+    double radius_mm = 0.0;
+    double sweep_radians = 0.0;
+    double chord_length_mm = 0.0;
+};
+
 Error build_arc_requests(const motion::MotionRequest& request,
                          const double center_x,
                          const double center_y,
                          const double sweep,
                          std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
-                         std::size_t& count) {
+                         std::size_t& count,
+                         ArcGeometry& geometry) {
     const double radius = std::hypot(request.start_mm[0] - center_x,
                                      request.start_mm[1] - center_y);
     const double start_angle = std::atan2(request.start_mm[1] - center_y,
@@ -350,6 +369,10 @@ Error build_arc_requests(const motion::MotionRequest& request,
     if (!std::isfinite(maximum_angle) || maximum_angle <= 0.0) return Error::ArcInvalid;
     count = static_cast<std::size_t>(std::ceil(std::abs(sweep) / maximum_angle));
     if (count == 0 || count > requests.size()) return Error::ArcTooComplex;
+
+    geometry.radius_mm = radius;
+    geometry.sweep_radians = sweep;
+    geometry.chord_length_mm = 2.0 * radius * std::sin(std::abs(sweep) / (2.0 * count));
 
     motion::MotionRequest previous = request;
     previous.motion_mode = motion::MotionType::Linear;
@@ -370,11 +393,21 @@ Error build_arc_requests(const motion::MotionRequest& request,
     return Error::Ok;
 }
 
+void record_accepted_arc(const ArcGeometry& geometry, const std::size_t count) {
+    s_arc_accepted_count.fetch_add(1, std::memory_order_relaxed);
+    s_arc_last_radius_mm.store(geometry.radius_mm, std::memory_order_relaxed);
+    s_arc_last_sweep_degrees.store(
+        geometry.sweep_radians * 180.0 / 3.14159265358979323846, std::memory_order_relaxed);
+    s_arc_last_chord_length_mm.store(geometry.chord_length_mm, std::memory_order_relaxed);
+    s_arc_last_segment_count.store(count, std::memory_order_relaxed);
+}
+
 Error build_ij_arc_requests(const ParsedBlock& parsed,
                             const motion::MotionRequest& request,
                             const double unit_scale,
                             std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
-                            std::size_t& count) {
+                            std::size_t& count,
+                            ArcGeometry& geometry) {
     const Error validation = validate_arc_request(parsed, request, unit_scale);
     if (validation != Error::Ok) return validation;
     if (parsed.has_arc_radius) return Error::UnsupportedCommand;
@@ -384,14 +417,15 @@ Error build_ij_arc_requests(const ParsedBlock& parsed,
                             (parsed.has_arc_offset[1] ? parsed.arc_offset[1] * unit_scale : 0.0);
     const double sweep = arc_sweep(request, center_x, center_y,
                                    parsed.motion_mode == MotionMode::ArcClockwise);
-    return build_arc_requests(request, center_x, center_y, sweep, requests, count);
+    return build_arc_requests(request, center_x, center_y, sweep, requests, count, geometry);
 }
 
 Error build_r_arc_requests(const ParsedBlock& parsed,
                            const motion::MotionRequest& request,
                            const double unit_scale,
                            std::array<motion::MotionRequest, kArcMaximumSegments>& requests,
-                           std::size_t& count) {
+                           std::size_t& count,
+                           ArcGeometry& geometry) {
     const Error validation = validate_arc_request(parsed, request, unit_scale);
     if (validation != Error::Ok) return validation;
     if (!parsed.has_arc_radius) return Error::ArcInvalid;
@@ -433,7 +467,7 @@ Error build_r_arc_requests(const ParsedBlock& parsed,
         }
     }
     if (!selected) return Error::ArcInvalid;
-    return build_arc_requests(request, selected_x, selected_y, selected_sweep, requests, count);
+    return build_arc_requests(request, selected_x, selected_y, selected_sweep, requests, count, geometry);
 }
 
 motion::SpindleMode spindle_mode(SpindleMode mode) {
@@ -599,16 +633,17 @@ Error execute_line_internal(const char* line,
         if (stepper::machine_position_state() != stepper::PositionState::Known) {
             return Error::PositionUnknown;
         }
-        std::array<motion::MotionRequest, kArcMaximumSegments> arc_requests = {};
         std::size_t arc_request_count = 0;
+        ArcGeometry arc_geometry = {};
         const Error arc_error = parsed.has_arc_radius
                                     ? build_r_arc_requests(parsed, request, unit_scale,
-                                                           arc_requests, arc_request_count)
+                                                           s_arc_requests, arc_request_count, arc_geometry)
                                     : build_ij_arc_requests(parsed, request, unit_scale,
-                                                            arc_requests, arc_request_count);
+                                                            s_arc_requests, arc_request_count, arc_geometry);
         if (arc_error != Error::Ok) return arc_error;
-        switch (motion::motion_submit_batch(arc_requests.data(), arc_request_count)) {
+        switch (motion::motion_submit_batch(s_arc_requests.data(), arc_request_count)) {
             case motion::MotionSubmitResult::Accepted:
+                record_accepted_arc(arc_geometry, arc_request_count);
                 commit_parser_state(state, next_state, request, true);
                 return Error::Ok;
             case motion::MotionSubmitResult::Busy: return Error::MotionBusy;
@@ -675,10 +710,11 @@ Error execute_line_internal(const char* line,
             return Error::MotionRejected;
         }
         if (validation_plan.steps[0] == 0 && validation_plan.steps[1] == 0) {
-            // No STEP pulse will be emitted. Keep the planned machine position
-            // unchanged while committing modal words.
+            // No STEP pulse is needed for this sub-step endpoint, but retain
+            // the floating parser position. The following block quantizes its
+            // endpoints absolutely and must inherit this residual distance.
             if (is_jog) return Error::Ok;
-            commit_parser_state(state, next_state, request, false);
+            commit_parser_state(state, next_state, request, true);
             return Error::Ok;
         }
         const Error submit_error = submit_motion_request(request);
@@ -719,6 +755,18 @@ Error sync_parser_position_from_machine(ParserState& state) {
     state.planned_machine_position_mm[1] = position.millimeters[1];
     state.planned_machine_position_mm[2] = 0.0;
     return Error::Ok;
+}
+
+ArcDiagnostics arc_diagnostics() {
+    return {
+        .accepted_count = s_arc_accepted_count.load(std::memory_order_relaxed),
+        .chord_error_mm = kArcMaximumChordErrorMm,
+        .maximum_chord_length_mm = kArcMaximumChordLengthMm,
+        .last_radius_mm = s_arc_last_radius_mm.load(std::memory_order_relaxed),
+        .last_sweep_degrees = s_arc_last_sweep_degrees.load(std::memory_order_relaxed),
+        .last_chord_length_mm = s_arc_last_chord_length_mm.load(std::memory_order_relaxed),
+        .last_segment_count = s_arc_last_segment_count.load(std::memory_order_relaxed),
+    };
 }
 
 const char* error_text(Error error) {
