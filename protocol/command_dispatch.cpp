@@ -419,10 +419,10 @@ bool report_position_status() {
     const ProtocolTxDiagnostics tx = protocol_tx_diagnostics();
 
     // Keep verbose engineering diagnostics out of the protocol task stack.
-    static char response[1792] = {};
+    static char response[2048] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f)|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -446,6 +446,10 @@ bool report_position_status() {
         static_cast<long>(prep.executed_major_steps), static_cast<long>(prep.total_major_steps),
         static_cast<long>(prep.executed_axis_steps[0]), static_cast<long>(prep.executed_axis_steps[1]),
         static_cast<double>(prep.current_speed_tenths_mm_per_min) / 10.0,
+        prep.context_used, prep.context_capacity,
+        static_cast<unsigned long long>(prep.generation_context_execution_id),
+        static_cast<unsigned long long>(prep.execution_context_execution_id),
+        static_cast<unsigned long long>(prep.completion_context_execution_id),
         static_cast<unsigned long long>(arc.accepted_count), arc.chord_error_mm,
         arc.maximum_chord_length_mm, arc.last_radius_mm, arc.last_sweep_degrees,
         arc.last_chord_length_mm, arc.last_segment_count,

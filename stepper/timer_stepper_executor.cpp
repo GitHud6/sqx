@@ -142,7 +142,9 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
-            if (!completed_motion.completes_block) {
+            if (completed_motion.completes_block) {
+                stepper_segment_record_block_boundary_stop_from_isr();
+            } else {
                 stepper_segment_record_underflow_from_isr();
                 const SegmentCompletion fault = {
                     .execution_id = completed_motion.execution_id,
@@ -221,6 +223,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
                  static_cast<unsigned long>(segment.step_interval_us));
         timer_stepper_executor_stop(); return ESP_FAIL;
     }
+    stepper_segment_record_block_boundary_restart();
     return ESP_OK;
 }
 

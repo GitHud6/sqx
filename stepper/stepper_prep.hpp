@@ -15,6 +15,7 @@ namespace ray2::stepper {
 
 constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
+constexpr std::size_t kTrapezoidPrepContextCapacity = 4;
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 750;
 constexpr std::size_t kStepSegmentLowWater = 16;
 constexpr std::uint32_t kAmassBaseStepRateHz = 8000;
@@ -75,6 +76,11 @@ struct SegmentExecutionDiagnostics {
     std::uint32_t active_start_speed_tenths_mm_per_min = 0;
     std::uint32_t active_end_speed_tenths_mm_per_min = 0;
     std::size_t pending_completions = 0;
+    // A completed source block with no ready successor stops the timer cleanly.
+    // This is distinct from a segment underflow inside a block.
+    std::uint64_t block_boundary_stop_count = 0;
+    std::uint64_t block_boundary_restart_count = 0;
+    bool block_boundary_restart_pending = false;
 };
 
 struct StepperProfile {
@@ -109,6 +115,11 @@ struct StepperPrepDiagnostics {
     std::array<std::int32_t, 2> executed_axis_steps = {};
     std::uint32_t current_speed_tenths_mm_per_min = 0;
     MotionProfileMode profile_mode = MotionProfileMode::Trapezoid;
+    std::size_t context_used = 0;
+    std::size_t context_capacity = kTrapezoidPrepContextCapacity;
+    std::uint64_t generation_context_execution_id = 0;
+    std::uint64_t execution_context_execution_id = 0;
+    std::uint64_t completion_context_execution_id = 0;
 };
 
 void stepper_prep_reset();
@@ -134,6 +145,8 @@ void stepper_segment_discard_pending();
 std::size_t stepper_segment_count();
 std::size_t stepper_segment_free_slots();
 void IRAM_ATTR stepper_segment_record_underflow_from_isr();
+void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr();
+void stepper_segment_record_block_boundary_restart();
 bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
 void IRAM_ATTR stepper_segment_request_refill_from_isr(
     BaseType_t* higher_priority_task_woken);

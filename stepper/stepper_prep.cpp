@@ -17,6 +17,9 @@ std::atomic<std::uint32_t> s_segment_head = 0;
 std::atomic<std::uint32_t> s_segment_tail = 0;
 std::atomic<std::size_t> s_segment_high_water = 0;
 std::atomic<std::uint64_t> s_segment_underflow_count = 0;
+std::atomic<std::uint64_t> s_block_boundary_stop_count = 0;
+std::atomic<std::uint64_t> s_block_boundary_restart_count = 0;
+std::atomic<bool> s_block_boundary_restart_pending = false;
 std::atomic<std::uint64_t> s_active_execution_id = 0;
 std::atomic<std::uint32_t> s_active_step_interval_us = 0;
 std::atomic<std::uint32_t> s_active_amass_timer_interval_us = 0;
@@ -29,9 +32,19 @@ std::atomic<std::uint32_t> s_completion_head = 0;
 std::atomic<std::uint32_t> s_completion_tail = 0;
 std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
 
-StepperProfile s_profile = {};
-planner::PlannerBlock s_source_block = {};
-planner::PlannerBlock s_original_source_block = {};
+// Context slots own profile geometry until the executor confirms completion.
+// Stage one intentionally allows only one occupied slot; later stages will
+// permit the generation side to reserve later slots before execution catches up.
+struct TrapezoidPrepContext {
+    StepperProfile profile = {};
+    planner::PlannerBlock source_block = {};
+    planner::PlannerBlock original_source_block = {};
+};
+
+std::array<TrapezoidPrepContext, kTrapezoidPrepContextCapacity> s_context_fifo = {};
+std::size_t s_context_head = 0;
+std::size_t s_context_tail = 0;
+std::atomic<std::size_t> s_context_count = 0;
 std::atomic<std::uint64_t> s_context_execution_id = 0;
 std::atomic<std::int32_t> s_context_total_major_steps = 0;
 std::atomic<std::int32_t> s_context_executed_major_steps = 0;
@@ -45,6 +58,49 @@ std::atomic<std::uint32_t> s_context_hold_carry_speed = 0;
 
 static_assert(kStepSegmentBufferLength > 0, "segment ring requires storage");
 static_assert(kStepCompletionBufferLength > 0, "completion ring requires storage");
+static_assert(kTrapezoidPrepContextCapacity > 0, "prep context FIFO requires storage");
+
+TrapezoidPrepContext& active_context() {
+    return s_context_fifo[s_context_head];
+}
+
+StepperProfile& active_profile() {
+    return active_context().profile;
+}
+
+planner::PlannerBlock& active_source_block() {
+    return active_context().source_block;
+}
+
+planner::PlannerBlock& active_original_source_block() {
+    return active_context().original_source_block;
+}
+
+void reset_context_fifo() {
+    s_context_fifo = {};
+    s_context_head = 0;
+    s_context_tail = 0;
+    s_context_count.store(0, std::memory_order_relaxed);
+}
+
+bool reserve_context(const planner::PlannerBlock& block) {
+    // Stage one preserves the prior single-profile runtime behavior.
+    if (s_context_count.load(std::memory_order_acquire) != 0) return false;
+    TrapezoidPrepContext& context = s_context_fifo[s_context_tail];
+    context = {};
+    context.source_block = block;
+    context.original_source_block = block;
+    s_context_count.store(1, std::memory_order_release);
+    s_context_tail = (s_context_tail + 1) % kTrapezoidPrepContextCapacity;
+    return true;
+}
+
+void release_active_context() {
+    if (s_context_count.load(std::memory_order_acquire) == 0) return;
+    active_context() = {};
+    s_context_head = (s_context_head + 1) % kTrapezoidPrepContextCapacity;
+    s_context_count.store(0, std::memory_order_release);
+}
 
 std::size_t segment_count_snapshot() {
     const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
@@ -97,7 +153,7 @@ bool apply_trapezoid_profile(const MotionProfileInput& input, StepperProfile& pr
 }
 
 StepSegmentPhase phase_at_distance(const double distance_mm) {
-    switch (motion_profile_phase_at_distance(s_profile.motion_profile, distance_mm)) {
+    switch (motion_profile_phase_at_distance(active_profile().motion_profile, distance_mm)) {
         case MotionProfilePhase::Accelerate: return StepSegmentPhase::Accelerate;
         case MotionProfilePhase::Cruise: return StepSegmentPhase::Cruise;
         case MotionProfilePhase::Decelerate: return StepSegmentPhase::Decelerate;
@@ -106,20 +162,22 @@ StepSegmentPhase phase_at_distance(const double distance_mm) {
 }
 
 StepSegment build_segment(const std::uint32_t segment_index) {
-    const std::int32_t total_steps = s_profile.total_major_steps;
+    const StepperProfile& profile = active_profile();
+    const planner::PlannerBlock& source_block = active_source_block();
+    const std::int32_t total_steps = profile.total_major_steps;
     const std::int32_t first_step = static_cast<std::int32_t>(
-        (static_cast<std::int64_t>(total_steps) * segment_index) / s_profile.total_segments);
+        (static_cast<std::int64_t>(total_steps) * segment_index) / profile.total_segments);
     const std::int32_t final_step = static_cast<std::int32_t>(
-        (static_cast<std::int64_t>(total_steps) * (segment_index + 1)) / s_profile.total_segments);
-    const double start_distance = s_profile.length_mm * first_step / total_steps;
-    const double final_distance = s_profile.length_mm * final_step / total_steps;
-    const double start_speed = motion_profile_speed_at_distance(s_profile.motion_profile, start_distance);
-    const double final_speed = motion_profile_speed_at_distance(s_profile.motion_profile, final_distance);
-    const double duration_us = motion_profile_time_at_distance_us(s_profile.motion_profile, final_distance) -
-                               motion_profile_time_at_distance_us(s_profile.motion_profile, start_distance);
+        (static_cast<std::int64_t>(total_steps) * (segment_index + 1)) / profile.total_segments);
+    const double start_distance = profile.length_mm * first_step / total_steps;
+    const double final_distance = profile.length_mm * final_step / total_steps;
+    const double start_speed = motion_profile_speed_at_distance(profile.motion_profile, start_distance);
+    const double final_speed = motion_profile_speed_at_distance(profile.motion_profile, final_distance);
+    const double duration_us = motion_profile_time_at_distance_us(profile.motion_profile, final_distance) -
+                               motion_profile_time_at_distance_us(profile.motion_profile, start_distance);
 
     StepSegment segment = {};
-    segment.execution_id = s_profile.execution_id;
+    segment.execution_id = profile.execution_id;
     segment.major_steps = final_step - first_step;
     segment.duration_us = static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us)));
     segment.step_interval_us = std::max(
@@ -130,46 +188,46 @@ StepSegment build_segment(const std::uint32_t segment_index) {
     segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(start_speed);
     segment.end_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(final_speed);
     const bool laser_enabled =
-        s_source_block.request.motion_mode == motion::MotionType::Linear &&
-        s_source_block.request.spindle_mode != motion::SpindleMode::Off;
+        source_block.request.motion_mode == motion::MotionType::Linear &&
+        source_block.request.spindle_mode != motion::SpindleMode::Off;
     if (laser_enabled &&
-        s_source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
+        source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
         const double actual_speed =
             (final_distance - start_distance) * 60000000.0 / std::max(1.0, duration_us);
-        segment.laser_power = s_source_block.request.spindle_power * std::clamp(
-            actual_speed / s_source_block.programmed_rate_mm_per_min, 0.0, 1.0);
+        segment.laser_power = source_block.request.spindle_power * std::clamp(
+            actual_speed / source_block.programmed_rate_mm_per_min, 0.0, 1.0);
     } else if (laser_enabled) {
-        segment.laser_power = s_source_block.request.spindle_power;
+        segment.laser_power = source_block.request.spindle_power;
     }
     const double max_power = static_cast<double>(machine::raycube_laser().max_power);
     segment.laser_power_per_mille = static_cast<std::uint16_t>(std::clamp(
         std::lround(segment.laser_power * 1000.0 / max_power), 0L, 1000L));
-    segment.motion_mode = s_source_block.request.motion_mode;
-    segment.spindle_mode = s_source_block.request.spindle_mode;
+    segment.motion_mode = source_block.request.motion_mode;
+    segment.spindle_mode = source_block.request.spindle_mode;
     segment.phase = phase_at_distance(start_distance);
-    const bool finishes_profile = segment_index + 1 == s_profile.total_segments;
-    segment.completes_block = finishes_profile && s_profile.completes_source_block;
-    segment.feed_hold = s_profile.feed_hold;
-    segment.ends_feed_hold = s_profile.ends_feed_hold && finishes_profile;
+    const bool finishes_profile = segment_index + 1 == profile.total_segments;
+    segment.completes_block = finishes_profile && profile.completes_source_block;
+    segment.feed_hold = profile.feed_hold;
+    segment.ends_feed_hold = profile.ends_feed_hold && finishes_profile;
     if (segment.feed_hold) {
         segment.laser_power = 0.0;
         segment.laser_power_per_mille = 0;
     }
     for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {
-        const std::int32_t axis_total = s_source_block.plan.steps[axis];
+        const std::int32_t axis_total = source_block.plan.steps[axis];
         const std::int32_t axis_first = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(axis_total) * first_step) / total_steps);
         const std::int32_t axis_final = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(axis_total) * final_step) / total_steps);
         segment.axis_steps[axis] = axis_final - axis_first;
-        segment.positive_direction[axis] = s_source_block.plan.positive_direction[axis];
+        segment.positive_direction[axis] = source_block.plan.positive_direction[axis];
     }
     // AMASS is selected from the source block, not this short segment. A valid
     // diagonal may contain a segment with zero minor-axis steps after integer
     // partitioning, but it still belongs to a multi-axis Bresenham stream.
     const std::array<std::int32_t, machine::kAxisCount> source_axis_steps = {
-        s_source_block.plan.steps[0],
-        s_source_block.plan.steps[1],
+        source_block.plan.steps[0],
+        source_block.plan.steps[1],
     };
     segment.amass_level = stepper_select_amass_level(segment.step_interval_us, source_axis_steps);
     return segment;
@@ -197,6 +255,9 @@ void stepper_prep_reset() {
     s_segment_tail.store(0, std::memory_order_relaxed);
     s_segment_high_water.store(0, std::memory_order_relaxed);
     s_segment_underflow_count.store(0, std::memory_order_relaxed);
+    s_block_boundary_stop_count.store(0, std::memory_order_relaxed);
+    s_block_boundary_restart_count.store(0, std::memory_order_relaxed);
+    s_block_boundary_restart_pending.store(false, std::memory_order_relaxed);
     s_active_execution_id.store(0, std::memory_order_relaxed);
     s_active_step_interval_us.store(0, std::memory_order_relaxed);
     s_active_amass_timer_interval_us.store(0, std::memory_order_relaxed);
@@ -217,13 +278,11 @@ void stepper_prep_reset() {
     s_context_feed_hold_active.store(false, std::memory_order_relaxed);
     s_context_hold_complete.store(false, std::memory_order_relaxed);
     s_context_hold_carry_speed.store(0, std::memory_order_relaxed);
-    s_profile = {};
-    s_source_block = {};
-    s_original_source_block = {};
+    reset_context_fifo();
 }
 
 bool stepper_prep_start_block(const planner::PlannerBlock& block) {
-    if (!block_is_valid(block) || s_profile.active) {
+    if (!block_is_valid(block) || !reserve_context(block)) {
         return false;
     }
 
@@ -237,14 +296,13 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
                                       .exit_speed_mm_per_min = exit_speed,
                                       .acceleration_mm_per_min2 = block.acceleration_mm_per_sec2 * 60.0 * 60.0,
                                   }, profile)) {
+        release_active_context();
         return false;
     }
     const std::uint32_t target_segments = static_cast<std::uint32_t>(std::max(
         1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)));
 
-    s_source_block = block;
-    s_original_source_block = block;
-    s_profile = {
+    active_profile() = {
         .execution_id = block.execution_id,
         .total_major_steps = block.step_event_count,
         .total_segments = std::min(target_segments, static_cast<std::uint32_t>(block.step_event_count)),
@@ -279,9 +337,7 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
 }
 
 void stepper_prep_cancel_block() {
-    s_profile = {};
-    s_source_block = {};
-    s_original_source_block = {};
+    release_active_context();
     s_context_execution_id.store(0, std::memory_order_release);
     s_context_total_major_steps.store(0, std::memory_order_relaxed);
     s_context_executed_major_steps.store(0, std::memory_order_relaxed);
@@ -295,31 +351,33 @@ void stepper_prep_cancel_block() {
 
 std::size_t stepper_prep_fill() {
     std::size_t generated = 0;
-    while (s_profile.active && s_profile.next_segment_index < s_profile.total_segments) {
-        const StepSegment segment = build_segment(s_profile.next_segment_index);
+    StepperProfile& profile = active_profile();
+    while (profile.active && profile.next_segment_index < profile.total_segments) {
+        const StepSegment segment = build_segment(profile.next_segment_index);
         if (!stepper_segment_publish(segment)) {
             break;
         }
-        ++s_profile.next_segment_index;
+        ++profile.next_segment_index;
         ++generated;
     }
-    if (s_profile.next_segment_index == s_profile.total_segments) {
+    if (profile.next_segment_index == profile.total_segments) {
         // The final segment being published does not mean it has executed.
-        s_profile.generation_complete = true;
+        profile.generation_complete = true;
         s_context_generation_complete.store(true, std::memory_order_release);
     }
     return generated;
 }
 
 bool stepper_prep_complete_block(const std::uint64_t execution_id) {
-    if (!s_profile.active || s_profile.execution_id != execution_id ||
-        !s_profile.generation_complete ||
+    const StepperProfile& profile = active_profile();
+    if (!profile.active || profile.execution_id != execution_id ||
+        !profile.generation_complete ||
         s_context_executed_major_steps.load(std::memory_order_acquire) !=
             s_context_total_major_steps.load(std::memory_order_acquire)) {
         return false;
     }
-    const bool hold_ended = s_profile.feed_hold && s_profile.ends_feed_hold;
-    const bool continue_hold = s_profile.feed_hold && !s_profile.ends_feed_hold;
+    const bool hold_ended = profile.feed_hold && profile.ends_feed_hold;
+    const bool continue_hold = profile.feed_hold && !profile.ends_feed_hold;
     const std::uint32_t carry_speed =
         s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
     stepper_prep_cancel_block();
@@ -334,7 +392,8 @@ bool stepper_prep_complete_block(const std::uint64_t execution_id) {
 }
 
 bool stepper_prep_begin_feed_hold() {
-    if (!s_profile.active) return false;
+    StepperProfile& active = active_profile();
+    if (!active.active) return false;
     const std::int32_t total_steps = s_context_total_major_steps.load(std::memory_order_acquire);
     const std::int32_t executed_steps = s_context_executed_major_steps.load(std::memory_order_acquire);
     const std::int32_t remaining_steps = total_steps - executed_steps;
@@ -344,18 +403,18 @@ bool stepper_prep_begin_feed_hold() {
         s_context_hold_complete.store(true, std::memory_order_release);
         return false;
     }
-    const double remaining_mm = s_profile.length_mm * remaining_steps / s_profile.total_major_steps;
-    const double acceleration = s_profile.acceleration_mm_per_min2;
+    const double remaining_mm = active.length_mm * remaining_steps / active.total_major_steps;
+    const double acceleration = active.acceleration_mm_per_min2;
     const double stop_mm = speed * speed / (2.0 * acceleration);
     const bool stops_here = stop_mm <= remaining_mm;
     const double travel_mm = stops_here ? stop_mm : remaining_mm;
     const std::int32_t travel_steps = std::clamp<std::int32_t>(
         static_cast<std::int32_t>(std::ceil(remaining_steps * travel_mm / remaining_mm)), 1, remaining_steps);
 
-    planner::PlannerBlock residual = s_source_block;
+    planner::PlannerBlock residual = active_source_block();
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const std::int32_t remaining_axis = std::max<std::int32_t>(
-            0, s_source_block.plan.steps[axis] -
+            0, active_source_block().plan.steps[axis] -
                    s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
         residual.plan.steps[axis] = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(remaining_axis) * travel_steps) / remaining_steps);
@@ -363,7 +422,7 @@ bool stepper_prep_begin_feed_hold() {
     residual.step_event_count = travel_steps;
     residual.millimeters = remaining_mm * travel_steps / remaining_steps;
     residual.programmed_rate_mm_per_min = speed;
-    s_source_block = residual;
+    active_source_block() = residual;
     const double exit_speed = stops_here ? 0.0 :
         std::sqrt(std::max(0.0, speed * speed - 2.0 * acceleration * residual.millimeters));
     StepperProfile profile = {};
@@ -376,7 +435,7 @@ bool stepper_prep_begin_feed_hold() {
                                   }, profile)) {
         return false;
     }
-    s_profile = {
+    active_profile() = {
         .execution_id = residual.execution_id,
         .total_major_steps = travel_steps,
         .total_segments = std::min<std::uint32_t>(
@@ -419,26 +478,26 @@ bool stepper_prep_hold_complete() {
 }
 
 bool stepper_prep_resume_from_hold() {
-    if (!stepper_prep_hold_complete() || !s_profile.active ||
+    if (!stepper_prep_hold_complete() || !active_profile().active ||
         s_context_execution_id.load(std::memory_order_acquire) == 0) {
         return false;
     }
     const std::int32_t total_steps = s_context_total_major_steps.load(std::memory_order_acquire);
     const std::int32_t executed_steps = s_context_executed_major_steps.load(std::memory_order_acquire);
     const std::int32_t remaining_steps = total_steps - executed_steps;
-    if (!block_is_valid(s_original_source_block) || remaining_steps <= 0) {
+    if (!block_is_valid(active_original_source_block()) || remaining_steps <= 0) {
         return false;
     }
 
-    planner::PlannerBlock residual = s_original_source_block;
+    planner::PlannerBlock residual = active_original_source_block();
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         residual.plan.steps[axis] = std::max<std::int32_t>(
-            0, s_original_source_block.plan.steps[axis] -
+            0, active_original_source_block().plan.steps[axis] -
                    s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
     }
     residual.step_event_count = remaining_steps;
-    residual.millimeters = s_original_source_block.millimeters * remaining_steps /
-                           s_original_source_block.step_event_count;
+    residual.millimeters = active_original_source_block().millimeters * remaining_steps /
+                           active_original_source_block().step_event_count;
     const double entry_speed = 0.0;
     const double exit_speed = std::sqrt(std::max(0.0, residual.exit_speed_sqr));
     StepperProfile profile = {};
@@ -451,8 +510,8 @@ bool stepper_prep_resume_from_hold() {
                                   }, profile)) {
         return false;
     }
-    s_source_block = residual;
-    s_profile = {
+    active_source_block() = residual;
+    active_profile() = {
         .execution_id = residual.execution_id,
         .total_major_steps = remaining_steps,
         .total_segments = std::min<std::uint32_t>(
@@ -548,6 +607,17 @@ void stepper_segment_record_underflow_from_isr() {
     s_segment_underflow_count.fetch_add(1, std::memory_order_relaxed);
 }
 
+void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr() {
+    s_block_boundary_stop_count.fetch_add(1, std::memory_order_relaxed);
+    s_block_boundary_restart_pending.store(true, std::memory_order_release);
+}
+
+void stepper_segment_record_block_boundary_restart() {
+    if (s_block_boundary_restart_pending.exchange(false, std::memory_order_acq_rel)) {
+        s_block_boundary_restart_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 bool stepper_segment_needs_refill_from_isr() {
     const std::uint32_t head = s_segment_head.load(std::memory_order_acquire);
     const std::uint32_t tail = s_segment_tail.load(std::memory_order_relaxed);
@@ -622,6 +692,12 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     diagnostics.queued_segments = segment_count_snapshot();
     diagnostics.high_water_segments = s_segment_high_water.load(std::memory_order_relaxed);
     diagnostics.underflow_count = s_segment_underflow_count.load(std::memory_order_relaxed);
+    diagnostics.block_boundary_stop_count =
+        s_block_boundary_stop_count.load(std::memory_order_relaxed);
+    diagnostics.block_boundary_restart_count =
+        s_block_boundary_restart_count.load(std::memory_order_relaxed);
+    diagnostics.block_boundary_restart_pending =
+        s_block_boundary_restart_pending.load(std::memory_order_acquire);
     diagnostics.active_execution_id = s_active_execution_id.load(std::memory_order_acquire);
     diagnostics.active = diagnostics.active_execution_id != 0;
     diagnostics.active_step_interval_us = s_active_step_interval_us.load(std::memory_order_relaxed);
@@ -637,7 +713,7 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
 }
 
 const StepperProfile& stepper_prep_profile() {
-    return s_profile;
+    return active_profile();
 }
 
 StepperPrepDiagnostics stepper_prep_diagnostics() {
@@ -655,7 +731,16 @@ StepperPrepDiagnostics stepper_prep_diagnostics() {
     }
     diagnostics.current_speed_tenths_mm_per_min =
         s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
-    diagnostics.profile_mode = s_profile.motion_profile.mode;
+    diagnostics.profile_mode = active_profile().motion_profile.mode;
+    diagnostics.context_used = s_context_count.load(std::memory_order_acquire);
+    if (diagnostics.context_used != 0) {
+        diagnostics.generation_context_execution_id = active_profile().execution_id;
+        diagnostics.completion_context_execution_id = diagnostics.generation_complete
+                                                          ? diagnostics.generation_context_execution_id
+                                                          : 0;
+    }
+    diagnostics.execution_context_execution_id =
+        s_active_execution_id.load(std::memory_order_acquire);
     return diagnostics;
 }
 

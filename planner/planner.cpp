@@ -71,6 +71,16 @@ constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
 constexpr char kLogTag[] = "planner";
+constexpr TickType_t kTrapezoidFlowLogPeriod = pdMS_TO_TICKS(1000);
+
+struct TrapezoidFlowLogSnapshot {
+    TickType_t timestamp_ticks = 0;
+    std::uint64_t boundary_stops = 0;
+    std::uint64_t boundary_restarts = 0;
+    std::uint64_t underflows = 0;
+};
+
+TrapezoidFlowLogSnapshot s_trapezoid_flow_log = {};
 
 std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
@@ -639,6 +649,52 @@ bool start_segment_ring() {
     return true;
 }
 
+void log_trapezoid_flow_periodically() {
+    const TickType_t now_ticks = xTaskGetTickCount();
+    if (s_trapezoid_flow_log.timestamp_ticks != 0 &&
+        now_ticks - s_trapezoid_flow_log.timestamp_ticks < kTrapezoidFlowLogPeriod) {
+        return;
+    }
+
+    const auto segment = stepper::stepper_segment_diagnostics();
+    const auto prep = stepper::stepper_prep_diagnostics();
+    const std::uint64_t delta_stops =
+        segment.block_boundary_stop_count - s_trapezoid_flow_log.boundary_stops;
+    const std::uint64_t delta_restarts =
+        segment.block_boundary_restart_count - s_trapezoid_flow_log.boundary_restarts;
+    const std::uint64_t delta_underflows =
+        segment.underflow_count - s_trapezoid_flow_log.underflows;
+    s_trapezoid_flow_log = {
+        .timestamp_ticks = now_ticks,
+        .boundary_stops = segment.block_boundary_stop_count,
+        .boundary_restarts = segment.block_boundary_restart_count,
+        .underflows = segment.underflow_count,
+    };
+
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const std::size_t queued_blocks = s_block_count;
+    const std::size_t frozen_blocks = std::min(
+        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    ESP_LOGI(kLogTag,
+             "TRAPEZOID-FLOW period=1s blocks=(queued=%u,frozen=%u) "
+             "context=(used=%u/%u,g=%llu,e=%llu,c=%llu) segment=(queued=%u/%u) "
+             "boundary=(stop=+%llu,restart=+%llu,pending=%d,total=%llu/%llu) underflow=+%llu",
+             static_cast<unsigned>(queued_blocks), static_cast<unsigned>(frozen_blocks),
+             static_cast<unsigned>(prep.context_used), static_cast<unsigned>(prep.context_capacity),
+             static_cast<unsigned long long>(prep.generation_context_execution_id),
+             static_cast<unsigned long long>(prep.execution_context_execution_id),
+             static_cast<unsigned long long>(prep.completion_context_execution_id),
+             static_cast<unsigned>(segment.queued_segments),
+             static_cast<unsigned>(segment.segment_capacity),
+             static_cast<unsigned long long>(delta_stops),
+             static_cast<unsigned long long>(delta_restarts),
+             segment.block_boundary_restart_pending ? 1 : 0,
+             static_cast<unsigned long long>(segment.block_boundary_stop_count),
+             static_cast<unsigned long long>(segment.block_boundary_restart_count),
+             static_cast<unsigned long long>(delta_underflows));
+}
+
 void consume_segment_completions() {
     stepper::SegmentCompletion completion = {};
     while (stepper::stepper_completion_consume(completion)) {
@@ -684,6 +740,7 @@ void planner_task(void*) {
         fill_segment_ring_from_planner();
         mark_isr_started_block_active();
         capture_feed_hold_stop_if_ready();
+        log_trapezoid_flow_periodically();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
@@ -873,6 +930,7 @@ void planner_reset() {
     s_reset_generation.fetch_add(1);
     s_control_state.store(ControlState::Running);
     stepper::timer_stepper_executor_stop();
+    s_trapezoid_flow_log = {};
     clear_active_block();
     stepper::stepper_prep_reset();
     clear_feed_hold_snapshot();
