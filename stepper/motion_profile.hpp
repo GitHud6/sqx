@@ -30,5 +30,8 @@ bool motion_profile_build_trapezoid(const MotionProfileInput& input, MotionProfi
 double motion_profile_speed_at_distance(const MotionProfile& profile, double distance_mm);
 double motion_profile_time_at_distance_us(const MotionProfile& profile, double distance_mm);
 MotionProfilePhase motion_profile_phase_at_distance(const MotionProfile& profile, double distance_mm);
+double motion_profile_distance_at_time_us(const MotionProfile& profile, double time_us);
+double motion_profile_speed_at_time_us(const MotionProfile& profile, double time_us);
+MotionProfilePhase motion_profile_phase_at_time_us(const MotionProfile& profile, double time_us);
 
 }  // namespace ray2::stepper

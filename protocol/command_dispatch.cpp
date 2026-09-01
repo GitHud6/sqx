@@ -21,6 +21,7 @@
 #include "realtime_command.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
+#include "trapezoid_segment_generator.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -176,6 +177,25 @@ bool report_coordinate_parameters() {
 
 bool is_protocol_trace_command(const char* line, const std::size_t length) {
     return equals_ignore_case(line, length, "$PROTOCOL/TRACE");
+}
+
+bool is_profile_self_test_command(const char* line, const std::size_t length) {
+    return equals_ignore_case(line, length, "$PROFILE/SELFTEST");
+}
+
+bool report_profile_self_test() {
+    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
+        return write_text("error:profile-selftest-busy\r\n");
+    }
+    char response[512] = {};
+    if (!stepper::trapezoid_segment_generator_format_self_test(response, sizeof(response))) {
+        return write_text("error:profile-selftest-format\r\n");
+    }
+    const std::size_t length = std::strlen(response);
+    if (!write_all(reinterpret_cast<const std::uint8_t*>(response), length)) return false;
+    return write_text(std::strstr(response, "result=ok") != nullptr
+                          ? "ok\r\n"
+                          : "error:profile-selftest-failed\r\n");
 }
 
 bool report_protocol_trace() {
@@ -593,6 +613,9 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
     }
     if (is_protocol_trace_command(line, length)) {
         return report_protocol_trace();
+    }
+    if (is_profile_self_test_command(line, length)) {
+        return report_profile_self_test();
     }
     if (equals_ignore_case(line, length, "$X")) {
         // ray2-old returns ok outside Alarm as a no-op. RayCube currently has

@@ -85,4 +85,68 @@ MotionProfilePhase motion_profile_phase_at_distance(const MotionProfile& profile
     return MotionProfilePhase::Decelerate;
 }
 
+double motion_profile_distance_at_time_us(const MotionProfile& profile, const double time_us) {
+    if (!std::isfinite(time_us) || time_us <= 0.0) return 0.0;
+    const double time = std::min(time_us, profile.total_time_us) / kMinutesToMicroseconds;
+    const double acceleration_time =
+        (profile.nominal_speed_mm_per_min - profile.entry_speed_mm_per_min) /
+        profile.acceleration_mm_per_min2;
+    const double cruise_time =
+        (profile.decelerate_after_mm - profile.accelerate_distance_mm) /
+        profile.nominal_speed_mm_per_min;
+    const double deceleration_time =
+        (profile.nominal_speed_mm_per_min - profile.exit_speed_mm_per_min) /
+        profile.acceleration_mm_per_min2;
+
+    if (time <= acceleration_time) {
+        return std::clamp(profile.entry_speed_mm_per_min * time +
+                              0.5 * profile.acceleration_mm_per_min2 * time * time,
+                          0.0, profile.length_mm);
+    }
+    if (time <= acceleration_time + cruise_time) {
+        return std::clamp(profile.accelerate_distance_mm +
+                              profile.nominal_speed_mm_per_min * (time - acceleration_time),
+                          0.0, profile.length_mm);
+    }
+
+    const double deceleration_elapsed = std::min(time - acceleration_time - cruise_time,
+                                                  deceleration_time);
+    return std::clamp(profile.decelerate_after_mm +
+                          profile.nominal_speed_mm_per_min * deceleration_elapsed -
+                          0.5 * profile.acceleration_mm_per_min2 * deceleration_elapsed *
+                              deceleration_elapsed,
+                      0.0, profile.length_mm);
+}
+
+double motion_profile_speed_at_time_us(const MotionProfile& profile, const double time_us) {
+    if (!std::isfinite(time_us) || time_us <= 0.0) return profile.entry_speed_mm_per_min;
+    const double time = std::min(time_us, profile.total_time_us) / kMinutesToMicroseconds;
+    const double acceleration_time =
+        (profile.nominal_speed_mm_per_min - profile.entry_speed_mm_per_min) /
+        profile.acceleration_mm_per_min2;
+    const double cruise_time =
+        (profile.decelerate_after_mm - profile.accelerate_distance_mm) /
+        profile.nominal_speed_mm_per_min;
+
+    if (time <= acceleration_time) {
+        return profile.entry_speed_mm_per_min + profile.acceleration_mm_per_min2 * time;
+    }
+    if (time <= acceleration_time + cruise_time) return profile.nominal_speed_mm_per_min;
+    return std::max(profile.exit_speed_mm_per_min,
+                    profile.nominal_speed_mm_per_min - profile.acceleration_mm_per_min2 *
+                        (time - acceleration_time - cruise_time));
+}
+
+MotionProfilePhase motion_profile_phase_at_time_us(const MotionProfile& profile,
+                                                    const double time_us) {
+    const double time = std::clamp(time_us, 0.0, profile.total_time_us);
+    const double acceleration_end = motion_profile_time_at_distance_us(
+        profile, profile.accelerate_distance_mm);
+    const double cruise_end = motion_profile_time_at_distance_us(
+        profile, profile.decelerate_after_mm);
+    if (time < acceleration_end) return MotionProfilePhase::Accelerate;
+    if (time < cruise_end) return MotionProfilePhase::Cruise;
+    return MotionProfilePhase::Decelerate;
+}
+
 }  // namespace ray2::stepper
