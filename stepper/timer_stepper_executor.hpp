@@ -15,16 +15,14 @@ struct TimerStepperDiagnostics {
     bool initialized = false;
     bool owns_step_pins = false;
     bool timer_running = false;
-    std::uint64_t scheduled_timer_events = 0;
-    std::uint64_t scheduled_timer_ticks = 0;
-    std::uint64_t segment_handoffs = 0;
-    std::uint64_t block_phase_continuations = 0;
-    std::uint64_t block_phase_initializations = 0;
-    std::uint64_t speed_transitions = 0;
-    std::uint64_t speed_delta_tenths_total = 0;
-    std::uint64_t speed_discontinuities = 0;
-    std::uint32_t maximum_speed_delta_tenths = 0;
-    std::uint32_t maximum_interval_jump_ticks = 0;
+    // These counters feed a one-second trace window. Keep them 32-bit so
+    // segment-boundary diagnostics do not require 64-bit atomic operations
+    // in the Timer ISR. Unsigned subtraction preserves deltas across wrap.
+    std::uint32_t scheduled_timer_events = 0;
+    std::uint32_t scheduled_timer_ticks = 0;
+    std::uint32_t segment_handoffs = 0;
+    std::uint32_t block_phase_continuations = 0;
+    std::uint32_t block_phase_initializations = 0;
 };
 
 // Stage two initialization remains passive until the new-driver-compatible

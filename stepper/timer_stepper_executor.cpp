@@ -20,19 +20,14 @@ constexpr char kLogTag[] = "timer_stepper";
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
 std::atomic<bool> s_feed_hold_requested = false;
-std::atomic<std::uint64_t> s_scheduled_timer_ticks = 0;
-std::atomic<std::uint64_t> s_scheduled_timer_events = 0;
-std::atomic<std::uint64_t> s_segment_handoffs = 0;
-std::atomic<std::uint64_t> s_block_phase_continuations = 0;
-std::atomic<std::uint64_t> s_block_phase_initializations = 0;
-std::atomic<std::uint64_t> s_speed_transitions = 0;
-std::atomic<std::uint64_t> s_speed_delta_tenths_total = 0;
-std::atomic<std::uint64_t> s_speed_discontinuities = 0;
-std::atomic<std::uint32_t> s_maximum_speed_delta_tenths = 0;
-std::atomic<std::uint32_t> s_maximum_interval_jump_ticks = 0;
+// These counters are sampled once per second for diagnostics. 32-bit values
+// are sufficient for that window and avoid expensive 64-bit atomics in ISR.
+std::atomic<std::uint32_t> s_scheduled_timer_ticks = 0;
+std::atomic<std::uint32_t> s_scheduled_timer_events = 0;
+std::atomic<std::uint32_t> s_segment_handoffs = 0;
+std::atomic<std::uint32_t> s_block_phase_continuations = 0;
+std::atomic<std::uint32_t> s_block_phase_initializations = 0;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
-
-constexpr std::uint32_t kSpeedContinuityToleranceTenths = 1;
 
 struct MotionState {
     std::int32_t axis_steps[machine::kAxisCount] = {};
@@ -56,22 +51,12 @@ struct MotionState {
 
 MotionState s_motion = {};
 
-void IRAM_ATTR record_maximum(std::atomic<std::uint32_t>& target,
-                              const std::uint32_t candidate) {
-    std::uint32_t observed = target.load(std::memory_order_relaxed);
-    while (candidate > observed &&
-           !target.compare_exchange_weak(observed, candidate,
-                                         std::memory_order_relaxed,
-                                         std::memory_order_relaxed)) {
-    }
-}
-
 void IRAM_ATTR record_segment_schedule(const MotionState& motion) {
     s_scheduled_timer_ticks.fetch_add(
-        static_cast<std::uint64_t>(motion.effective_step_interval_ticks) *
-            static_cast<std::uint64_t>(motion.execution_ticks),
+        static_cast<std::uint32_t>(motion.effective_step_interval_ticks) *
+            static_cast<std::uint32_t>(motion.execution_ticks),
         std::memory_order_relaxed);
-    s_scheduled_timer_events.fetch_add(static_cast<std::uint64_t>(motion.execution_ticks),
+    s_scheduled_timer_events.fetch_add(static_cast<std::uint32_t>(motion.execution_ticks),
                                        std::memory_order_relaxed);
 }
 
@@ -214,23 +199,6 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             }
             MotionState next_motion = motion_from_segment(next);
             s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
-            const std::uint32_t speed_delta =
-                completed_motion.end_speed_tenths_mm_per_min > next.start_speed_tenths_mm_per_min
-                    ? completed_motion.end_speed_tenths_mm_per_min - next.start_speed_tenths_mm_per_min
-                    : next.start_speed_tenths_mm_per_min - completed_motion.end_speed_tenths_mm_per_min;
-            if (!completed_motion.system_motion && !next_motion.system_motion) {
-                s_speed_transitions.fetch_add(1, std::memory_order_relaxed);
-                s_speed_delta_tenths_total.fetch_add(speed_delta, std::memory_order_relaxed);
-                if (speed_delta > kSpeedContinuityToleranceTenths) {
-                    s_speed_discontinuities.fetch_add(1, std::memory_order_relaxed);
-                }
-                record_maximum(s_maximum_speed_delta_tenths, speed_delta);
-            }
-            const std::uint32_t interval_jump =
-                completed_motion.effective_step_interval_ticks > next_motion.effective_step_interval_ticks
-                    ? completed_motion.effective_step_interval_ticks - next_motion.effective_step_interval_ticks
-                    : next_motion.effective_step_interval_ticks - completed_motion.effective_step_interval_ticks;
-            record_maximum(s_maximum_interval_jump_ticks, interval_jump);
             if (completed_motion.uses_block_phase && next_motion.uses_block_phase &&
                 completed_motion.execution_id == next_motion.execution_id &&
                 completed_motion.phase_denominator == next_motion.phase_denominator) {
@@ -425,11 +393,6 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.segment_handoffs = s_segment_handoffs.load();
     diagnostics.block_phase_continuations = s_block_phase_continuations.load();
     diagnostics.block_phase_initializations = s_block_phase_initializations.load();
-    diagnostics.speed_transitions = s_speed_transitions.load();
-    diagnostics.speed_delta_tenths_total = s_speed_delta_tenths_total.load();
-    diagnostics.speed_discontinuities = s_speed_discontinuities.load();
-    diagnostics.maximum_speed_delta_tenths = s_maximum_speed_delta_tenths.load();
-    diagnostics.maximum_interval_jump_ticks = s_maximum_interval_jump_ticks.load();
     return diagnostics;
 }
 

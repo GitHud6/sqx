@@ -78,14 +78,11 @@ struct TrapezoidFlowLogSnapshot {
     std::uint64_t boundary_stops = 0;
     std::uint64_t boundary_restarts = 0;
     std::uint64_t underflows = 0;
-    std::uint64_t scheduled_timer_events = 0;
-    std::uint64_t scheduled_timer_ticks = 0;
-    std::uint64_t segment_handoffs = 0;
-    std::uint64_t block_phase_continuations = 0;
-    std::uint64_t block_phase_initializations = 0;
-    std::uint64_t speed_transitions = 0;
-    std::uint64_t speed_delta_tenths_total = 0;
-    std::uint64_t speed_discontinuities = 0;
+    std::uint32_t scheduled_timer_events = 0;
+    std::uint32_t scheduled_timer_ticks = 0;
+    std::uint32_t segment_handoffs = 0;
+    std::uint32_t block_phase_continuations = 0;
+    std::uint32_t block_phase_initializations = 0;
 };
 
 TrapezoidFlowLogSnapshot s_trapezoid_flow_log = {};
@@ -679,31 +676,21 @@ void log_trapezoid_flow_periodically() {
         segment.block_boundary_restart_count - s_trapezoid_flow_log.boundary_restarts;
     const std::uint64_t delta_underflows =
         segment.underflow_count - s_trapezoid_flow_log.underflows;
-    const std::uint64_t delta_scheduled_timer_events =
+    const std::uint32_t delta_scheduled_timer_events =
         timer.scheduled_timer_events - s_trapezoid_flow_log.scheduled_timer_events;
-    const std::uint64_t delta_scheduled_timer_ticks =
+    const std::uint32_t delta_scheduled_timer_ticks =
         timer.scheduled_timer_ticks - s_trapezoid_flow_log.scheduled_timer_ticks;
-    const std::uint64_t delta_handoffs =
+    const std::uint32_t delta_handoffs =
         timer.segment_handoffs - s_trapezoid_flow_log.segment_handoffs;
-    const std::uint64_t delta_phase_continuations =
+    const std::uint32_t delta_phase_continuations =
         timer.block_phase_continuations - s_trapezoid_flow_log.block_phase_continuations;
-    const std::uint64_t delta_phase_initializations =
+    const std::uint32_t delta_phase_initializations =
         timer.block_phase_initializations - s_trapezoid_flow_log.block_phase_initializations;
-    const std::uint64_t delta_speed_transitions =
-        timer.speed_transitions - s_trapezoid_flow_log.speed_transitions;
-    const std::uint64_t delta_speed_delta_tenths =
-        timer.speed_delta_tenths_total - s_trapezoid_flow_log.speed_delta_tenths_total;
-    const std::uint64_t delta_speed_discontinuities =
-        timer.speed_discontinuities - s_trapezoid_flow_log.speed_discontinuities;
     const double average_interval_us = delta_scheduled_timer_events == 0
                                            ? 0.0
                                            : static_cast<double>(delta_scheduled_timer_ticks) /
                                                  (delta_scheduled_timer_events *
                                                   stepper::kStepTimerTicksPerMicrosecond);
-    const double average_speed_delta_mm_per_min = delta_speed_transitions == 0
-                                                       ? 0.0
-                                                       : static_cast<double>(delta_speed_delta_tenths) /
-                                                             (delta_speed_transitions * 10.0);
     s_trapezoid_flow_log = {
         .timestamp_ticks = now_ticks,
         .boundary_stops = segment.block_boundary_stop_count,
@@ -714,9 +701,6 @@ void log_trapezoid_flow_periodically() {
         .segment_handoffs = timer.segment_handoffs,
         .block_phase_continuations = timer.block_phase_continuations,
         .block_phase_initializations = timer.block_phase_initializations,
-        .speed_transitions = timer.speed_transitions,
-        .speed_delta_tenths_total = timer.speed_delta_tenths_total,
-        .speed_discontinuities = timer.speed_discontinuities,
     };
 
     portENTER_CRITICAL(&s_block_buffer_lock);
@@ -726,25 +710,18 @@ void log_trapezoid_flow_periodically() {
     portEXIT_CRITICAL(&s_block_buffer_lock);
     ESP_LOGI(kLogTag,
              "TRAPEZOID-TRACE period=1s supply=(block=%u/%u,ctx=%u/%u,segment=%u/%u) "
-             "phase=(handoff=+%llu,continue=+%llu,init=+%llu) "
-             "junction=(count=+%llu,delta_avg=%.1f,delta_max_run=%.1f,break=+%llu) "
-             "timer=(events=+%llu,interval_avg=%.2fus,jump_max_run=%.2fus) "
+             "phase=(handoff=+%u,continue=+%u,init=+%u) "
+             "timer=(events=+%u,interval_avg=%.2fus) "
              "fault=(stop=+%llu,restart=+%llu,underflow=+%llu)",
              static_cast<unsigned>(queued_blocks), static_cast<unsigned>(frozen_blocks),
              static_cast<unsigned>(prep.context_used), static_cast<unsigned>(prep.context_capacity),
              static_cast<unsigned>(segment.queued_segments),
              static_cast<unsigned>(segment.segment_capacity),
-             static_cast<unsigned long long>(delta_handoffs),
-             static_cast<unsigned long long>(delta_phase_continuations),
-             static_cast<unsigned long long>(delta_phase_initializations),
-             static_cast<unsigned long long>(delta_speed_transitions),
-             average_speed_delta_mm_per_min,
-             static_cast<double>(timer.maximum_speed_delta_tenths) / 10.0,
-             static_cast<unsigned long long>(delta_speed_discontinuities),
-             static_cast<unsigned long long>(delta_scheduled_timer_events),
+             static_cast<unsigned>(delta_handoffs),
+             static_cast<unsigned>(delta_phase_continuations),
+             static_cast<unsigned>(delta_phase_initializations),
+             static_cast<unsigned>(delta_scheduled_timer_events),
              average_interval_us,
-             static_cast<double>(timer.maximum_interval_jump_ticks) /
-                 stepper::kStepTimerTicksPerMicrosecond,
              static_cast<unsigned long long>(delta_stops),
              static_cast<unsigned long long>(delta_restarts),
              static_cast<unsigned long long>(delta_underflows));
