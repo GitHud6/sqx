@@ -35,10 +35,6 @@ constexpr std::uint32_t kRmtClockDivider = 20;
 constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
 
 std::atomic<bool> s_initialized = false;
-std::array<std::atomic<std::uint64_t>, machine::kAxisCount> s_trigger_count = {};
-std::array<std::atomic<std::uint64_t>, machine::kAxisCount> s_active_retrigger_count = {};
-std::array<std::atomic<std::uint32_t>, machine::kAxisCount> s_last_status_word = {};
-std::atomic<std::uint64_t> s_invalid_trigger_count = 0;
 
 void configure_axis(const std::size_t axis_index) {
     const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
@@ -116,31 +112,14 @@ bool rmt_step_pulse_driver_is_initialized() {
 }
 
 void rmt_step_pulse_driver_trigger(const std::size_t axis_index) {
-    if (axis_index >= machine::kAxisCount || !s_initialized.load(std::memory_order_acquire)) {
-        s_invalid_trigger_count.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    const std::uint32_t status_word = RMT.chnstatus[axis_index].val;
-    const std::uint32_t fsm_state = (status_word >> 22U) & 0x7U;
-    s_last_status_word[axis_index].store(status_word, std::memory_order_relaxed);
-    s_trigger_count[axis_index].fetch_add(1, std::memory_order_relaxed);
-    if (fsm_state != 0) {
-        s_active_retrigger_count[axis_index].fetch_add(1, std::memory_order_relaxed);
-    }
+    // The executor validates initialization and axis ownership before the
+    // timer starts. Keep the per-pulse path to the two hardware operations.
     rmt_ll_tx_reset_pointer(&RMT, axis_index);
     rmt_ll_tx_start(&RMT, axis_index);
 }
 
 RmtStepPulseDiagnostics rmt_step_pulse_driver_diagnostics() {
-    RmtStepPulseDiagnostics diagnostics = {};
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        diagnostics.trigger_count[axis] = s_trigger_count[axis].load(std::memory_order_relaxed);
-        diagnostics.active_retrigger_count[axis] =
-            s_active_retrigger_count[axis].load(std::memory_order_relaxed);
-        diagnostics.last_status_word[axis] = s_last_status_word[axis].load(std::memory_order_relaxed);
-    }
-    diagnostics.invalid_trigger_count = s_invalid_trigger_count.load(std::memory_order_relaxed);
-    return diagnostics;
+    return {};
 }
 
 }  // namespace ray2::driver

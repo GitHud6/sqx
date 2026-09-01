@@ -11,6 +11,8 @@ namespace ray2::stepper {
 namespace {
 
 constexpr std::uint32_t kMinimumStepIntervalUs = 4;
+constexpr std::uint32_t kMinimumStepIntervalTicks =
+    kMinimumStepIntervalUs * kStepTimerTicksPerMicrosecond;
 
 std::array<StepSegment, kStepSegmentBufferLength> s_segment_buffer = {};
 std::atomic<std::uint32_t> s_segment_head = 0;
@@ -258,10 +260,15 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
     StepSegment segment = {};
     segment.execution_id = profile.execution_id;
     segment.major_steps = final_step - first_step;
+    segment.block_major_steps = total_steps;
     segment.duration_us = static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us)));
-    segment.step_interval_us = std::max(
-        kMinimumStepIntervalUs,
-        static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us / segment.major_steps))));
+    segment.step_interval_ticks = std::max(
+        kMinimumStepIntervalTicks,
+        static_cast<std::uint32_t>(std::max(
+            1.0, std::round(duration_us * kStepTimerTicksPerMicrosecond / segment.major_steps))));
+    segment.step_interval_us = static_cast<std::uint32_t>(std::max(
+        1.0, std::round(static_cast<double>(segment.step_interval_ticks) /
+                            kStepTimerTicksPerMicrosecond)));
     segment.start_speed_mm_per_min = start_speed;
     segment.end_speed_mm_per_min = final_speed;
     segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(start_speed);
@@ -299,6 +306,7 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
         const std::int32_t axis_final = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(axis_total) * final_step) / total_steps);
         segment.axis_steps[axis] = axis_final - axis_first;
+        segment.block_axis_steps[axis] = axis_total;
         segment.positive_direction[axis] = source_block.plan.positive_direction[axis];
     }
     // AMASS is selected from the source block, not this short segment. A valid
@@ -308,20 +316,20 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
         source_block.plan.steps[0],
         source_block.plan.steps[1],
     };
-    segment.amass_level = stepper_select_amass_level(segment.step_interval_us, source_axis_steps);
+    segment.amass_level = stepper_select_amass_level(segment.step_interval_ticks, source_axis_steps);
     return segment;
 }
 
 }  // namespace
 
 std::uint8_t stepper_select_amass_level(
-    const std::uint32_t step_interval_us,
+    const std::uint32_t step_interval_ticks,
     const std::array<std::int32_t, 2>& axis_steps) {
-    if (step_interval_us == 0 || axis_steps[0] == 0 || axis_steps[1] == 0) return 0;
-    constexpr std::uint32_t kAmassThresholdUs = 1000000U / kAmassBaseStepRateHz;
-    std::uint32_t interval = step_interval_us;
+    if (step_interval_ticks == 0 || axis_steps[0] == 0 || axis_steps[1] == 0) return 0;
+    constexpr std::uint32_t kAmassThresholdTicks = kStepTimerFrequencyHz / kAmassBaseStepRateHz;
+    std::uint32_t interval = step_interval_ticks;
     std::uint8_t level = 0;
-    while (level < kAmassMaximumLevel && interval >= kAmassThresholdUs) {
+    while (level < kAmassMaximumLevel && interval >= kAmassThresholdTicks) {
         ++level;
         interval /= 2U;
     }
@@ -358,6 +366,12 @@ void stepper_prep_reset() {
     s_context_hold_complete.store(false, std::memory_order_relaxed);
     s_context_hold_carry_speed.store(0, std::memory_order_relaxed);
     reset_context_fifo();
+}
+
+void stepper_prep_abort() {
+    // Keep the fault path explicit: no stale segment or completion may cross
+    // an execution-generation boundary.
+    stepper_prep_reset();
 }
 
 bool stepper_prep_start_block(const planner::PlannerBlock& block) {
@@ -696,6 +710,10 @@ void stepper_segment_record_block_boundary_restart() {
     if (s_block_boundary_restart_pending.exchange(false, std::memory_order_acq_rel)) {
         s_block_boundary_restart_count.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+void stepper_segment_clear_block_boundary_pending() {
+    s_block_boundary_restart_pending.store(false, std::memory_order_release);
 }
 
 bool stepper_segment_needs_refill_from_isr() {

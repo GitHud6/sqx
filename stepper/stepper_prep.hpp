@@ -16,8 +16,11 @@ namespace ray2::stepper {
 constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
 constexpr std::size_t kTrapezoidPrepContextCapacity = 4;
-constexpr std::uint32_t kStepSegmentTargetDurationUs = 750;
+// Match the classic Grbl acceleration update cadence used by ray2-main.
+constexpr std::uint32_t kStepSegmentTargetDurationUs = 1000;
 constexpr std::size_t kStepSegmentLowWater = 16;
+constexpr std::uint32_t kStepTimerFrequencyHz = 20000000;
+constexpr std::uint32_t kStepTimerTicksPerMicrosecond = kStepTimerFrequencyHz / 1000000U;
 constexpr std::uint32_t kAmassBaseStepRateHz = 8000;
 constexpr std::uint8_t kAmassMaximumLevel = 3;
 
@@ -32,9 +35,14 @@ struct StepSegment {
     std::array<std::int32_t, 2> axis_steps = {};
     std::array<bool, 2> positive_direction = {};
     std::int32_t major_steps = 0;
+    // Profile segments retain the source block geometry so the executor can
+    // preserve Bresenham phase across segment boundaries. System motions keep
+    // these zero and use their local DDA state.
+    std::array<std::int32_t, 2> block_axis_steps = {};
+    std::int32_t block_major_steps = 0;
     std::uint32_t duration_us = 0;
     std::uint32_t step_interval_us = 0;
-    // Stage one metadata only. The executor still uses the original interval.
+    std::uint32_t step_interval_ticks = 0;
     std::uint8_t amass_level = 0;
     double start_speed_mm_per_min = 0.0;
     double end_speed_mm_per_min = 0.0;
@@ -123,6 +131,9 @@ struct StepperPrepDiagnostics {
 };
 
 void stepper_prep_reset();
+// Drops all prepared contexts, segments, and completion notifications after
+// an execution fault. The timer consumer must already be stopped.
+void stepper_prep_abort();
 bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
 std::size_t stepper_prep_fill();
@@ -137,7 +148,7 @@ void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr();
 void IRAM_ATTR stepper_prep_record_hold_complete_from_isr();
 void stepper_prep_clear_hold_boundary();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
-std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_us,
+std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_ticks,
                                         const std::array<std::int32_t, 2>& axis_steps);
 bool stepper_segment_publish(const StepSegment& segment);
 bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
@@ -147,6 +158,7 @@ std::size_t stepper_segment_free_slots();
 void IRAM_ATTR stepper_segment_record_underflow_from_isr();
 void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr();
 void stepper_segment_record_block_boundary_restart();
+void stepper_segment_clear_block_boundary_pending();
 bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
 void IRAM_ATTR stepper_segment_request_refill_from_isr(
     BaseType_t* higher_priority_task_woken);

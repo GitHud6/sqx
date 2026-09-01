@@ -20,26 +20,66 @@ constexpr char kLogTag[] = "timer_stepper";
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
 std::atomic<bool> s_feed_hold_requested = false;
-std::atomic<std::uint64_t> s_timer_interrupts = 0;
+std::atomic<std::uint64_t> s_scheduled_timer_ticks = 0;
+std::atomic<std::uint64_t> s_scheduled_timer_events = 0;
+std::atomic<std::uint64_t> s_segment_handoffs = 0;
+std::atomic<std::uint64_t> s_block_phase_continuations = 0;
+std::atomic<std::uint64_t> s_block_phase_initializations = 0;
+std::atomic<std::uint64_t> s_speed_transitions = 0;
+std::atomic<std::uint64_t> s_speed_delta_tenths_total = 0;
+std::atomic<std::uint64_t> s_speed_discontinuities = 0;
+std::atomic<std::uint32_t> s_maximum_speed_delta_tenths = 0;
+std::atomic<std::uint32_t> s_maximum_interval_jump_ticks = 0;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
+
+constexpr std::uint32_t kSpeedContinuityToleranceTenths = 1;
 
 struct MotionState {
     std::int32_t axis_steps[machine::kAxisCount] = {};
+    std::int32_t emitted_axis_steps[machine::kAxisCount] = {};
     std::int32_t execution_ticks = 0;
     std::int32_t completed_ticks = 0;
     std::int64_t axis_error[machine::kAxisCount] = {};
-    std::uint32_t effective_step_interval_us = 0;
+    std::int64_t axis_increment[machine::kAxisCount] = {};
+    std::int64_t phase_denominator = 0;
+    std::uint32_t effective_step_interval_ticks = 0;
     std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
     bool feed_hold = false;
     bool ends_feed_hold = false;
     bool system_motion = false;
+    bool uses_block_phase = false;
     bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
 };
 
 MotionState s_motion = {};
+
+void IRAM_ATTR record_maximum(std::atomic<std::uint32_t>& target,
+                              const std::uint32_t candidate) {
+    std::uint32_t observed = target.load(std::memory_order_relaxed);
+    while (candidate > observed &&
+           !target.compare_exchange_weak(observed, candidate,
+                                         std::memory_order_relaxed,
+                                         std::memory_order_relaxed)) {
+    }
+}
+
+void IRAM_ATTR record_segment_schedule(const MotionState& motion) {
+    s_scheduled_timer_ticks.fetch_add(
+        static_cast<std::uint64_t>(motion.effective_step_interval_ticks) *
+            static_cast<std::uint64_t>(motion.execution_ticks),
+        std::memory_order_relaxed);
+    s_scheduled_timer_events.fetch_add(static_cast<std::uint64_t>(motion.execution_ticks),
+                                       std::memory_order_relaxed);
+}
+
+std::uint32_t segment_timer_ticks(const StepSegment& segment) {
+    if (segment.step_interval_ticks != 0) return segment.step_interval_ticks;
+    if (segment.step_interval_us == 0) return 0;
+    return segment.step_interval_us * kStepTimerTicksPerMicrosecond;
+}
 
 MotionState motion_from_segment(const StepSegment& segment) {
     MotionState motion = {};
@@ -47,15 +87,38 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.axis_steps[1] = segment.axis_steps[1];
     const std::uint32_t amass_scale = 1U << segment.amass_level;
     motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
-    motion.effective_step_interval_us = std::max<std::uint32_t>(
-        4U, segment.step_interval_us / amass_scale);
+    motion.effective_step_interval_ticks = std::max<std::uint32_t>(
+        1U, segment_timer_ticks(segment) / amass_scale);
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
     motion.feed_hold = segment.feed_hold;
     motion.ends_feed_hold = segment.ends_feed_hold;
     motion.system_motion = segment.system_motion;
+    if (segment.block_major_steps > 0 &&
+        std::max(segment.block_axis_steps[0], segment.block_axis_steps[1]) ==
+            segment.block_major_steps) {
+        motion.uses_block_phase = true;
+        motion.phase_denominator =
+            static_cast<std::int64_t>(segment.block_major_steps) << kAmassMaximumLevel;
+        for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+            motion.axis_increment[axis] = static_cast<std::int64_t>(segment.block_axis_steps[axis])
+                                          << (kAmassMaximumLevel - segment.amass_level);
+        }
+    } else {
+        motion.phase_denominator = motion.execution_ticks;
+        for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+            motion.axis_increment[axis] = segment.axis_steps[axis];
+        }
+    }
     return motion;
+}
+
+void initialize_block_phase(MotionState& motion) {
+    if (!motion.uses_block_phase || motion.phase_denominator <= 0) return;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        motion.axis_error[axis] = motion.phase_denominator >> 1;
+    }
 }
 
 void IRAM_ATTR trigger_pulse(const std::size_t axis) {
@@ -71,29 +134,49 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     }
 
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        s_motion.axis_error[axis] += s_motion.axis_steps[axis];
-        if (s_motion.axis_error[axis] >= s_motion.execution_ticks) {
+        s_motion.axis_error[axis] += s_motion.axis_increment[axis];
+        // Classic Grbl initializes a block DDA counter at half the major-axis
+        // count and steps on a strict overflow. Keep the legacy >= behavior
+        // for system/local segments, which start from zero instead.
+        const bool should_step = s_motion.uses_block_phase
+                                     ? s_motion.axis_error[axis] > s_motion.phase_denominator
+                                     : s_motion.axis_error[axis] >= s_motion.phase_denominator;
+        if (should_step) {
             if (!s_motion.axis_stopped[axis]) {
                 const auto current_axis = static_cast<machine::Axis>(axis);
                 trigger_pulse(axis);
-                stepper_record_executed_steps_from_isr(current_axis, 1);
+                // System motion may be stopped by a limit ISR, so it must keep
+                // position current after every emitted pulse. Normal planner
+                // motion commits its already-emitted pulses at segment end.
+                if (s_motion.system_motion) {
+                    stepper_record_executed_steps_from_isr(current_axis, 1);
+                }
+                ++s_motion.emitted_axis_steps[axis];
             }
-            s_motion.axis_error[axis] -= s_motion.execution_ticks;
+            s_motion.axis_error[axis] -= s_motion.phase_denominator;
         }
     }
 
     ++s_motion.completed_ticks;
-    s_timer_interrupts.fetch_add(1);
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
         const MotionState completed_motion = s_motion;
         StepSegment completed_segment = {};
         completed_segment.execution_id = completed_motion.execution_id;
-        completed_segment.axis_steps = {completed_motion.axis_steps[0], completed_motion.axis_steps[1]};
+        completed_segment.axis_steps = {
+            completed_motion.emitted_axis_steps[0],
+            completed_motion.emitted_axis_steps[1],
+        };
         completed_segment.major_steps = completed_motion.axis_steps[0] > completed_motion.axis_steps[1]
                                             ? completed_motion.axis_steps[0]
                                             : completed_motion.axis_steps[1];
         completed_segment.end_speed_tenths_mm_per_min = completed_motion.end_speed_tenths_mm_per_min;
+        if (!completed_motion.system_motion) {
+            for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+                stepper_record_executed_steps_from_isr(
+                    static_cast<machine::Axis>(axis), completed_motion.emitted_axis_steps[axis]);
+            }
+        }
         stepper_prep_record_segment_completed_from_isr(completed_segment);
         if (completed_motion.completes_block) {
             const SegmentCompletion completion = {
@@ -129,11 +212,44 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
                 stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
                                                 next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
             }
-            s_motion = motion_from_segment(next);
+            MotionState next_motion = motion_from_segment(next);
+            s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
+            const std::uint32_t speed_delta =
+                completed_motion.end_speed_tenths_mm_per_min > next.start_speed_tenths_mm_per_min
+                    ? completed_motion.end_speed_tenths_mm_per_min - next.start_speed_tenths_mm_per_min
+                    : next.start_speed_tenths_mm_per_min - completed_motion.end_speed_tenths_mm_per_min;
+            if (!completed_motion.system_motion && !next_motion.system_motion) {
+                s_speed_transitions.fetch_add(1, std::memory_order_relaxed);
+                s_speed_delta_tenths_total.fetch_add(speed_delta, std::memory_order_relaxed);
+                if (speed_delta > kSpeedContinuityToleranceTenths) {
+                    s_speed_discontinuities.fetch_add(1, std::memory_order_relaxed);
+                }
+                record_maximum(s_maximum_speed_delta_tenths, speed_delta);
+            }
+            const std::uint32_t interval_jump =
+                completed_motion.effective_step_interval_ticks > next_motion.effective_step_interval_ticks
+                    ? completed_motion.effective_step_interval_ticks - next_motion.effective_step_interval_ticks
+                    : next_motion.effective_step_interval_ticks - completed_motion.effective_step_interval_ticks;
+            record_maximum(s_maximum_interval_jump_ticks, interval_jump);
+            if (completed_motion.uses_block_phase && next_motion.uses_block_phase &&
+                completed_motion.execution_id == next_motion.execution_id &&
+                completed_motion.phase_denominator == next_motion.phase_denominator) {
+                for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+                    next_motion.axis_error[axis] = completed_motion.axis_error[axis];
+                }
+                s_block_phase_continuations.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                initialize_block_phase(next_motion);
+                if (next_motion.uses_block_phase) {
+                    s_block_phase_initializations.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            s_motion = next_motion;
+            record_segment_schedule(s_motion);
             laser::laser_apply_segment_power_from_isr(next.laser_power_per_mille,
                                                        next.execution_id);
             stepper_segment_set_active(next);
-            driver::step_timer_driver_update_interval_from_isr(s_motion.effective_step_interval_us);
+            driver::step_timer_driver_update_interval_from_isr(s_motion.effective_step_interval_ticks);
             if (stepper_segment_needs_refill_from_isr()) {
                 stepper_segment_request_refill_from_isr(&task_woken);
             }
@@ -178,11 +294,13 @@ esp_err_t timer_stepper_executor_init() {
 }
 
 esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
-    if (!s_initialized.load() || segment.major_steps <= 0 || segment.step_interval_us <= 3 ||
+    const std::uint32_t timer_ticks = segment_timer_ticks(segment);
+    if (!s_initialized.load() || segment.major_steps <= 0 ||
+        timer_ticks <= 3U * kStepTimerTicksPerMicrosecond ||
         segment.amass_level > kAmassMaximumLevel) {
-        ESP_LOGE(kLogTag, "TIMER-REJECT reason=invalid-request initialized=%d interval=%lu",
+        ESP_LOGE(kLogTag, "TIMER-REJECT reason=invalid-request initialized=%d ticks=%lu",
                  s_initialized.load() ? 1 : 0,
-                 static_cast<unsigned long>(segment.step_interval_us));
+                 static_cast<unsigned long>(timer_ticks));
         return ESP_ERR_INVALID_ARG;
     }
     const std::int32_t major = std::max(segment.axis_steps[0], segment.axis_steps[1]);
@@ -193,6 +311,10 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     MotionState motion = motion_from_segment(segment);
+    initialize_block_phase(motion);
+    if (motion.uses_block_phase) {
+        s_block_phase_initializations.fetch_add(1, std::memory_order_relaxed);
+    }
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const auto current = static_cast<machine::Axis>(axis);
         const esp_err_t direction_result =
@@ -212,15 +334,16 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     portENTER_CRITICAL(&s_motion_lock);
     s_motion = motion; s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
+    record_segment_schedule(motion);
     laser::laser_apply_segment_power_from_isr(segment.laser_power_per_mille,
                                                segment.execution_id);
     stepper_segment_set_active(segment);
-    const esp_err_t result = driver::step_timer_driver_start(motion.effective_step_interval_us);
+    const esp_err_t result = driver::step_timer_driver_start(motion.effective_step_interval_ticks);
     if (result != ESP_OK) {
-        ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) interval=%lu",
+        ESP_LOGE(kLogTag, "TIMER-START-REJECT error=%s steps=(%ld,%ld) ticks=%lu",
                  esp_err_to_name(result), static_cast<long>(segment.axis_steps[0]),
                  static_cast<long>(segment.axis_steps[1]),
-                 static_cast<unsigned long>(segment.step_interval_us));
+                 static_cast<unsigned long>(timer_ticks));
         timer_stepper_executor_stop(); return ESP_FAIL;
     }
     stepper_segment_record_block_boundary_restart();
@@ -296,7 +419,17 @@ bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(const std::size_t axis_
 TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     TimerStepperDiagnostics diagnostics = {};
     diagnostics.initialized = s_initialized.load(); diagnostics.owns_step_pins = diagnostics.initialized;
-    diagnostics.timer_running = s_busy.load(); diagnostics.timer_interrupts = s_timer_interrupts.load();
+    diagnostics.timer_running = s_busy.load();
+    diagnostics.scheduled_timer_events = s_scheduled_timer_events.load();
+    diagnostics.scheduled_timer_ticks = s_scheduled_timer_ticks.load();
+    diagnostics.segment_handoffs = s_segment_handoffs.load();
+    diagnostics.block_phase_continuations = s_block_phase_continuations.load();
+    diagnostics.block_phase_initializations = s_block_phase_initializations.load();
+    diagnostics.speed_transitions = s_speed_transitions.load();
+    diagnostics.speed_delta_tenths_total = s_speed_delta_tenths_total.load();
+    diagnostics.speed_discontinuities = s_speed_discontinuities.load();
+    diagnostics.maximum_speed_delta_tenths = s_maximum_speed_delta_tenths.load();
+    diagnostics.maximum_interval_jump_ticks = s_maximum_interval_jump_ticks.load();
     return diagnostics;
 }
 

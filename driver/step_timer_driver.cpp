@@ -2,24 +2,33 @@
 
 #include <atomic>
 
-#include "driver/gptimer.h"
+// The Timer Group backend is deliberately selected for deterministic
+// auto-reload behavior. Suppress the generic migration warning locally.
+#ifndef CONFIG_GPTIMER_SUPPRESS_DEPRECATE_WARN
+#define CONFIG_GPTIMER_SUPPRESS_DEPRECATE_WARN 1
+#endif
+#include "driver/timer.h"
+#include "esp_intr_alloc.h"
 
 namespace ray2::driver {
 namespace {
 
-constexpr std::uint32_t kTimerResolutionHz = 1000000;
-constexpr int kTimerInterruptPriority = 3;
+constexpr timer_group_t kStepTimerGroup = TIMER_GROUP_0;
+constexpr timer_idx_t kStepTimerIndex = TIMER_0;
+constexpr std::uint32_t kTimerResolutionHz = 20000000;
+constexpr std::uint32_t kTimerSourceFrequencyHz = 40000000;
+constexpr std::uint32_t kTimerDivider = kTimerSourceFrequencyHz / kTimerResolutionHz;
+constexpr int kTimerInterruptFlags = ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3;
+
+static_assert(kTimerDivider >= 2, "Timer Group divider must be at least two");
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_running = false;
-gptimer_handle_t s_timer = nullptr;
 StepTimerAlarmCallback s_alarm_callback = nullptr;
 void* s_alarm_user_data = nullptr;
 
-bool IRAM_ATTR timer_alarm_callback(gptimer_handle_t,
-                                    const gptimer_alarm_event_data_t*,
-                                    void*) {
-    if (!s_running.load() || s_alarm_callback == nullptr) {
+bool IRAM_ATTR timer_alarm_callback(void*) {
+    if (!s_running.load(std::memory_order_relaxed) || s_alarm_callback == nullptr) {
         return false;
     }
     return s_alarm_callback(s_alarm_user_data);
@@ -36,61 +45,54 @@ esp_err_t step_timer_driver_init(const StepTimerAlarmCallback callback, void* co
                                                                                : ESP_ERR_INVALID_STATE;
     }
 
-    const gptimer_config_t config = {
-        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
-        .direction = GPTIMER_COUNT_UP,
-        .resolution_hz = kTimerResolutionHz,
-        .intr_priority = kTimerInterruptPriority,
-        .flags = {},
+    const timer_config_t config = {
+        .alarm_en = TIMER_ALARM_EN,
+        .counter_en = TIMER_PAUSE,
+        .intr_type = TIMER_INTR_LEVEL,
+        .counter_dir = TIMER_COUNT_UP,
+        .auto_reload = TIMER_AUTORELOAD_EN,
+        .clk_src = TIMER_SRC_CLK_XTAL,
+        .divider = kTimerDivider,
     };
-    esp_err_t result = gptimer_new_timer(&config, &s_timer);
+    esp_err_t result = timer_init(kStepTimerGroup, kStepTimerIndex, &config);
     if (result != ESP_OK) {
+        return result;
+    }
+    result = timer_set_counter_value(kStepTimerGroup, kStepTimerIndex, 0);
+    if (result == ESP_OK) {
+        result = timer_enable_intr(kStepTimerGroup, kStepTimerIndex);
+    }
+    if (result == ESP_OK) {
+        s_alarm_callback = callback;
+        s_alarm_user_data = user_data;
+        result = timer_isr_callback_add(kStepTimerGroup, kStepTimerIndex,
+                                        timer_alarm_callback, nullptr,
+                                        kTimerInterruptFlags);
+    }
+    if (result != ESP_OK) {
+        s_alarm_callback = nullptr;
+        s_alarm_user_data = nullptr;
+        timer_deinit(kStepTimerGroup, kStepTimerIndex);
         return result;
     }
 
-    s_alarm_callback = callback;
-    s_alarm_user_data = user_data;
-    const gptimer_event_callbacks_t callbacks = {.on_alarm = timer_alarm_callback};
-    result = gptimer_register_event_callbacks(s_timer, &callbacks, nullptr);
-    if (result != ESP_OK) {
-        gptimer_del_timer(s_timer);
-        s_timer = nullptr;
-        s_alarm_callback = nullptr;
-        s_alarm_user_data = nullptr;
-        return result;
-    }
-    result = gptimer_enable(s_timer);
-    if (result != ESP_OK) {
-        gptimer_del_timer(s_timer);
-        s_timer = nullptr;
-        s_alarm_callback = nullptr;
-        s_alarm_user_data = nullptr;
-        return result;
-    }
-
-    s_initialized.store(true);
+    s_initialized.store(true, std::memory_order_release);
     return ESP_OK;
 }
 
-esp_err_t step_timer_driver_start(const std::uint32_t interval_us) {
-    if (!s_initialized.load() || interval_us == 0 || s_running.load()) {
+esp_err_t step_timer_driver_start(const std::uint32_t interval_ticks) {
+    if (!s_initialized.load() || interval_ticks == 0 || s_running.load()) {
         return ESP_ERR_INVALID_STATE;
     }
-
-    const gptimer_alarm_config_t alarm = {
-        .alarm_count = interval_us,
-        .reload_count = 0,
-        .flags = {.auto_reload_on_alarm = true},
-    };
-    esp_err_t result = gptimer_set_raw_count(s_timer, 0);
+    esp_err_t result = timer_set_counter_value(kStepTimerGroup, kStepTimerIndex, 0);
     if (result == ESP_OK) {
-        result = gptimer_set_alarm_action(s_timer, &alarm);
+        result = timer_set_alarm_value(kStepTimerGroup, kStepTimerIndex, interval_ticks);
     }
     if (result == ESP_OK) {
-        s_running.store(true);
-        result = gptimer_start(s_timer);
+        s_running.store(true, std::memory_order_release);
+        result = timer_start(kStepTimerGroup, kStepTimerIndex);
         if (result != ESP_OK) {
-            s_running.store(false);
+            s_running.store(false, std::memory_order_release);
         }
     }
     return result;
@@ -100,36 +102,31 @@ esp_err_t step_timer_driver_stop() {
     if (!s_initialized.load()) {
         return ESP_ERR_INVALID_STATE;
     }
-
-    s_running.store(false);
-    return gptimer_stop(s_timer);
+    s_running.store(false, std::memory_order_release);
+    return timer_pause(kStepTimerGroup, kStepTimerIndex);
 }
 
 bool step_timer_driver_is_initialized() {
-    return s_initialized.load();
+    return s_initialized.load(std::memory_order_acquire);
 }
 
 bool step_timer_driver_is_running() {
-    return s_running.load();
+    return s_running.load(std::memory_order_acquire);
 }
 
-void step_timer_driver_stop_from_isr() {
-    s_running.store(false);
-    if (s_timer != nullptr) {
-        gptimer_stop(s_timer);
-    }
+void IRAM_ATTR step_timer_driver_stop_from_isr() {
+    s_running.store(false, std::memory_order_relaxed);
+    timer_group_set_counter_enable_in_isr(kStepTimerGroup, kStepTimerIndex, TIMER_PAUSE);
 }
 
-void step_timer_driver_update_interval_from_isr(const std::uint32_t interval_us) {
-    if (!s_running.load() || s_timer == nullptr || interval_us == 0) {
+void IRAM_ATTR step_timer_driver_update_interval_from_isr(const std::uint32_t interval_ticks) {
+    if (!s_running.load(std::memory_order_relaxed) || interval_ticks == 0) {
         return;
     }
-    const gptimer_alarm_config_t alarm = {
-        .alarm_count = interval_us,
-        .reload_count = 0,
-        .flags = {.auto_reload_on_alarm = true},
-    };
-    gptimer_set_alarm_action(s_timer, &alarm);
+    // Timer Group hardware reloads immediately at the alarm edge. Updating
+    // the threshold here changes the following period without stopping the
+    // counter or reconfiguring the interrupt service.
+    timer_group_set_alarm_value_in_isr(kStepTimerGroup, kStepTimerIndex, interval_ticks);
 }
 
 }  // namespace ray2::driver

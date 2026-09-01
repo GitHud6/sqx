@@ -78,6 +78,14 @@ struct TrapezoidFlowLogSnapshot {
     std::uint64_t boundary_stops = 0;
     std::uint64_t boundary_restarts = 0;
     std::uint64_t underflows = 0;
+    std::uint64_t scheduled_timer_events = 0;
+    std::uint64_t scheduled_timer_ticks = 0;
+    std::uint64_t segment_handoffs = 0;
+    std::uint64_t block_phase_continuations = 0;
+    std::uint64_t block_phase_initializations = 0;
+    std::uint64_t speed_transitions = 0;
+    std::uint64_t speed_delta_tenths_total = 0;
+    std::uint64_t speed_discontinuities = 0;
 };
 
 TrapezoidFlowLogSnapshot s_trapezoid_flow_log = {};
@@ -360,6 +368,11 @@ void report_queue_drained() {
     portENTER_CRITICAL(&s_block_buffer_lock);
     const bool is_empty = s_block_count == 0;
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    if (is_empty && !stepper::timer_stepper_executor_is_busy() &&
+        stepper::stepper_segment_count() == 0 &&
+        stepper::stepper_prep_diagnostics().context_used == 0) {
+        stepper::stepper_segment_clear_block_boundary_pending();
+    }
     if (is_empty && !s_queue_drain_reported.exchange(true)) {
         emit_execution_event(ExecutionEventType::QueueDrained);
     }
@@ -659,17 +672,51 @@ void log_trapezoid_flow_periodically() {
 
     const auto segment = stepper::stepper_segment_diagnostics();
     const auto prep = stepper::stepper_prep_diagnostics();
+    const auto timer = stepper::timer_stepper_executor_diagnostics();
     const std::uint64_t delta_stops =
         segment.block_boundary_stop_count - s_trapezoid_flow_log.boundary_stops;
     const std::uint64_t delta_restarts =
         segment.block_boundary_restart_count - s_trapezoid_flow_log.boundary_restarts;
     const std::uint64_t delta_underflows =
         segment.underflow_count - s_trapezoid_flow_log.underflows;
+    const std::uint64_t delta_scheduled_timer_events =
+        timer.scheduled_timer_events - s_trapezoid_flow_log.scheduled_timer_events;
+    const std::uint64_t delta_scheduled_timer_ticks =
+        timer.scheduled_timer_ticks - s_trapezoid_flow_log.scheduled_timer_ticks;
+    const std::uint64_t delta_handoffs =
+        timer.segment_handoffs - s_trapezoid_flow_log.segment_handoffs;
+    const std::uint64_t delta_phase_continuations =
+        timer.block_phase_continuations - s_trapezoid_flow_log.block_phase_continuations;
+    const std::uint64_t delta_phase_initializations =
+        timer.block_phase_initializations - s_trapezoid_flow_log.block_phase_initializations;
+    const std::uint64_t delta_speed_transitions =
+        timer.speed_transitions - s_trapezoid_flow_log.speed_transitions;
+    const std::uint64_t delta_speed_delta_tenths =
+        timer.speed_delta_tenths_total - s_trapezoid_flow_log.speed_delta_tenths_total;
+    const std::uint64_t delta_speed_discontinuities =
+        timer.speed_discontinuities - s_trapezoid_flow_log.speed_discontinuities;
+    const double average_interval_us = delta_scheduled_timer_events == 0
+                                           ? 0.0
+                                           : static_cast<double>(delta_scheduled_timer_ticks) /
+                                                 (delta_scheduled_timer_events *
+                                                  stepper::kStepTimerTicksPerMicrosecond);
+    const double average_speed_delta_mm_per_min = delta_speed_transitions == 0
+                                                       ? 0.0
+                                                       : static_cast<double>(delta_speed_delta_tenths) /
+                                                             (delta_speed_transitions * 10.0);
     s_trapezoid_flow_log = {
         .timestamp_ticks = now_ticks,
         .boundary_stops = segment.block_boundary_stop_count,
         .boundary_restarts = segment.block_boundary_restart_count,
         .underflows = segment.underflow_count,
+        .scheduled_timer_events = timer.scheduled_timer_events,
+        .scheduled_timer_ticks = timer.scheduled_timer_ticks,
+        .segment_handoffs = timer.segment_handoffs,
+        .block_phase_continuations = timer.block_phase_continuations,
+        .block_phase_initializations = timer.block_phase_initializations,
+        .speed_transitions = timer.speed_transitions,
+        .speed_delta_tenths_total = timer.speed_delta_tenths_total,
+        .speed_discontinuities = timer.speed_discontinuities,
     };
 
     portENTER_CRITICAL(&s_block_buffer_lock);
@@ -678,21 +725,28 @@ void log_trapezoid_flow_periodically() {
         s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
     portEXIT_CRITICAL(&s_block_buffer_lock);
     ESP_LOGI(kLogTag,
-             "TRAPEZOID-FLOW period=1s blocks=(queued=%u,frozen=%u) "
-             "context=(used=%u/%u,g=%llu,e=%llu,c=%llu) segment=(queued=%u/%u) "
-             "boundary=(stop=+%llu,restart=+%llu,pending=%d,total=%llu/%llu) underflow=+%llu",
+             "TRAPEZOID-TRACE period=1s supply=(block=%u/%u,ctx=%u/%u,segment=%u/%u) "
+             "phase=(handoff=+%llu,continue=+%llu,init=+%llu) "
+             "junction=(count=+%llu,delta_avg=%.1f,delta_max_run=%.1f,break=+%llu) "
+             "timer=(events=+%llu,interval_avg=%.2fus,jump_max_run=%.2fus) "
+             "fault=(stop=+%llu,restart=+%llu,underflow=+%llu)",
              static_cast<unsigned>(queued_blocks), static_cast<unsigned>(frozen_blocks),
              static_cast<unsigned>(prep.context_used), static_cast<unsigned>(prep.context_capacity),
-             static_cast<unsigned long long>(prep.generation_context_execution_id),
-             static_cast<unsigned long long>(prep.execution_context_execution_id),
-             static_cast<unsigned long long>(prep.completion_context_execution_id),
              static_cast<unsigned>(segment.queued_segments),
              static_cast<unsigned>(segment.segment_capacity),
+             static_cast<unsigned long long>(delta_handoffs),
+             static_cast<unsigned long long>(delta_phase_continuations),
+             static_cast<unsigned long long>(delta_phase_initializations),
+             static_cast<unsigned long long>(delta_speed_transitions),
+             average_speed_delta_mm_per_min,
+             static_cast<double>(timer.maximum_speed_delta_tenths) / 10.0,
+             static_cast<unsigned long long>(delta_speed_discontinuities),
+             static_cast<unsigned long long>(delta_scheduled_timer_events),
+             average_interval_us,
+             static_cast<double>(timer.maximum_interval_jump_ticks) /
+                 stepper::kStepTimerTicksPerMicrosecond,
              static_cast<unsigned long long>(delta_stops),
              static_cast<unsigned long long>(delta_restarts),
-             segment.block_boundary_restart_pending ? 1 : 0,
-             static_cast<unsigned long long>(segment.block_boundary_stop_count),
-             static_cast<unsigned long long>(segment.block_boundary_restart_count),
              static_cast<unsigned long long>(delta_underflows));
 }
 
@@ -702,6 +756,9 @@ void consume_segment_completions() {
         MotionBlock block = {};
         if (!current_block_snapshot(block) || block.execution_id != completion.execution_id) {
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+            stepper::timer_stepper_executor_stop();
+            stepper::stepper_prep_abort();
+            planner_reset();
             continue;
         }
 
@@ -713,9 +770,9 @@ void consume_segment_completions() {
             if (!stepper::stepper_prep_complete_block(completion.execution_id)) {
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
                 emit_execution_event(ExecutionEventType::BlockFailed, &block);
-                stepper::stepper_prep_cancel_block();
-                discard_current_block(block);
-                report_queue_drained();
+                stepper::timer_stepper_executor_stop();
+                stepper::stepper_prep_abort();
+                planner_reset();
                 continue;
             }
             ++s_completed_block_count;
@@ -726,7 +783,10 @@ void consume_segment_completions() {
         } else {
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
-            stepper::stepper_prep_cancel_block();
+            stepper::timer_stepper_executor_stop();
+            stepper::stepper_prep_abort();
+            planner_reset();
+            continue;
         }
         discard_current_block(block);
         report_queue_drained();
