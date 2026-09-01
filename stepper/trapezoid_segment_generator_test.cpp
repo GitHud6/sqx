@@ -1,4 +1,5 @@
 #include "trapezoid_execution_plan.hpp"
+#include "grbl_trapezoid_prep.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -117,6 +118,32 @@ bool trapezoid_segment_generator_format_self_test(char* buffer, const std::size_
         }
         used += written;
     }
+    GrblTrapezoidPrepSelfTestReport reference = {};
+    grbl_trapezoid_prep_self_test(reference);
+    const int reference_written = std::snprintf(
+        buffer + used, buffer_size - static_cast<std::size_t>(used),
+        "|grbl_ref=(result=%s,cases=%u/%u/%u,detail=(%u/%u/%u:%u,%u/%u/%u:%u,%u/%u/%u:%u))",
+        reference.passed ? "ok" : "fail",
+        static_cast<unsigned>(reference.cases[0].passed ? 1U : 0U),
+        static_cast<unsigned>(reference.cases[1].passed ? 1U : 0U),
+        static_cast<unsigned>(reference.cases[2].passed ? 1U : 0U),
+        static_cast<unsigned>(reference.cases[0].emitted_steps),
+        static_cast<unsigned>(reference.cases[0].expected_steps),
+        static_cast<unsigned>(reference.cases[0].slice_count),
+        static_cast<unsigned>(reference.cases[0].zero_step_slice_count),
+        static_cast<unsigned>(reference.cases[1].emitted_steps),
+        static_cast<unsigned>(reference.cases[1].expected_steps),
+        static_cast<unsigned>(reference.cases[1].slice_count),
+        static_cast<unsigned>(reference.cases[1].zero_step_slice_count),
+        static_cast<unsigned>(reference.cases[2].emitted_steps),
+        static_cast<unsigned>(reference.cases[2].expected_steps),
+        static_cast<unsigned>(reference.cases[2].slice_count),
+        static_cast<unsigned>(reference.cases[2].zero_step_slice_count));
+    if (reference_written <= 0 || static_cast<std::size_t>(reference_written) >=
+                                      buffer_size - static_cast<std::size_t>(used)) {
+        return false;
+    }
+    used += reference_written;
     const int suffix = std::snprintf(buffer + used, buffer_size - static_cast<std::size_t>(used), "]\r\n");
     return suffix > 0 && static_cast<std::size_t>(suffix) < buffer_size - static_cast<std::size_t>(used);
 }

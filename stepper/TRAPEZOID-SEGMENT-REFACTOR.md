@@ -1,5 +1,125 @@
 # 梯形 Segment 时间积分重构
 
+> 状态：2026-09-01 重新定性。以下“当前有效结论”优先于本文后续的历史设计记录。原有章节保留，
+> 用于追溯已做过的自定义实验，不再作为继续修改梯形执行路径的依据。
+
+## 当前有效结论：复刻成熟 prep，而不是继续优化自定义 generator
+
+### 已排除的故障类别
+
+`longer_studio11.gc.gz` 在移除高频 profile 日志后已经完整结束：
+
+```text
+SD lifecycle=completed
+position=known
+underflow=0
+refill request == refill service
+RMT 双轴触发耗时稳定
+```
+
+这证明当前 block、segment ring、任务唤醒和 RMT 没有发生断供、丢坐标或明显的 ISR 时序失控。
+它**不**证明当前步进节奏与 `ray2-main` 等价。持续尖啸仍存在，因此不能再从“增加 ring、调加速度、
+加诊断、改变 junction 或继续修补自定义公式”寻找主因。
+
+### 已确认的实现差异
+
+两边使用同一机器参数、20 MHz Timer、4 MHz RMT、3 us STEP 脉宽，且加速度更新频率均为 1000 Hz：
+
+```text
+ray2-main: CONFIG_ACCELERATION_TICKS_PER_SECOND = 1000
+ray2-idf : kStepSegmentTargetDurationUs = 1000
+```
+
+但真正的梯形执行算法不同：
+
+```text
+ray2-main
+Planner block
+  -> Stepper.cpp::st_prep_buffer()
+  -> 原始 Grbl ramp 状态机 + prep.current_speed
+  -> 原始 Grbl steps_remaining / dt_remainder 量化
+  -> 原始 Grbl AMASS/Bresenham segment 语义
+  -> Timer/RMT
+
+ray2-idf
+Planner block
+  -> motion_profile_build_trapezoid()
+  -> trapezoid_execution_plan()
+  -> trapezoid_segment_generator()
+  -> 自定义 StepSegment 分配和 block-phase DDA
+  -> Timer/RMT
+```
+
+当前 `ray2-idf` 的闭式 profile、按时间查询、纯 generator、4 个 prep context、64 槽 ring 和
+block-phase DDA 都是后续自行设计的实现。即使总时间、总步数、入口/出口速度在日志中闭环，它们也
+没有被成功项目的实机行为验证。它们是剩余尖啸的首要嫌疑，而不是已经被证明可继续优化的基础。
+
+### 正确的对照基线
+
+`ray2-main` 的权威参考是：
+
+```text
+D:\RAY2-main\components\Grbl_Esp32_Source\Grbl_Esp32\src\Stepper.cpp
+  st_prep_buffer()
+```
+
+关键语义必须按原顺序复刻，而不是只复刻公式名称：
+
+1. 从 planner 读取已确定的 entry/exit/nominal 速度。
+2. 用 `RAMP_ACCEL`、`RAMP_CRUISE`、`RAMP_DECEL` 状态机推进一个最多 1 ms 的时间片；跨 ramp
+   边界时在同一 segment 填满剩余时间。
+3. 用 `steps_remaining` 的累计差量化整数 `n_step`。
+4. 用 `dt_remainder` 将未量化的小数步对应的时间传递到下一 segment。
+5. 以成熟实现相同的顺序计算 Timer ticks、AMASS level 和 DDA 初始/延续状态。
+
+保留边界：
+
+```text
+保留：G-code、G2/G3 离散、planner junction、机器参数、现有 ESP-IDF Timer/RMT 引脚驱动
+替换：motion_profile、trapezoid_execution_plan、trapezoid_segment_generator 与当前普通梯形 prep 语义
+```
+
+不应将 `ray2-main` 的 Arduino/ESP-IDF 旧外设 API 整块复制进来；目标是复刻其梯形 prep 与整数
+量化行为，保持当前已经可工作的 ESP-IDF 5.5 Timer/RMT 后端。
+
+### 实施纪律
+
+- 先写一个与 `st_prep_buffer()` 同语义的梯形 prep 后端，和现有自定义后端并存，但默认仍保持当前
+  可运行实现。
+- 对同一组 block 输入离线对比：segment 的 `n_step`、Timer tick、AMASS、`dt_remainder`、总时间和
+  总步数；不是只比较最终位置。
+- 仅在这些序列对齐后，切换普通梯形运行路径做实机对比。
+- 先用 `headline` 和 `longer_studio11.gc.gz` 验收声音，再清理旧 generator。没有明确声音改善不得
+  以“作业完成”宣布成功。
+- 禁止为了静音而降低 F、降低加速度、放宽圆弧误差或修改 junction deviation；这些只能作为独立对照，
+  不能成为修复。
+- 不在 `stepper_prep_fill()` 或 Timer ISR 加逐 block/逐 segment 串口日志。此前的 profile 日志已实证
+  会拖慢 producer 并制造 `segment-fault`。
+
+### 阶段一状态
+
+已完成并通过目标端验收：
+
+```text
+stepper/grbl_trapezoid_prep.{hpp,cpp}
+  纯 st_prep_buffer 语义参考后端
+
+stepper/grbl_trapezoid_prep_test.cpp
+  长直线、连续短 block、单步短 block 的整数步数闭环自测
+
+$PROFILE/SELFTEST
+  现有 generator 自测之外，额外报告 grbl_ref=(result=ok,cases=1/1/1)
+```
+
+验收记录：固件编译、烧录后在机器空闲时执行 `$PROFILE/SELFTEST`，原有 case 与 `grbl_ref` 均为
+`result=ok`，命令返回 `ok`。阶段一未改变实际雕刻路径。
+
+### 当前结论
+
+尖啸不是已观测到的 RMT 延迟、planner 断供或 junction 数值错误。最有证据的方向是：当前自定义的
+`profile -> 整数 segment -> AMASS/DDA` 量化节奏与成功项目不同。后续工作必须是**替换为经过
+`ray2-main` 验证的梯形 prep 语义**，而不是继续证明当前新算法“数学上可闭环”。
+
 ## 1. 目标与范围
 
 当前 `ray2-idf` 的梯形运动能完整执行长雕刻文件，且没有 `underflow`、坐标丢失或 watchdog；但同一文件相对 `ray2-main` 仍有持续的“呼呼呼”异响。经实测，减少 Timer ISR 的锁和诊断工作后，作业稳定性没有退化，但声音没有变化。

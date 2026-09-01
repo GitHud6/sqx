@@ -187,13 +187,14 @@ bool report_profile_self_test() {
     if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
         return write_text("error:profile-selftest-busy\r\n");
     }
-    char response[512] = {};
+    char response[768] = {};
     if (!stepper::trapezoid_segment_generator_format_self_test(response, sizeof(response))) {
         return write_text("error:profile-selftest-format\r\n");
     }
     const std::size_t length = std::strlen(response);
     if (!write_all(reinterpret_cast<const std::uint8_t*>(response), length)) return false;
-    return write_text(std::strstr(response, "result=ok") != nullptr
+    return write_text(std::strstr(response, "result=ok") != nullptr &&
+                          std::strstr(response, "grbl_ref=(result=ok") != nullptr
                           ? "ok\r\n"
                           : "error:profile-selftest-failed\r\n");
 }
