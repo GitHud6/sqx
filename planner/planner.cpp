@@ -83,6 +83,9 @@ struct TrapezoidFlowLogSnapshot {
     std::uint32_t segment_handoffs = 0;
     std::uint32_t block_phase_continuations = 0;
     std::uint32_t block_phase_initializations = 0;
+    std::uint32_t pulse_callbacks = 0;
+    std::uint32_t rmt_triggers[machine::kAxisCount] = {};
+    std::uint32_t direction_writes = 0;
 };
 
 TrapezoidFlowLogSnapshot s_trapezoid_flow_log = {};
@@ -686,6 +689,14 @@ void log_trapezoid_flow_periodically() {
         timer.block_phase_continuations - s_trapezoid_flow_log.block_phase_continuations;
     const std::uint32_t delta_phase_initializations =
         timer.block_phase_initializations - s_trapezoid_flow_log.block_phase_initializations;
+    const std::uint32_t delta_pulse_callbacks =
+        timer.pulse_callbacks - s_trapezoid_flow_log.pulse_callbacks;
+    const std::uint32_t delta_rmt_triggers_x =
+        timer.rmt_triggers[0] - s_trapezoid_flow_log.rmt_triggers[0];
+    const std::uint32_t delta_rmt_triggers_y =
+        timer.rmt_triggers[1] - s_trapezoid_flow_log.rmt_triggers[1];
+    const std::uint32_t delta_direction_writes =
+        timer.direction_writes - s_trapezoid_flow_log.direction_writes;
     const double average_interval_us = delta_scheduled_timer_events == 0
                                            ? 0.0
                                            : static_cast<double>(delta_scheduled_timer_ticks) /
@@ -701,6 +712,9 @@ void log_trapezoid_flow_periodically() {
         .segment_handoffs = timer.segment_handoffs,
         .block_phase_continuations = timer.block_phase_continuations,
         .block_phase_initializations = timer.block_phase_initializations,
+        .pulse_callbacks = timer.pulse_callbacks,
+        .rmt_triggers = {timer.rmt_triggers[0], timer.rmt_triggers[1]},
+        .direction_writes = timer.direction_writes,
     };
 
     portENTER_CRITICAL(&s_block_buffer_lock);
@@ -711,7 +725,7 @@ void log_trapezoid_flow_periodically() {
     ESP_LOGI(kLogTag,
              "TRAPEZOID-TRACE period=1s supply=(block=%u/%u,ctx=%u/%u,segment=%u/%u) "
              "phase=(handoff=+%u,continue=+%u,init=+%u) "
-             "timer=(events=+%u,interval_avg=%.2fus) "
+             "timer=(events=+%u,pulse=+%u,trigger=(+%u,+%u),dir=+%u,interval_avg=%.2fus) "
              "fault=(stop=+%llu,restart=+%llu,underflow=+%llu)",
              static_cast<unsigned>(queued_blocks), static_cast<unsigned>(frozen_blocks),
              static_cast<unsigned>(prep.context_used), static_cast<unsigned>(prep.context_capacity),
@@ -721,6 +735,10 @@ void log_trapezoid_flow_periodically() {
              static_cast<unsigned>(delta_phase_continuations),
              static_cast<unsigned>(delta_phase_initializations),
              static_cast<unsigned>(delta_scheduled_timer_events),
+             static_cast<unsigned>(delta_pulse_callbacks),
+             static_cast<unsigned>(delta_rmt_triggers_x),
+             static_cast<unsigned>(delta_rmt_triggers_y),
+             static_cast<unsigned>(delta_direction_writes),
              average_interval_us,
              static_cast<unsigned long long>(delta_stops),
              static_cast<unsigned long long>(delta_restarts),

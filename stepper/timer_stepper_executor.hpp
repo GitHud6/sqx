@@ -23,6 +23,9 @@ struct TimerStepperDiagnostics {
     std::uint32_t segment_handoffs = 0;
     std::uint32_t block_phase_continuations = 0;
     std::uint32_t block_phase_initializations = 0;
+    std::uint32_t pulse_callbacks = 0;
+    std::uint32_t rmt_triggers[machine::kAxisCount] = {};
+    std::uint32_t direction_writes = 0;
 };
 
 // Stage two initialization remains passive until the new-driver-compatible

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 
 #include "rmt_step_pulse_driver.hpp"
 #include "step_timer_driver.hpp"
@@ -27,6 +28,9 @@ std::atomic<std::uint32_t> s_scheduled_timer_events = 0;
 std::atomic<std::uint32_t> s_segment_handoffs = 0;
 std::atomic<std::uint32_t> s_block_phase_continuations = 0;
 std::atomic<std::uint32_t> s_block_phase_initializations = 0;
+std::atomic<std::uint32_t> s_pulse_callbacks = 0;
+std::atomic<std::uint32_t> s_rmt_triggers[machine::kAxisCount] = {};
+std::atomic<std::uint32_t> s_direction_writes = 0;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
@@ -47,9 +51,13 @@ struct MotionState {
     bool uses_block_phase = false;
     bool axis_stopped[machine::kAxisCount] = {};
     bool enabled[machine::kAxisCount] = {};
+    std::uint8_t prepared_step_mask = 0;
+    bool prepared_step_mask_valid = false;
 };
 
 MotionState s_motion = {};
+bool s_applied_direction[machine::kAxisCount] = {};
+bool s_applied_direction_valid = false;
 
 void IRAM_ATTR record_segment_schedule(const MotionState& motion) {
     s_scheduled_timer_ticks.fetch_add(
@@ -108,6 +116,64 @@ void initialize_block_phase(MotionState& motion) {
 
 void IRAM_ATTR trigger_pulse(const std::size_t axis) {
     driver::rmt_step_pulse_driver_trigger(axis);
+    s_rmt_triggers[axis].fetch_add(1, std::memory_order_relaxed);
+}
+
+void IRAM_ATTR prepare_next_step_mask(MotionState& motion) {
+    std::uint8_t step_mask = 0;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        motion.axis_error[axis] += motion.axis_increment[axis];
+        // Classic Grbl initializes a block DDA counter at half the major-axis
+        // count and steps on a strict overflow. Keep the legacy >= behavior
+        // for system/local segments, which start from zero instead.
+        const bool should_step = motion.uses_block_phase
+                                     ? motion.axis_error[axis] > motion.phase_denominator
+                                     : motion.axis_error[axis] >= motion.phase_denominator;
+        if (!should_step) continue;
+
+        if (!motion.axis_stopped[axis]) {
+            step_mask |= static_cast<std::uint8_t>(1U << axis);
+        }
+        motion.axis_error[axis] -= motion.phase_denominator;
+    }
+    motion.prepared_step_mask = step_mask;
+    motion.prepared_step_mask_valid = true;
+}
+
+void IRAM_ATTR emit_prepared_step_mask(MotionState& motion) {
+    if (!motion.prepared_step_mask_valid) return;
+
+    const std::uint8_t step_mask = motion.prepared_step_mask;
+    motion.prepared_step_mask = 0;
+    motion.prepared_step_mask_valid = false;
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if ((step_mask & static_cast<std::uint8_t>(1U << axis)) == 0 || motion.axis_stopped[axis]) {
+            continue;
+        }
+        const auto current_axis = static_cast<machine::Axis>(axis);
+        trigger_pulse(axis);
+        // System motion may be stopped by a limit ISR, so it must keep
+        // position current after every emitted pulse. Normal planner motion
+        // commits its already-emitted pulses at segment end.
+        if (motion.system_motion) {
+            stepper_record_executed_steps_from_isr(current_axis, 1);
+        }
+        ++motion.emitted_axis_steps[axis];
+    }
+}
+
+void IRAM_ATTR apply_segment_direction_from_isr(const StepSegment& segment) {
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        const bool positive_direction = segment.positive_direction[axis];
+        if (s_applied_direction_valid && s_applied_direction[axis] == positive_direction) {
+            continue;
+        }
+        stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
+                                       positive_direction ? Direction::Positive : Direction::Negative);
+        s_applied_direction[axis] = positive_direction;
+        s_direction_writes.fetch_add(1, std::memory_order_relaxed);
+    }
+    s_applied_direction_valid = true;
 }
 
 bool IRAM_ATTR timer_alarm_callback(void*) {
@@ -118,30 +184,10 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
         return false;
     }
 
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        s_motion.axis_error[axis] += s_motion.axis_increment[axis];
-        // Classic Grbl initializes a block DDA counter at half the major-axis
-        // count and steps on a strict overflow. Keep the legacy >= behavior
-        // for system/local segments, which start from zero instead.
-        const bool should_step = s_motion.uses_block_phase
-                                     ? s_motion.axis_error[axis] > s_motion.phase_denominator
-                                     : s_motion.axis_error[axis] >= s_motion.phase_denominator;
-        if (should_step) {
-            if (!s_motion.axis_stopped[axis]) {
-                const auto current_axis = static_cast<machine::Axis>(axis);
-                trigger_pulse(axis);
-                // System motion may be stopped by a limit ISR, so it must keep
-                // position current after every emitted pulse. Normal planner
-                // motion commits its already-emitted pulses at segment end.
-                if (s_motion.system_motion) {
-                    stepper_record_executed_steps_from_isr(current_axis, 1);
-                }
-                ++s_motion.emitted_axis_steps[axis];
-            }
-            s_motion.axis_error[axis] -= s_motion.phase_denominator;
-        }
-    }
-
+    // Emit the DDA decision prepared by the preceding timer tick before any
+    // segment bookkeeping for this tick can delay the RMT trigger.
+    emit_prepared_step_mask(s_motion);
+    s_pulse_callbacks.fetch_add(1, std::memory_order_relaxed);
     ++s_motion.completed_ticks;
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
@@ -193,10 +239,7 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             stepper_prep_record_hold_boundary_from_isr();
             stepper_segment_request_refill_from_isr(&task_woken);
         } else if (stepper_segment_consume(next)) {
-            for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-                stepper_set_direction_from_isr(static_cast<machine::Axis>(axis),
-                                                next.positive_direction[axis] ? Direction::Positive : Direction::Negative);
-            }
+            apply_segment_direction_from_isr(next);
             MotionState next_motion = motion_from_segment(next);
             s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
             if (completed_motion.uses_block_phase && next_motion.uses_block_phase &&
@@ -213,6 +256,7 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
                 }
             }
             s_motion = next_motion;
+            prepare_next_step_mask(s_motion);
             record_segment_schedule(s_motion);
             laser::laser_apply_segment_power_from_isr(next.laser_power_per_mille,
                                                        next.execution_id);
@@ -237,6 +281,8 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
                 stepper_completion_publish_from_isr(fault, &task_woken);
             }
         }
+    } else {
+        prepare_next_step_mask(s_motion);
     }
     portEXIT_CRITICAL_ISR(&s_motion_lock);
     return task_woken == pdTRUE;
@@ -278,6 +324,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
                  static_cast<long>(segment.axis_steps[1]), static_cast<long>(segment.major_steps));
         return ESP_ERR_NOT_SUPPORTED;
     }
+    s_applied_direction_valid = false;
     MotionState motion = motion_from_segment(segment);
     initialize_block_phase(motion);
     if (motion.uses_block_phase) {
@@ -298,9 +345,14 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
             return ESP_FAIL;
         }
         motion.enabled[axis] = true;
+        s_applied_direction[axis] = segment.positive_direction[axis];
+        s_direction_writes.fetch_add(1, std::memory_order_relaxed);
     }
     portENTER_CRITICAL(&s_motion_lock);
-    s_motion = motion; s_busy.store(true);
+    s_applied_direction_valid = true;
+    prepare_next_step_mask(motion);
+    s_motion = motion;
+    s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
     record_segment_schedule(motion);
     laser::laser_apply_segment_power_from_isr(segment.laser_power_per_mille,
@@ -344,7 +396,10 @@ void timer_stepper_executor_stop() {
     stepper_segment_clear_active_from_isr();
     MotionState motion = {};
     portENTER_CRITICAL(&s_motion_lock);
-    motion = s_motion; s_motion = {}; s_busy.store(false);
+    motion = s_motion;
+    s_motion = {};
+    s_applied_direction_valid = false;
+    s_busy.store(false);
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
     s_feed_hold_requested.store(false, std::memory_order_release);
@@ -357,6 +412,9 @@ void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
     laser::laser_disable_from_isr();
     stepper_segment_clear_active_from_isr();
     portENTER_CRITICAL_ISR(&s_motion_lock);
+    s_motion.prepared_step_mask = 0;
+    s_motion.prepared_step_mask_valid = false;
+    s_applied_direction_valid = false;
     s_busy.store(false, std::memory_order_relaxed);
     portEXIT_CRITICAL_ISR(&s_motion_lock);
 }
@@ -393,6 +451,11 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.segment_handoffs = s_segment_handoffs.load();
     diagnostics.block_phase_continuations = s_block_phase_continuations.load();
     diagnostics.block_phase_initializations = s_block_phase_initializations.load();
+    diagnostics.pulse_callbacks = s_pulse_callbacks.load();
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        diagnostics.rmt_triggers[axis] = s_rmt_triggers[axis].load();
+    }
+    diagnostics.direction_writes = s_direction_writes.load();
     return diagnostics;
 }
 
