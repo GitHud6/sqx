@@ -597,10 +597,11 @@ void fill_segment_ring_from_planner() {
         return;
     }
     while (stepper::stepper_segment_free_slots() != 0) {
-        if (stepper::stepper_prep_profile().active) {
-            stepper::stepper_prep_fill();
-            // A block remains prep-owned until its final segment has been
-            // physically emitted. Do not prebuild later blocks into the cache.
+        if (stepper::stepper_prep_fill() != 0) {
+            continue;
+        }
+        if (stepper::stepper_prep_profile().active &&
+            !stepper::stepper_prep_profile().generation_complete) {
             return;
         }
 

@@ -36,9 +36,14 @@ std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
 // Stage one intentionally allows only one occupied slot; later stages will
 // permit the generation side to reserve later slots before execution catches up.
 struct TrapezoidPrepContext {
+    std::atomic<bool> occupied = false;
     StepperProfile profile = {};
     planner::PlannerBlock source_block = {};
     planner::PlannerBlock original_source_block = {};
+    std::atomic<std::int32_t> executed_major_steps = 0;
+    std::array<std::atomic<std::int32_t>, machine::kAxisCount> executed_axis_steps = {};
+    std::atomic<std::uint32_t> current_speed_tenths_mm_per_min = 0;
+    std::atomic<bool> generation_complete = false;
 };
 
 std::array<TrapezoidPrepContext, kTrapezoidPrepContextCapacity> s_context_fifo = {};
@@ -77,29 +82,102 @@ planner::PlannerBlock& active_original_source_block() {
 }
 
 void reset_context_fifo() {
-    s_context_fifo = {};
+    for (auto& context : s_context_fifo) {
+        context.occupied.store(false, std::memory_order_relaxed);
+        context.profile = {};
+        context.source_block = {};
+        context.original_source_block = {};
+        context.executed_major_steps.store(0, std::memory_order_relaxed);
+        for (auto& steps : context.executed_axis_steps) {
+            steps.store(0, std::memory_order_relaxed);
+        }
+        context.current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+        context.generation_complete.store(false, std::memory_order_relaxed);
+    }
     s_context_head = 0;
     s_context_tail = 0;
     s_context_count.store(0, std::memory_order_relaxed);
 }
 
-bool reserve_context(const planner::PlannerBlock& block) {
-    // Stage one preserves the prior single-profile runtime behavior.
-    if (s_context_count.load(std::memory_order_acquire) != 0) return false;
+TrapezoidPrepContext* reserve_context(const planner::PlannerBlock& block) {
+    if (s_context_count.load(std::memory_order_acquire) == kTrapezoidPrepContextCapacity) {
+        return nullptr;
+    }
     TrapezoidPrepContext& context = s_context_fifo[s_context_tail];
-    context = {};
+    context.profile = {};
     context.source_block = block;
     context.original_source_block = block;
-    s_context_count.store(1, std::memory_order_release);
+    context.executed_major_steps.store(0, std::memory_order_relaxed);
+    for (auto& steps : context.executed_axis_steps) {
+        steps.store(0, std::memory_order_relaxed);
+    }
+    context.current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+    context.generation_complete.store(false, std::memory_order_relaxed);
+    context.occupied.store(true, std::memory_order_release);
+    s_context_count.fetch_add(1, std::memory_order_release);
     s_context_tail = (s_context_tail + 1) % kTrapezoidPrepContextCapacity;
-    return true;
+    return &context;
 }
 
 void release_active_context() {
     if (s_context_count.load(std::memory_order_acquire) == 0) return;
-    active_context() = {};
+    TrapezoidPrepContext& context = active_context();
+    context.occupied.store(false, std::memory_order_release);
+    context.profile = {};
+    context.source_block = {};
+    context.original_source_block = {};
     s_context_head = (s_context_head + 1) % kTrapezoidPrepContextCapacity;
-    s_context_count.store(0, std::memory_order_release);
+    s_context_count.fetch_sub(1, std::memory_order_release);
+}
+
+void sync_active_context_state() {
+    if (s_context_count.load(std::memory_order_acquire) == 0) {
+        s_context_execution_id.store(0, std::memory_order_release);
+        s_context_total_major_steps.store(0, std::memory_order_relaxed);
+        s_context_executed_major_steps.store(0, std::memory_order_relaxed);
+        s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
+        s_context_generation_complete.store(false, std::memory_order_release);
+        return;
+    }
+    const TrapezoidPrepContext& context = active_context();
+    s_context_execution_id.store(context.profile.execution_id, std::memory_order_release);
+    s_context_total_major_steps.store(context.profile.total_major_steps, std::memory_order_relaxed);
+    s_context_executed_major_steps.store(
+        context.executed_major_steps.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        s_context_executed_axis_steps[axis].store(
+            context.executed_axis_steps[axis].load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
+    }
+    s_context_current_speed_tenths_mm_per_min.store(
+        context.current_speed_tenths_mm_per_min.load(std::memory_order_relaxed),
+        std::memory_order_relaxed);
+    s_context_generation_complete.store(
+        context.generation_complete.load(std::memory_order_relaxed), std::memory_order_release);
+}
+
+TrapezoidPrepContext* generation_context() {
+    const std::size_t count = s_context_count.load(std::memory_order_acquire);
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        TrapezoidPrepContext& context =
+            s_context_fifo[(s_context_head + offset) % kTrapezoidPrepContextCapacity];
+        if (context.occupied.load(std::memory_order_acquire) && context.profile.active &&
+            !context.generation_complete.load(std::memory_order_acquire)) {
+            return &context;
+        }
+    }
+    return nullptr;
+}
+
+TrapezoidPrepContext* IRAM_ATTR context_for_execution_id(const std::uint64_t execution_id) {
+    if (execution_id == 0) return nullptr;
+    for (auto& context : s_context_fifo) {
+        if (context.occupied.load(std::memory_order_acquire) &&
+            context.profile.execution_id == execution_id) {
+            return &context;
+        }
+    }
+    return nullptr;
 }
 
 std::size_t segment_count_snapshot() {
@@ -152,8 +230,8 @@ bool apply_trapezoid_profile(const MotionProfileInput& input, StepperProfile& pr
     return true;
 }
 
-StepSegmentPhase phase_at_distance(const double distance_mm) {
-    switch (motion_profile_phase_at_distance(active_profile().motion_profile, distance_mm)) {
+StepSegmentPhase phase_at_distance(const StepperProfile& profile, const double distance_mm) {
+    switch (motion_profile_phase_at_distance(profile.motion_profile, distance_mm)) {
         case MotionProfilePhase::Accelerate: return StepSegmentPhase::Accelerate;
         case MotionProfilePhase::Cruise: return StepSegmentPhase::Cruise;
         case MotionProfilePhase::Decelerate: return StepSegmentPhase::Decelerate;
@@ -161,9 +239,10 @@ StepSegmentPhase phase_at_distance(const double distance_mm) {
     return StepSegmentPhase::Cruise;
 }
 
-StepSegment build_segment(const std::uint32_t segment_index) {
-    const StepperProfile& profile = active_profile();
-    const planner::PlannerBlock& source_block = active_source_block();
+StepSegment build_segment(const TrapezoidPrepContext& context,
+                          const std::uint32_t segment_index) {
+    const StepperProfile& profile = context.profile;
+    const planner::PlannerBlock& source_block = context.source_block;
     const std::int32_t total_steps = profile.total_major_steps;
     const std::int32_t first_step = static_cast<std::int32_t>(
         (static_cast<std::int64_t>(total_steps) * segment_index) / profile.total_segments);
@@ -204,7 +283,7 @@ StepSegment build_segment(const std::uint32_t segment_index) {
         std::lround(segment.laser_power * 1000.0 / max_power), 0L, 1000L));
     segment.motion_mode = source_block.request.motion_mode;
     segment.spindle_mode = source_block.request.spindle_mode;
-    segment.phase = phase_at_distance(start_distance);
+    segment.phase = phase_at_distance(profile, start_distance);
     const bool finishes_profile = segment_index + 1 == profile.total_segments;
     segment.completes_block = finishes_profile && profile.completes_source_block;
     segment.feed_hold = profile.feed_hold;
@@ -282,9 +361,11 @@ void stepper_prep_reset() {
 }
 
 bool stepper_prep_start_block(const planner::PlannerBlock& block) {
-    if (!block_is_valid(block) || !reserve_context(block)) {
+    if (!block_is_valid(block)) {
         return false;
     }
+    TrapezoidPrepContext* context = reserve_context(block);
+    if (context == nullptr) return false;
 
     const double entry_speed = std::sqrt(std::max(0.0, block.entry_speed_sqr));
     const double exit_speed = std::sqrt(std::max(0.0, block.exit_speed_sqr));
@@ -296,13 +377,14 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
                                       .exit_speed_mm_per_min = exit_speed,
                                       .acceleration_mm_per_min2 = block.acceleration_mm_per_sec2 * 60.0 * 60.0,
                                   }, profile)) {
-        release_active_context();
+        context->occupied.store(false, std::memory_order_release);
+        s_context_count.fetch_sub(1, std::memory_order_release);
         return false;
     }
     const std::uint32_t target_segments = static_cast<std::uint32_t>(std::max(
         1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)));
 
-    active_profile() = {
+    context->profile = {
         .execution_id = block.execution_id,
         .total_major_steps = block.step_event_count,
         .total_segments = std::min(target_segments, static_cast<std::uint32_t>(block.step_event_count)),
@@ -321,39 +403,35 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         .ends_feed_hold = false,
         .completes_source_block = true,
     };
-    s_context_total_major_steps.store(block.step_event_count, std::memory_order_relaxed);
-    s_context_executed_major_steps.store(0, std::memory_order_relaxed);
-    for (auto& steps : s_context_executed_axis_steps) {
-        steps.store(0, std::memory_order_relaxed);
-    }
-    s_context_current_speed_tenths_mm_per_min.store(
+    context->current_speed_tenths_mm_per_min.store(
         speed_to_tenths_mm_per_min(entry_speed), std::memory_order_relaxed);
-    s_context_generation_complete.store(false, std::memory_order_relaxed);
-    s_context_hold_boundary.store(false, std::memory_order_relaxed);
-    s_context_feed_hold_active.store(false, std::memory_order_relaxed);
-    s_context_hold_complete.store(false, std::memory_order_relaxed);
-    s_context_execution_id.store(block.execution_id, std::memory_order_release);
+    if (context == &active_context()) {
+        s_context_total_major_steps.store(block.step_event_count, std::memory_order_relaxed);
+        s_context_executed_major_steps.store(0, std::memory_order_relaxed);
+        for (auto& steps : s_context_executed_axis_steps) {
+            steps.store(0, std::memory_order_relaxed);
+        }
+        s_context_current_speed_tenths_mm_per_min.store(
+            speed_to_tenths_mm_per_min(entry_speed), std::memory_order_relaxed);
+        s_context_generation_complete.store(false, std::memory_order_relaxed);
+        s_context_execution_id.store(block.execution_id, std::memory_order_release);
+    }
     return true;
 }
 
 void stepper_prep_cancel_block() {
     release_active_context();
-    s_context_execution_id.store(0, std::memory_order_release);
-    s_context_total_major_steps.store(0, std::memory_order_relaxed);
-    s_context_executed_major_steps.store(0, std::memory_order_relaxed);
-    for (auto& steps : s_context_executed_axis_steps) {
-        steps.store(0, std::memory_order_relaxed);
-    }
-    s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
-    s_context_generation_complete.store(false, std::memory_order_relaxed);
+    sync_active_context_state();
     s_context_hold_boundary.store(false, std::memory_order_relaxed);
 }
 
 std::size_t stepper_prep_fill() {
     std::size_t generated = 0;
-    StepperProfile& profile = active_profile();
+    TrapezoidPrepContext* context = generation_context();
+    if (context == nullptr) return 0;
+    StepperProfile& profile = context->profile;
     while (profile.active && profile.next_segment_index < profile.total_segments) {
-        const StepSegment segment = build_segment(profile.next_segment_index);
+        const StepSegment segment = build_segment(*context, profile.next_segment_index);
         if (!stepper_segment_publish(segment)) {
             break;
         }
@@ -363,23 +441,27 @@ std::size_t stepper_prep_fill() {
     if (profile.next_segment_index == profile.total_segments) {
         // The final segment being published does not mean it has executed.
         profile.generation_complete = true;
-        s_context_generation_complete.store(true, std::memory_order_release);
+        context->generation_complete.store(true, std::memory_order_release);
+        if (context == &active_context()) {
+            s_context_generation_complete.store(true, std::memory_order_release);
+        }
     }
     return generated;
 }
 
 bool stepper_prep_complete_block(const std::uint64_t execution_id) {
-    const StepperProfile& profile = active_profile();
-    if (!profile.active || profile.execution_id != execution_id ||
-        !profile.generation_complete ||
-        s_context_executed_major_steps.load(std::memory_order_acquire) !=
-            s_context_total_major_steps.load(std::memory_order_acquire)) {
+    TrapezoidPrepContext* context = context_for_execution_id(execution_id);
+    if (context == nullptr || context != &active_context() || !context->profile.active ||
+        !context->generation_complete.load(std::memory_order_acquire) ||
+        context->executed_major_steps.load(std::memory_order_acquire) !=
+            context->profile.total_major_steps) {
         return false;
     }
+    const StepperProfile& profile = context->profile;
     const bool hold_ended = profile.feed_hold && profile.ends_feed_hold;
     const bool continue_hold = profile.feed_hold && !profile.ends_feed_hold;
     const std::uint32_t carry_speed =
-        s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
+        context->current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
     stepper_prep_cancel_block();
     if (hold_ended) {
         s_context_hold_complete.store(true, std::memory_order_release);
@@ -541,16 +623,14 @@ bool stepper_prep_resume_from_hold() {
 }
 
 void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment) {
-    if (segment.execution_id == 0 ||
-        s_context_execution_id.load(std::memory_order_relaxed) != segment.execution_id) {
-        return;
-    }
-    s_context_executed_major_steps.fetch_add(segment.major_steps, std::memory_order_relaxed);
+    TrapezoidPrepContext* context = context_for_execution_id(segment.execution_id);
+    if (context == nullptr) return;
+    context->executed_major_steps.fetch_add(segment.major_steps, std::memory_order_relaxed);
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        s_context_executed_axis_steps[axis].fetch_add(segment.axis_steps[axis],
-                                                       std::memory_order_relaxed);
+        context->executed_axis_steps[axis].fetch_add(segment.axis_steps[axis],
+                                                      std::memory_order_relaxed);
     }
-    s_context_current_speed_tenths_mm_per_min.store(
+    context->current_speed_tenths_mm_per_min.store(
         segment.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
 }
 
