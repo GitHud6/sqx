@@ -1,4 +1,4 @@
-#include "trapezoid_segment_generator.hpp"
+#include "trapezoid_execution_plan.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,13 +9,18 @@ namespace {
 
 bool run_case(const MotionProfileInput& input, const std::uint32_t total_steps,
               TrapezoidGeneratorTestCase& result) {
-    MotionProfile profile = {};
     result = {};
     result.expected_steps = total_steps;
-    if (!motion_profile_build_trapezoid(input, profile)) return false;
-
-    TrapezoidSegmentGenerator generator = {};
-    if (!trapezoid_segment_generator_init(generator, profile, total_steps, 1000, 20)) return false;
+    TrapezoidExecutionPlan plan = {};
+    if (!trapezoid_execution_plan_build({
+                                            .execution_id = 1,
+                                            .total_major_steps = total_steps,
+                                            .profile_input = input,
+                                            .segment_duration_us = 1000,
+                                            .timer_ticks_per_us = 20,
+                                        }, plan)) {
+        return false;
+    }
 
     std::uint32_t emitted_steps = 0;
     double previous_time = 0.0;
@@ -23,32 +28,32 @@ bool run_case(const MotionProfileInput& input, const std::uint32_t total_steps,
     double maximum_remainder = 0.0;
     double emitted_pulse_time_us = 0.0;
     TrapezoidTimeSlice slice = {};
-    while (trapezoid_segment_generator_next(generator, slice)) {
+    while (trapezoid_execution_plan_next(plan, slice)) {
         if (slice.major_steps == 0 || slice.step_interval_ticks == 0 ||
             slice.end_time_us <= previous_time || slice.end_distance_mm < previous_distance ||
-            !std::isfinite(generator.dt_remainder_us)) {
+            !std::isfinite(plan.generator.dt_remainder_us)) {
             return false;
         }
         emitted_steps += slice.major_steps;
         ++result.slice_count;
         emitted_pulse_time_us += static_cast<double>(slice.step_interval_ticks) *
                                  slice.major_steps / 20.0;
-        maximum_remainder = std::max(maximum_remainder, generator.dt_remainder_us);
+        maximum_remainder = std::max(maximum_remainder, plan.generator.dt_remainder_us);
         previous_time = slice.end_time_us;
         previous_distance = slice.end_distance_mm;
     }
     result.emitted_steps = emitted_steps;
     result.final_time_us = previous_time;
-    result.expected_time_us = profile.total_time_us;
+    result.expected_time_us = plan.profile.total_time_us;
     result.emitted_pulse_time_us = emitted_pulse_time_us;
-    result.pulse_time_error_us = emitted_pulse_time_us - profile.total_time_us;
+    result.pulse_time_error_us = emitted_pulse_time_us - plan.profile.total_time_us;
     result.maximum_remainder_us = maximum_remainder;
     const double tick_rounding_bound_us =
         static_cast<double>(result.slice_count) / 20.0 + 0.001;
-    result.passed = generator.complete && emitted_steps == total_steps &&
-                    std::abs(previous_time - profile.total_time_us) < 0.001 &&
-                    std::abs(previous_distance - profile.length_mm) < 0.000001 &&
-                    generator.dt_remainder_us == 0.0 &&
+    result.passed = trapezoid_execution_plan_complete(plan) && emitted_steps == total_steps &&
+                    std::abs(previous_time - plan.profile.total_time_us) < 0.001 &&
+                    std::abs(previous_distance - plan.profile.length_mm) < 0.000001 &&
+                    plan.generator.dt_remainder_us == 0.0 &&
                     result.pulse_time_error_us >= 0.0 &&
                     result.pulse_time_error_us <= tick_rounding_bound_us;
     return result.passed;

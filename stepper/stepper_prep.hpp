@@ -9,7 +9,7 @@
 #include "freertos/task.h"
 
 #include "planner.hpp"
-#include "motion_profile.hpp"
+#include "trapezoid_execution_plan.hpp"
 
 namespace ray2::stepper {
 
@@ -92,18 +92,8 @@ struct SegmentExecutionDiagnostics {
 };
 
 struct StepperProfile {
-    std::uint64_t execution_id = 0;
-    std::int32_t total_major_steps = 0;
-    std::uint32_t total_segments = 0;
     std::uint32_t next_segment_index = 0;
-    double length_mm = 0.0;
-    double entry_speed_mm_per_min = 0.0;
-    double nominal_speed_mm_per_min = 0.0;
-    double exit_speed_mm_per_min = 0.0;
-    double acceleration_mm_per_min2 = 0.0;
-    double accelerate_distance_mm = 0.0;
-    double decelerate_after_mm = 0.0;
-    MotionProfile motion_profile = {};
+    TrapezoidExecutionPlan execution_plan = {};
     bool active = false;
     bool generation_complete = false;
     bool feed_hold = false;

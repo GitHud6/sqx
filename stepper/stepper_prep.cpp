@@ -142,8 +142,9 @@ void sync_active_context_state() {
         return;
     }
     const TrapezoidPrepContext& context = active_context();
-    s_context_execution_id.store(context.profile.execution_id, std::memory_order_release);
-    s_context_total_major_steps.store(context.profile.total_major_steps, std::memory_order_relaxed);
+    s_context_execution_id.store(context.profile.execution_plan.execution_id, std::memory_order_release);
+    s_context_total_major_steps.store(context.profile.execution_plan.total_major_steps,
+                                      std::memory_order_relaxed);
     s_context_executed_major_steps.store(
         context.executed_major_steps.load(std::memory_order_relaxed), std::memory_order_relaxed);
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
@@ -175,7 +176,7 @@ TrapezoidPrepContext* IRAM_ATTR context_for_execution_id(const std::uint64_t exe
     if (execution_id == 0) return nullptr;
     for (auto& context : s_context_fifo) {
         if (context.occupied.load(std::memory_order_acquire) &&
-            context.profile.execution_id == execution_id) {
+            context.profile.execution_plan.execution_id == execution_id) {
             return &context;
         }
     }
@@ -218,22 +219,8 @@ bool block_is_valid(const planner::PlannerBlock& block) {
            block.acceleration_mm_per_sec2 > 0.0;
 }
 
-bool apply_trapezoid_profile(const MotionProfileInput& input, StepperProfile& profile) {
-    MotionProfile motion_profile = {};
-    if (!motion_profile_build_trapezoid(input, motion_profile)) return false;
-    profile.motion_profile = motion_profile;
-    profile.length_mm = motion_profile.length_mm;
-    profile.entry_speed_mm_per_min = motion_profile.entry_speed_mm_per_min;
-    profile.nominal_speed_mm_per_min = motion_profile.nominal_speed_mm_per_min;
-    profile.exit_speed_mm_per_min = motion_profile.exit_speed_mm_per_min;
-    profile.acceleration_mm_per_min2 = motion_profile.acceleration_mm_per_min2;
-    profile.accelerate_distance_mm = motion_profile.accelerate_distance_mm;
-    profile.decelerate_after_mm = motion_profile.decelerate_after_mm;
-    return true;
-}
-
-StepSegmentPhase phase_at_distance(const StepperProfile& profile, const double distance_mm) {
-    switch (motion_profile_phase_at_distance(profile.motion_profile, distance_mm)) {
+StepSegmentPhase phase_from_profile_phase(const MotionProfilePhase phase) {
+    switch (phase) {
         case MotionProfilePhase::Accelerate: return StepSegmentPhase::Accelerate;
         case MotionProfilePhase::Cruise: return StepSegmentPhase::Cruise;
         case MotionProfilePhase::Decelerate: return StepSegmentPhase::Decelerate;
@@ -242,44 +229,37 @@ StepSegmentPhase phase_at_distance(const StepperProfile& profile, const double d
 }
 
 StepSegment build_segment(const TrapezoidPrepContext& context,
-                          const std::uint32_t segment_index) {
+                          const TrapezoidTimeSlice& slice) {
     const StepperProfile& profile = context.profile;
     const planner::PlannerBlock& source_block = context.source_block;
-    const std::int32_t total_steps = profile.total_major_steps;
-    const std::int32_t first_step = static_cast<std::int32_t>(
-        (static_cast<std::int64_t>(total_steps) * segment_index) / profile.total_segments);
+    const std::int32_t total_steps =
+        static_cast<std::int32_t>(profile.execution_plan.total_major_steps);
     const std::int32_t final_step = static_cast<std::int32_t>(
-        (static_cast<std::int64_t>(total_steps) * (segment_index + 1)) / profile.total_segments);
-    const double start_distance = profile.length_mm * first_step / total_steps;
-    const double final_distance = profile.length_mm * final_step / total_steps;
-    const double start_speed = motion_profile_speed_at_distance(profile.motion_profile, start_distance);
-    const double final_speed = motion_profile_speed_at_distance(profile.motion_profile, final_distance);
-    const double duration_us = motion_profile_time_at_distance_us(profile.motion_profile, final_distance) -
-                               motion_profile_time_at_distance_us(profile.motion_profile, start_distance);
+        profile.execution_plan.generator.emitted_major_steps);
+    const std::int32_t first_step = final_step - static_cast<std::int32_t>(slice.major_steps);
 
     StepSegment segment = {};
-    segment.execution_id = profile.execution_id;
-    segment.major_steps = final_step - first_step;
+    segment.execution_id = profile.execution_plan.execution_id;
+    segment.major_steps = static_cast<std::int32_t>(slice.major_steps);
     segment.block_major_steps = total_steps;
-    segment.duration_us = static_cast<std::uint32_t>(std::max(1.0, std::round(duration_us)));
+    segment.duration_us = std::max(std::uint32_t{1}, slice.duration_us);
     segment.step_interval_ticks = std::max(
         kMinimumStepIntervalTicks,
-        static_cast<std::uint32_t>(std::max(
-            1.0, std::round(duration_us * kStepTimerTicksPerMicrosecond / segment.major_steps))));
+        slice.step_interval_ticks);
     segment.step_interval_us = static_cast<std::uint32_t>(std::max(
         1.0, std::round(static_cast<double>(segment.step_interval_ticks) /
                             kStepTimerTicksPerMicrosecond)));
-    segment.start_speed_mm_per_min = start_speed;
-    segment.end_speed_mm_per_min = final_speed;
-    segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(start_speed);
-    segment.end_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(final_speed);
+    segment.start_speed_mm_per_min = slice.start_speed_mm_per_min;
+    segment.end_speed_mm_per_min = slice.end_speed_mm_per_min;
+    segment.start_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(slice.start_speed_mm_per_min);
+    segment.end_speed_tenths_mm_per_min = speed_to_tenths_mm_per_min(slice.end_speed_mm_per_min);
     const bool laser_enabled =
         source_block.request.motion_mode == motion::MotionType::Linear &&
         source_block.request.spindle_mode != motion::SpindleMode::Off;
     if (laser_enabled &&
         source_block.request.spindle_mode == motion::SpindleMode::CounterClockwise) {
-        const double actual_speed =
-            (final_distance - start_distance) * 60000000.0 / std::max(1.0, duration_us);
+        const double actual_speed = (slice.end_distance_mm - slice.start_distance_mm) * 60000000.0 /
+                                    std::max(std::uint32_t{1}, slice.duration_us);
         segment.laser_power = source_block.request.spindle_power * std::clamp(
             actual_speed / source_block.programmed_rate_mm_per_min, 0.0, 1.0);
     } else if (laser_enabled) {
@@ -290,8 +270,8 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
         std::lround(segment.laser_power * 1000.0 / max_power), 0L, 1000L));
     segment.motion_mode = source_block.request.motion_mode;
     segment.spindle_mode = source_block.request.spindle_mode;
-    segment.phase = phase_at_distance(profile, start_distance);
-    const bool finishes_profile = segment_index + 1 == profile.total_segments;
+    segment.phase = phase_from_profile_phase(slice.phase);
+    const bool finishes_profile = slice.completes_profile;
     segment.completes_block = finishes_profile && profile.completes_source_block;
     segment.feed_hold = profile.feed_hold;
     segment.ends_feed_hold = profile.ends_feed_hold && finishes_profile;
@@ -383,34 +363,28 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
 
     const double entry_speed = std::sqrt(std::max(0.0, block.entry_speed_sqr));
     const double exit_speed = std::sqrt(std::max(0.0, block.exit_speed_sqr));
-    StepperProfile profile = {};
-    if (!apply_trapezoid_profile({
-                                      .length_mm = block.millimeters,
-                                      .entry_speed_mm_per_min = entry_speed,
-                                      .nominal_speed_mm_per_min = block.programmed_rate_mm_per_min,
-                                      .exit_speed_mm_per_min = exit_speed,
-                                      .acceleration_mm_per_min2 = block.acceleration_mm_per_sec2 * 60.0 * 60.0,
-                                  }, profile)) {
+    TrapezoidExecutionPlan execution_plan = {};
+    if (!trapezoid_execution_plan_build({
+                                            .execution_id = block.execution_id,
+                                            .total_major_steps = static_cast<std::uint32_t>(block.step_event_count),
+                                            .profile_input = {
+                                                .length_mm = block.millimeters,
+                                                .entry_speed_mm_per_min = entry_speed,
+                                                .nominal_speed_mm_per_min = block.programmed_rate_mm_per_min,
+                                                .exit_speed_mm_per_min = exit_speed,
+                                                .acceleration_mm_per_min2 =
+                                                    block.acceleration_mm_per_sec2 * 60.0 * 60.0,
+                                            },
+                                            .segment_duration_us = kStepSegmentTargetDurationUs,
+                                            .timer_ticks_per_us = kStepTimerTicksPerMicrosecond,
+                                        }, execution_plan)) {
         context->occupied.store(false, std::memory_order_release);
         s_context_count.fetch_sub(1, std::memory_order_release);
         return false;
     }
-    const std::uint32_t target_segments = static_cast<std::uint32_t>(std::max(
-        1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)));
-
     context->profile = {
-        .execution_id = block.execution_id,
-        .total_major_steps = block.step_event_count,
-        .total_segments = std::min(target_segments, static_cast<std::uint32_t>(block.step_event_count)),
         .next_segment_index = 0,
-        .length_mm = profile.length_mm,
-        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
-        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
-        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
-        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
-        .accelerate_distance_mm = profile.accelerate_distance_mm,
-        .decelerate_after_mm = profile.decelerate_after_mm,
-        .motion_profile = profile.motion_profile,
+        .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
         .feed_hold = false,
@@ -444,15 +418,18 @@ std::size_t stepper_prep_fill() {
     TrapezoidPrepContext* context = generation_context();
     if (context == nullptr) return 0;
     StepperProfile& profile = context->profile;
-    while (profile.active && profile.next_segment_index < profile.total_segments) {
-        const StepSegment segment = build_segment(*context, profile.next_segment_index);
+    while (profile.active && !trapezoid_execution_plan_complete(profile.execution_plan)) {
+        if (stepper_segment_free_slots() == 0) break;
+        TrapezoidTimeSlice slice = {};
+        if (!trapezoid_execution_plan_next(profile.execution_plan, slice)) break;
+        const StepSegment segment = build_segment(*context, slice);
         if (!stepper_segment_publish(segment)) {
             break;
         }
         ++profile.next_segment_index;
         ++generated;
     }
-    if (profile.next_segment_index == profile.total_segments) {
+    if (trapezoid_execution_plan_complete(profile.execution_plan)) {
         // The final segment being published does not mean it has executed.
         profile.generation_complete = true;
         context->generation_complete.store(true, std::memory_order_release);
@@ -468,7 +445,7 @@ bool stepper_prep_complete_block(const std::uint64_t execution_id) {
     if (context == nullptr || context != &active_context() || !context->profile.active ||
         !context->generation_complete.load(std::memory_order_acquire) ||
         context->executed_major_steps.load(std::memory_order_acquire) !=
-            context->profile.total_major_steps) {
+            static_cast<std::int32_t>(context->profile.execution_plan.total_major_steps)) {
         return false;
     }
     const StepperProfile& profile = context->profile;
@@ -499,8 +476,9 @@ bool stepper_prep_begin_feed_hold() {
         s_context_hold_complete.store(true, std::memory_order_release);
         return false;
     }
-    const double remaining_mm = active.length_mm * remaining_steps / active.total_major_steps;
-    const double acceleration = active.acceleration_mm_per_min2;
+    const double remaining_mm = active.execution_plan.profile.length_mm * remaining_steps /
+                                active.execution_plan.total_major_steps;
+    const double acceleration = active.execution_plan.profile.acceleration_mm_per_min2;
     const double stop_mm = speed * speed / (2.0 * acceleration);
     const bool stops_here = stop_mm <= remaining_mm;
     const double travel_mm = stops_here ? stop_mm : remaining_mm;
@@ -521,31 +499,25 @@ bool stepper_prep_begin_feed_hold() {
     active_source_block() = residual;
     const double exit_speed = stops_here ? 0.0 :
         std::sqrt(std::max(0.0, speed * speed - 2.0 * acceleration * residual.millimeters));
-    StepperProfile profile = {};
-    if (!apply_trapezoid_profile({
-                                      .length_mm = residual.millimeters,
-                                      .entry_speed_mm_per_min = speed,
-                                      .nominal_speed_mm_per_min = speed,
-                                      .exit_speed_mm_per_min = exit_speed,
-                                      .acceleration_mm_per_min2 = acceleration,
-                                  }, profile)) {
+    TrapezoidExecutionPlan execution_plan = {};
+    if (!trapezoid_execution_plan_build({
+                                            .execution_id = residual.execution_id,
+                                            .total_major_steps = static_cast<std::uint32_t>(travel_steps),
+                                            .profile_input = {
+                                                .length_mm = residual.millimeters,
+                                                .entry_speed_mm_per_min = speed,
+                                                .nominal_speed_mm_per_min = speed,
+                                                .exit_speed_mm_per_min = exit_speed,
+                                                .acceleration_mm_per_min2 = acceleration,
+                                            },
+                                            .segment_duration_us = kStepSegmentTargetDurationUs,
+                                            .timer_ticks_per_us = kStepTimerTicksPerMicrosecond,
+                                        }, execution_plan)) {
         return false;
     }
     active_profile() = {
-        .execution_id = residual.execution_id,
-        .total_major_steps = travel_steps,
-        .total_segments = std::min<std::uint32_t>(
-            static_cast<std::uint32_t>(travel_steps),
-            static_cast<std::uint32_t>(std::max(1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)))),
         .next_segment_index = 0,
-        .length_mm = profile.length_mm,
-        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
-        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
-        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
-        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
-        .accelerate_distance_mm = profile.accelerate_distance_mm,
-        .decelerate_after_mm = profile.decelerate_after_mm,
-        .motion_profile = profile.motion_profile,
+        .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
         .feed_hold = true,
@@ -596,32 +568,27 @@ bool stepper_prep_resume_from_hold() {
                            active_original_source_block().step_event_count;
     const double entry_speed = 0.0;
     const double exit_speed = std::sqrt(std::max(0.0, residual.exit_speed_sqr));
-    StepperProfile profile = {};
-    if (!apply_trapezoid_profile({
-                                      .length_mm = residual.millimeters,
-                                      .entry_speed_mm_per_min = entry_speed,
-                                      .nominal_speed_mm_per_min = residual.programmed_rate_mm_per_min,
-                                      .exit_speed_mm_per_min = exit_speed,
-                                      .acceleration_mm_per_min2 = residual.acceleration_mm_per_sec2 * 60.0 * 60.0,
-                                  }, profile)) {
+    TrapezoidExecutionPlan execution_plan = {};
+    if (!trapezoid_execution_plan_build({
+                                            .execution_id = residual.execution_id,
+                                            .total_major_steps = static_cast<std::uint32_t>(remaining_steps),
+                                            .profile_input = {
+                                                .length_mm = residual.millimeters,
+                                                .entry_speed_mm_per_min = entry_speed,
+                                                .nominal_speed_mm_per_min = residual.programmed_rate_mm_per_min,
+                                                .exit_speed_mm_per_min = exit_speed,
+                                                .acceleration_mm_per_min2 =
+                                                    residual.acceleration_mm_per_sec2 * 60.0 * 60.0,
+                                            },
+                                            .segment_duration_us = kStepSegmentTargetDurationUs,
+                                            .timer_ticks_per_us = kStepTimerTicksPerMicrosecond,
+                                        }, execution_plan)) {
         return false;
     }
     active_source_block() = residual;
     active_profile() = {
-        .execution_id = residual.execution_id,
-        .total_major_steps = remaining_steps,
-        .total_segments = std::min<std::uint32_t>(
-            static_cast<std::uint32_t>(remaining_steps),
-            static_cast<std::uint32_t>(std::max(1.0, std::ceil(profile.motion_profile.total_time_us / kStepSegmentTargetDurationUs)))),
         .next_segment_index = 0,
-        .length_mm = profile.length_mm,
-        .entry_speed_mm_per_min = profile.entry_speed_mm_per_min,
-        .nominal_speed_mm_per_min = profile.nominal_speed_mm_per_min,
-        .exit_speed_mm_per_min = profile.exit_speed_mm_per_min,
-        .acceleration_mm_per_min2 = profile.acceleration_mm_per_min2,
-        .accelerate_distance_mm = profile.accelerate_distance_mm,
-        .decelerate_after_mm = profile.decelerate_after_mm,
-        .motion_profile = profile.motion_profile,
+        .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
         .feed_hold = false,
@@ -829,10 +796,11 @@ StepperPrepDiagnostics stepper_prep_diagnostics() {
     }
     diagnostics.current_speed_tenths_mm_per_min =
         s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
-    diagnostics.profile_mode = active_profile().motion_profile.mode;
+    diagnostics.profile_mode = active_profile().execution_plan.profile.mode;
     diagnostics.context_used = s_context_count.load(std::memory_order_acquire);
     if (diagnostics.context_used != 0) {
-        diagnostics.generation_context_execution_id = active_profile().execution_id;
+        diagnostics.generation_context_execution_id =
+            active_profile().execution_plan.execution_id;
         diagnostics.completion_context_execution_id = diagnostics.generation_complete
                                                           ? diagnostics.generation_context_execution_id
                                                           : 0;
