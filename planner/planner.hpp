@@ -22,6 +22,12 @@ enum class MotionBlockType {
     Dwell,
 };
 
+enum class PlannerBlockState : std::uint8_t {
+    Executing,
+    Frozen,
+    Lookahead,
+};
+
 // This is the planner-owned motion representation consumed by the stepper executor.
 struct PlannerBlock {
     MotionBlockType type = MotionBlockType::Motion;
@@ -38,6 +44,7 @@ struct PlannerBlock {
     double exit_speed_sqr = 0.0;
     double max_entry_speed_sqr = 0.0;
     double max_junction_speed_sqr = 0.0;
+    PlannerBlockState state = PlannerBlockState::Lookahead;
     std::uint32_t reset_generation = 0;
     std::uint64_t execution_id = 0;
     std::uint32_t dwell_milliseconds = 0;
@@ -50,12 +57,6 @@ enum class SubmitResult {
     Accepted,
     Full,
     Rejected,
-};
-
-enum class PlannerBlockState : std::uint8_t {
-    Executing,
-    Frozen,
-    Lookahead,
 };
 
 enum class FeedHoldState : std::uint8_t {

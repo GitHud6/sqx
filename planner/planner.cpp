@@ -27,7 +27,6 @@ TaskHandle_t s_planner_task = nullptr;
 std::array<MotionBlock, kPlannerQueueLength> s_block_buffer = {};
 std::size_t s_block_head = 0;
 std::size_t s_block_tail = 0;
-std::size_t s_block_planned = 0;
 std::size_t s_block_count = 0;
 // Once the preceding motion block leaves the ring, preserve its exit speed as
 // the immutable entry boundary for the newly exposed queue head.
@@ -45,7 +44,6 @@ ExecutionCallback s_execution_callback = nullptr;
 void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
-std::atomic<std::size_t> s_segment_prepared_blocks = 0;
 
 struct FeedHoldCheckpoint {
     bool valid = false;
@@ -77,6 +75,17 @@ std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
 }
 
+std::size_t frozen_block_count_locked() {
+    std::size_t count = 0;
+    std::size_t index = s_block_tail;
+    while (count < s_block_count &&
+           s_block_buffer[index].state != PlannerBlockState::Lookahead) {
+        ++count;
+        index = block_index_after(index);
+    }
+    return count;
+}
+
 bool is_plannable_motion(const MotionBlock& block) {
     return block.type == MotionBlockType::Motion && block.step_event_count > 0 &&
            std::isfinite(block.machine_start_mm[0]) &&
@@ -95,8 +104,7 @@ double nominal_speed_sqr(const MotionBlock& block) {
 }
 
 bool coalesce_tail_block_locked(const MotionBlock& candidate) {
-    const std::size_t frozen_blocks = std::min(
-        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    const std::size_t frozen_blocks = frozen_block_count_locked();
     if (s_block_count - frozen_blocks < 2 ||
         candidate.type != MotionBlockType::Motion ||
         candidate.request.motion_mode != motion::MotionType::Linear) {
@@ -182,18 +190,15 @@ double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& curren
 
 void planner_recalculate_locked() {
     if (s_block_count == 0) {
-        s_block_planned = s_block_tail;
         return;
     }
 
     // A published segment owns its source block profile. Only that prefix is
     // frozen; later blocks must remain eligible for look-ahead when more G-code
     // arrives while the executor is running.
-    const std::size_t frozen_blocks = std::min(
-        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    const std::size_t frozen_blocks = frozen_block_count_locked();
     const std::size_t mutable_blocks = s_block_count - frozen_blocks;
     if (mutable_blocks == 0) {
-        s_block_planned = s_block_head;
         return;
     }
 
@@ -286,7 +291,6 @@ void planner_recalculate_locked() {
         index = next_index;
     }
 
-    s_block_planned = s_block_head;
 }
 
 void emit_execution_event(ExecutionEventType type,
@@ -494,19 +498,46 @@ bool feed_hold_is_stopped() {
     return stopped;
 }
 
-bool queued_block_snapshot(const std::size_t offset, MotionBlock& block) {
+bool freeze_next_motion_block(MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
-    if (offset >= s_block_count) {
+    const std::size_t frozen_blocks = frozen_block_count_locked();
+    if (frozen_blocks >= s_block_count) {
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return false;
     }
+
     std::size_t index = s_block_tail;
-    for (std::size_t position = 0; position < offset; ++position) {
+    for (std::size_t position = 0; position < frozen_blocks; ++position) {
         index = block_index_after(index);
     }
-    block = s_block_buffer[index];
+    MotionBlock& candidate = s_block_buffer[index];
+    if (candidate.type != MotionBlockType::Motion ||
+        candidate.state != PlannerBlockState::Lookahead) {
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        return false;
+    }
+
+    // Freeze the solved boundary before handing a copy to the producer. A
+    // later G-code submission can only recalculate the remaining look-ahead.
+    candidate.state = PlannerBlockState::Frozen;
+    planner_recalculate_locked();
+    block = candidate;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     return true;
+}
+
+void release_frozen_block(const std::uint64_t execution_id) {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    for (std::size_t offset = 0, index = s_block_tail; offset < s_block_count;
+         ++offset, index = block_index_after(index)) {
+        MotionBlock& block = s_block_buffer[index];
+        if (block.execution_id == execution_id && block.state == PlannerBlockState::Frozen) {
+            block.state = PlannerBlockState::Lookahead;
+            planner_recalculate_locked();
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_block_buffer_lock);
 }
 
 void discard_current_block(const MotionBlock& block, bool preserve_exit_speed = false);
@@ -523,10 +554,6 @@ void discard_current_block(const MotionBlock& block, const bool preserve_exit_sp
             s_tail_entry_speed_sqr = preserve_exit_speed && s_block_count != 0
                                           ? std::max(0.0, current.exit_speed_sqr)
                                           : 0.0;
-            const std::size_t prepared = s_segment_prepared_blocks.load(std::memory_order_acquire);
-            if (prepared != 0) {
-                s_segment_prepared_blocks.store(prepared - 1, std::memory_order_release);
-            }
             planner_recalculate_locked();
             capacity_waiter = s_capacity_waiter;
         }
@@ -581,9 +608,8 @@ void fill_segment_ring_from_planner(const std::uint32_t transport_events) {
         }
         if (!stepper::segment_producer_profile().active) {
             MotionBlock candidate = {};
-            if (queued_block_snapshot(0, candidate) && candidate.type == MotionBlockType::Motion &&
+            if (current_block_snapshot(candidate) && candidate.type == MotionBlockType::Motion &&
                 stepper::segment_producer_continue_feed_hold(candidate)) {
-                s_segment_prepared_blocks.fetch_add(1, std::memory_order_release);
             }
         }
         if (stepper::segment_producer_profile().active &&
@@ -603,16 +629,13 @@ void fill_segment_ring_from_planner(const std::uint32_t transport_events) {
         }
 
         MotionBlock candidate = {};
-        const std::size_t offset = s_segment_prepared_blocks.load(std::memory_order_acquire);
-        if (!queued_block_snapshot(offset, candidate) || candidate.type != MotionBlockType::Motion) {
+        if (!freeze_next_motion_block(candidate)) {
             return;
         }
         if (!stepper::segment_producer_submit_plan(candidate)) {
+            release_frozen_block(candidate.execution_id);
             return;
         }
-        // Freeze before publishing the first segment. Concurrent submission
-        // must not let look-ahead mutate this block's copied profile.
-        s_segment_prepared_blocks.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -626,6 +649,12 @@ void mark_isr_started_block_active() {
         block.execution_id != diagnostics.active_execution_id) {
         return;
     }
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    if (s_block_count != 0 && s_block_buffer[s_block_tail].execution_id == block.execution_id) {
+        s_block_buffer[s_block_tail].state = PlannerBlockState::Executing;
+        block = s_block_buffer[s_block_tail];
+    }
+    portEXIT_CRITICAL(&s_block_buffer_lock);
     MotionBlock active = {};
     if (!active_block_snapshot(active) || active.execution_id != block.execution_id) {
         set_active_block(block);
@@ -928,13 +957,11 @@ void planner_reset() {
     portENTER_CRITICAL(&s_feed_hold_lock);
     s_latest_checkpoint = {};
     portEXIT_CRITICAL(&s_feed_hold_lock);
-    s_segment_prepared_blocks.store(0, std::memory_order_release);
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);
     s_block_head = 0;
     s_block_tail = 0;
-    s_block_planned = 0;
     s_block_count = 0;
     s_tail_entry_speed_sqr = 0.0;
     s_coalesced_short_block_count.store(0, std::memory_order_relaxed);
@@ -1014,8 +1041,7 @@ PlannerDiagnostics planner_diagnostics() {
 
     portENTER_CRITICAL(&s_block_buffer_lock);
     diagnostics.queued_blocks = s_block_count;
-    diagnostics.frozen_blocks = std::min(
-        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
+    diagnostics.frozen_blocks = frozen_block_count_locked();
     diagnostics.coalesced_short_blocks =
         s_coalesced_short_block_count.load(std::memory_order_relaxed);
     for (std::size_t offset = 0; offset < diagnostics.blocks.size() && offset < s_block_count; ++offset) {
@@ -1031,9 +1057,7 @@ PlannerDiagnostics planner_diagnostics() {
         snapshot.programmed_rate_mm_per_min = block.programmed_rate_mm_per_min;
         snapshot.state = offset == 0 && executor_busy
                              ? PlannerBlockState::Executing
-                             : offset < diagnostics.frozen_blocks
-                                   ? PlannerBlockState::Frozen
-                                   : PlannerBlockState::Lookahead;
+                             : block.state;
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
     portENTER_CRITICAL(&s_feed_hold_lock);
