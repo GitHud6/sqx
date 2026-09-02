@@ -385,7 +385,6 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         return false;
     }
     context->profile = {
-        .next_segment_index = 0,
         .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
@@ -415,22 +414,15 @@ void stepper_prep_cancel_block() {
     s_context_hold_boundary.store(false, std::memory_order_relaxed);
 }
 
-std::size_t stepper_prep_fill() {
-    std::size_t generated = 0;
+bool stepper_prep_next_segment(StepSegment& segment) {
     TrapezoidPrepContext* context = generation_context();
-    if (context == nullptr) return 0;
+    if (context == nullptr) return false;
     StepperProfile& profile = context->profile;
-    while (profile.active && !trapezoid_execution_plan_complete(profile.execution_plan)) {
-        if (stepper_segment_free_slots() == 0) break;
-        TrapezoidTimeSlice slice = {};
-        if (!trapezoid_execution_plan_next(profile.execution_plan, slice)) break;
-        const StepSegment segment = build_segment(*context, slice);
-        if (!stepper_segment_publish(segment)) {
-            break;
-        }
-        ++profile.next_segment_index;
-        ++generated;
-    }
+    if (!profile.active || trapezoid_execution_plan_complete(profile.execution_plan)) return false;
+
+    TrapezoidTimeSlice slice = {};
+    if (!trapezoid_execution_plan_next(profile.execution_plan, slice)) return false;
+    segment = build_segment(*context, slice);
     if (trapezoid_execution_plan_complete(profile.execution_plan)) {
         // The final segment being published does not mean it has executed.
         profile.generation_complete = true;
@@ -439,7 +431,7 @@ std::size_t stepper_prep_fill() {
             s_context_generation_complete.store(true, std::memory_order_release);
         }
     }
-    return generated;
+    return true;
 }
 
 bool stepper_prep_complete_block(const std::uint64_t execution_id) {
@@ -518,7 +510,6 @@ bool stepper_prep_begin_feed_hold() {
         return false;
     }
     active_profile() = {
-        .next_segment_index = 0,
         .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
@@ -589,7 +580,6 @@ bool stepper_prep_resume_from_hold() {
     }
     active_source_block() = residual;
     active_profile() = {
-        .next_segment_index = 0,
         .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,

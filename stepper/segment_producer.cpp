@@ -11,6 +11,17 @@ std::atomic<std::uint64_t> s_refill_requests = 0;
 std::atomic<std::uint64_t> s_refill_services = 0;
 std::atomic<std::uint64_t> s_refill_segments = 0;
 
+std::size_t publish_available_segments() {
+    std::size_t generated = 0;
+    while (stepper_segment_free_slots() != 0) {
+        StepSegment segment = {};
+        if (!stepper_prep_next_segment(segment)) break;
+        if (!stepper_segment_publish(segment)) break;
+        ++generated;
+    }
+    return generated;
+}
+
 }  // namespace
 
 void segment_producer_reset() {
@@ -38,7 +49,7 @@ bool segment_producer_submit_plan(const planner::PlannerBlock& block) {
     }
     // The first publish must not depend on an ISR-generated low-water event.
     // Later refills are driven only by StepperTransportEventRefillRequested.
-    stepper_prep_fill();
+    publish_available_segments();
     return true;
 }
 
@@ -48,7 +59,7 @@ std::size_t segment_producer_process_events(const std::uint32_t events) {
     }
     s_refill_requests.fetch_add(1, std::memory_order_relaxed);
     s_refill_services.fetch_add(1, std::memory_order_relaxed);
-    const std::size_t generated = stepper_prep_fill();
+    const std::size_t generated = publish_available_segments();
     s_refill_segments.fetch_add(generated, std::memory_order_relaxed);
     return generated;
 }

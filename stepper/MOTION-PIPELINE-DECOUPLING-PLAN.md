@@ -290,6 +290,11 @@ planner 不访问 segment ring、Timer 或 RMT；长作业过程中不会因下�
 
 目标：把 profile 计划稳定、单向地离散为 segment，消除重复积分和重复量化。
 
+当前进度：实现已完成，待实机验收。`stepper_prep_next_segment()` 只生成一个完整 segment，
+由 `segment_producer` 负责 ring 容量判断和发布，不再使用含义模糊的 `stepper_prep_fill()`。
+profile 进度只由 `TrapezoidSegmentGenerator` 的步数、时间和 `dt_remainder_us` 表示；已删除
+只写不读的 segment 序号 cursor，producer 的首次填充与低水位补充共用同一发布循环。
+
 改动范围：固定时间片积分、整数步数累计、分数余数传递、轴步数分配、周期计算和 AMASS 选择。
 
 删除或迁移：

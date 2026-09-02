@@ -10,6 +10,10 @@ PlannerBlock -> stepper_prep -> StepSegment ring -> Timer Group ISR -> RMT STEP
 ```
 
 - segment ring 容量为 64，目标段时长 1 ms，低水位为 16。
+- `segment_producer` 是唯一的生成入口：它提交冻结 block、请求 `stepper_prep` 生成单个完整
+  segment、检查 ring 容量并发布；低水位事件到达时继续生成，生成阶段不启动 Timer。
+- profile 的唯一生成 cursor 是 `TrapezoidSegmentGenerator` 的已发步数、已过时间和
+  `dt_remainder_us`；不存在独立的 segment 序号或 ring cursor 来重新解释 profile 进度。
 - Timer 时基为 20 MHz；AMASS 在低速时增加 DDA 时间分辨率。
 - 同一 block 的 segment 继承 Bresenham/DDA 相位，避免分段时重新开始轴步进分布。
 - `GrblTrapezoidPrep` 仅用于 `$PROFILE/SELFTEST` 的离线参考，不参与正常任务、segment 或

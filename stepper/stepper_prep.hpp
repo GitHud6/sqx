@@ -98,7 +98,6 @@ struct SegmentExecutionDiagnostics {
 };
 
 struct StepperProfile {
-    std::uint32_t next_segment_index = 0;
     TrapezoidExecutionPlan execution_plan = {};
     bool active = false;
     bool generation_complete = false;
@@ -132,7 +131,9 @@ void stepper_prep_reset();
 void stepper_prep_abort();
 bool stepper_prep_start_block(const planner::PlannerBlock& block);
 void stepper_prep_cancel_block();
-std::size_t stepper_prep_fill();
+// Generates one complete segment from the active immutable execution plan.
+// It does not access the segment ring or start the timer.
+bool stepper_prep_next_segment(StepSegment& segment);
 bool stepper_prep_complete_block(std::uint64_t execution_id);
 bool stepper_prep_begin_feed_hold();
 bool stepper_prep_continue_feed_hold(const planner::PlannerBlock& block);
