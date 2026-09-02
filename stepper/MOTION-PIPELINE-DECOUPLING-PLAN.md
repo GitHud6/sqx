@@ -98,8 +98,8 @@ acceleration
 
 ### 当前基线
 
-`grbl_trapezoid_prep` 已通过 `$PROFILE/SELFTEST` 的三组离线测试，但阶段二实机适配尚未完成验收。
-它只能作为参考后端，直到运行时输出与实际执行路径完全对齐。
+梯形运行时 backend 为 `MotionProfile -> TrapezoidExecutionPlan`。`grbl_trapezoid_prep` 仅保留在
+`$PROFILE/SELFTEST` 中作为离线参考实现，不得进入普通任务的 profile、segment 或硬件状态。
 
 ## 四、Stepper Prep / Segment Producer
 

@@ -9,7 +9,6 @@
 #include "freertos/task.h"
 
 #include "planner.hpp"
-#include "grbl_trapezoid_prep.hpp"
 #include "trapezoid_execution_plan.hpp"
 
 namespace ray2::stepper {
@@ -106,8 +105,6 @@ struct StepperProfile {
     bool feed_hold = false;
     bool ends_feed_hold = false;
     bool completes_source_block = true;
-    bool uses_grbl_trapezoid_prep = false;
-    GrblTrapezoidPrep grbl_trapezoid_prep = {};
 };
 
 // Segment entries are disposable cache. This persistent context is retained

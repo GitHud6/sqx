@@ -1,6 +1,7 @@
 # 步进执行模块
 
-`stepper` 将冻结的梯形 profile 转换为 `StepSegment`，并由定时器 ISR 按 DDA 发出 STEP。
+`stepper` 使用单一的 `TrapezoidExecutionPlan` 将冻结的梯形 profile 转换为
+`StepSegment`，并由定时器 ISR 按 DDA 发出 STEP。
 
 ## 当前执行链路
 
@@ -11,6 +12,8 @@ PlannerBlock -> stepper_prep -> StepSegment ring -> Timer Group ISR -> RMT STEP
 - segment ring 容量为 64，目标段时长 1 ms，低水位为 16。
 - Timer 时基为 20 MHz；AMASS 在低速时增加 DDA 时间分辨率。
 - 同一 block 的 segment 继承 Bresenham/DDA 相位，避免分段时重新开始轴步进分布。
+- `GrblTrapezoidPrep` 仅用于 `$PROFILE/SELFTEST` 的离线参考，不参与正常任务、segment 或
+  硬件执行状态。
 - 普通 G-code 在段结束时按已发出的步数批量提交位置；归零等系统运动逐脉冲提交，
   保证限位停止时位置可信。
 
