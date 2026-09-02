@@ -7,10 +7,9 @@
 #include "esp_err.h"
 
 #include "raycube_machine.hpp"
+#include "segment_ring.hpp"
 
 namespace ray2::stepper {
-
-struct StepSegment;
 
 struct TimerStepperDiagnostics {
     bool initialized = false;

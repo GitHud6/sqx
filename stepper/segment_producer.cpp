@@ -28,10 +28,12 @@ void segment_producer_reset() {
     s_refill_requests.store(0, std::memory_order_relaxed);
     s_refill_services.store(0, std::memory_order_relaxed);
     s_refill_segments.store(0, std::memory_order_relaxed);
+    stepper_segment_ring_reset();
     stepper_prep_reset();
 }
 
 void segment_producer_abort() {
+    stepper_segment_ring_reset();
     stepper_prep_abort();
 }
 

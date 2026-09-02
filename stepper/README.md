@@ -12,6 +12,8 @@ PlannerBlock -> stepper_prep -> StepSegment ring -> Timer Group ISR -> RMT STEP
 - segment ring 容量为 64，目标段时长 1 ms，低水位为 16。
 - `segment_producer` 是唯一的生成入口：它提交冻结 block、请求 `stepper_prep` 生成单个完整
   segment、检查 ring 容量并发布；低水位事件到达时继续生成，生成阶段不启动 Timer。
+- `segment_ring` 拥有 segment/completion 队列、ring 水位、transport event 与执行快照；
+  prep 不保存或修改这些传输状态。
 - profile 的唯一生成 cursor 是 `TrapezoidSegmentGenerator` 的已发步数、已过时间和
   `dt_remainder_us`；不存在独立的 segment 序号或 ring cursor 来重新解释 profile 进度。
 - Timer 时基为 20 MHz；AMASS 在低速时增加 DDA 时间分辨率。

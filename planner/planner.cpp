@@ -12,6 +12,7 @@
 
 #include "timer_stepper_executor.hpp"
 #include "segment_producer.hpp"
+#include "segment_ring.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 

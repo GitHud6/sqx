@@ -9,93 +9,18 @@
 #include "freertos/task.h"
 
 #include "planner.hpp"
+#include "segment_ring.hpp"
 #include "trapezoid_execution_plan.hpp"
 
 namespace ray2::stepper {
 
-constexpr std::size_t kStepSegmentBufferLength = 64;
-constexpr std::size_t kStepCompletionBufferLength = 32;
 constexpr std::size_t kTrapezoidPrepContextCapacity = 4;
 // Match the classic Grbl acceleration update cadence used by ray2-main.
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 1000;
-constexpr std::size_t kStepSegmentLowWater = 16;
 constexpr std::uint32_t kStepTimerFrequencyHz = 20000000;
 constexpr std::uint32_t kStepTimerTicksPerMicrosecond = kStepTimerFrequencyHz / 1000000U;
 constexpr std::uint32_t kAmassBaseStepRateHz = 8000;
 constexpr std::uint8_t kAmassMaximumLevel = 3;
-
-enum class StepSegmentPhase : std::uint8_t {
-    Accelerate,
-    Cruise,
-    Decelerate,
-};
-
-struct StepSegment {
-    std::uint64_t execution_id = 0;
-    std::array<std::int32_t, 2> axis_steps = {};
-    std::array<bool, 2> positive_direction = {};
-    std::int32_t major_steps = 0;
-    // Profile segments retain the source block geometry so the executor can
-    // preserve Bresenham phase across segment boundaries. System motions keep
-    // these zero and use their local DDA state.
-    std::array<std::int32_t, 2> block_axis_steps = {};
-    std::int32_t block_major_steps = 0;
-    std::uint32_t duration_us = 0;
-    std::uint32_t step_interval_us = 0;
-    std::uint32_t step_interval_ticks = 0;
-    std::uint8_t amass_level = 0;
-    double start_speed_mm_per_min = 0.0;
-    double end_speed_mm_per_min = 0.0;
-    // Prepared outside the ISR for status reporting while this segment is active.
-    std::uint32_t start_speed_tenths_mm_per_min = 0;
-    std::uint32_t end_speed_tenths_mm_per_min = 0;
-    double laser_power = 0.0;
-    std::uint16_t laser_power_per_mille = 0;
-    motion::MotionType motion_mode = motion::MotionType::Rapid;
-    motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
-    StepSegmentPhase phase = StepSegmentPhase::Cruise;
-    bool completes_block = false;
-    bool feed_hold = false;
-    bool ends_feed_hold = false;
-    // System motions use the timer/RMT pulse backend without planner completion.
-    bool system_motion = false;
-};
-
-enum class SegmentCompletionStatus : std::uint8_t {
-    Completed,
-    Faulted,
-};
-
-struct SegmentCompletion {
-    std::uint64_t execution_id = 0;
-    SegmentCompletionStatus status = SegmentCompletionStatus::Completed;
-};
-
-enum StepperTransportEvent : std::uint32_t {
-    StepperTransportEventNone = 0,
-    StepperTransportEventRefillRequested = 1U << 0U,
-    StepperTransportEventCompletionAvailable = 1U << 1U,
-};
-
-struct SegmentExecutionDiagnostics {
-    std::size_t queued_segments = 0;
-    std::size_t segment_capacity = kStepSegmentBufferLength;
-    std::size_t high_water_segments = 0;
-    std::uint64_t underflow_count = 0;
-    bool active = false;
-    std::uint64_t active_execution_id = 0;
-    std::uint32_t active_step_interval_us = 0;
-    std::uint32_t active_amass_timer_interval_us = 0;
-    std::uint8_t active_amass_level = 0;
-    std::uint32_t active_start_speed_tenths_mm_per_min = 0;
-    std::uint32_t active_end_speed_tenths_mm_per_min = 0;
-    std::size_t pending_completions = 0;
-    // A completed source block with no ready successor stops the timer cleanly.
-    // This is distinct from a segment underflow inside a block.
-    std::uint64_t block_boundary_stop_count = 0;
-    std::uint64_t block_boundary_restart_count = 0;
-    bool block_boundary_restart_pending = false;
-};
 
 struct StepperProfile {
     TrapezoidExecutionPlan execution_plan = {};
@@ -147,28 +72,6 @@ void stepper_prep_clear_hold_boundary();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_ticks,
                                         const std::array<std::int32_t, 2>& axis_steps);
-bool stepper_segment_publish(const StepSegment& segment);
-bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
-void stepper_segment_discard_pending();
-std::size_t stepper_segment_count();
-std::size_t stepper_segment_free_slots();
-void IRAM_ATTR stepper_segment_record_underflow_from_isr();
-void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr();
-void stepper_segment_record_block_boundary_restart();
-void stepper_segment_clear_block_boundary_pending();
-bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
-void IRAM_ATTR stepper_segment_request_refill_from_isr(
-    BaseType_t* higher_priority_task_woken);
-void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment);
-void IRAM_ATTR stepper_segment_clear_active_from_isr();
-
-void stepper_completion_set_notification_task(TaskHandle_t task);
-std::uint32_t stepper_transport_take_events();
-bool IRAM_ATTR stepper_completion_publish_from_isr(const SegmentCompletion& completion,
-                                                   BaseType_t* higher_priority_task_woken);
-bool stepper_completion_consume(SegmentCompletion& completion);
-SegmentExecutionDiagnostics stepper_segment_diagnostics();
-
 const StepperProfile& stepper_prep_profile();
 StepperPrepDiagnostics stepper_prep_diagnostics();
 

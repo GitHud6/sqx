@@ -19,6 +19,7 @@
 #include "protocol_tx.hpp"
 #include "realtime_command.hpp"
 #include "stepper_driver.hpp"
+#include "segment_ring.hpp"
 #include "stepper_prep.hpp"
 #include "trapezoid_segment_generator.hpp"
 #include "uart0_driver.hpp"

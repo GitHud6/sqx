@@ -313,6 +313,11 @@ producer 可在 ring 满和 ring 空边界下继续工作，不产生零周期�
 
 目标：将 ring 变成纯粹的不可变 segment 传输通道。
 
+当前进度：已实机验收。`StepSegment`、segment ring、completion ring、transport
+event 和执行快照已从 `stepper_prep` 迁入独立 `segment_ring`。`block_axis_steps` 与
+`block_major_steps` 保留为 Timer 维持跨 segment DDA 相位所需的执行数据，不承载 profile 或
+planner 状态。
+
 改动范围：`StepSegment` 字段、生产者/消费者索引、满/空判断、完成标记和执行代次。
 
 删除或迁移：

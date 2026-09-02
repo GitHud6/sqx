@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "segment_ring.hpp"
 #include "planner.hpp"
 #include "stepper_prep.hpp"
 
