@@ -25,9 +25,4 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());
-    ESP_LOGI(tag,
-             "UART0 protocol and planner ready: tx=%d, rx=%d, baud=%d",
-             ray2::driver::kUart0TxPin,
-             ray2::driver::kUart0RxPin,
-             ray2::driver::kUart0BaudRate);
 }

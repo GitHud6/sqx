@@ -114,6 +114,24 @@ $PROFILE/SELFTEST
 验收记录：固件编译、烧录后在机器空闲时执行 `$PROFILE/SELFTEST`，原有 case 与 `grbl_ref` 均为
 `result=ok`，命令返回 `ok`。阶段一未改变实际雕刻路径。
 
+### 阶段二状态：普通梯形 prep 适配已开始
+
+已建立运行时适配，首轮实机暴露了 AMASS 表示层不匹配，正在修正后复验：
+
+- 普通运动 block 在 `stepper_prep_start_block()` 中初始化 `GrblTrapezoidPrep`；
+- `stepper_prep_fill()` 优先消费参考 prep 的时间积分结果，再转换为现有 `StepSegment`；
+- `StepSegment`、segment ring、Timer/RMT executor 的接口未改变；
+- feed hold、resume 等特殊路径暂时保留旧执行逻辑，避免把两个问题混在一次切换中；
+- 参考 prep 量化出的零步时间片不会提交到现有 executor，因为当前 executor 明确拒绝
+  `major_steps <= 0`；适配层会继续推进参考状态直到产生可执行步进片段。
+- `GrblTrapezoidPrep` 输出的 `timer_ticks` 已是 Grbl AMASS 缩放后的周期，而当前 executor 会自行
+  缩放周期与事件数。适配层必须先恢复未缩放周期并传递原始 level，保证 AMASS 恰好执行一次；首版
+  漏做这一点，已实测表现为速度异常、龙门剧烈抖动和 `headline` 中途卡死，因此不具备提交条件。
+
+阶段二首轮验收顺序：先编译并执行直线、对角线和短 block，确认无 `TIMER-REJECT`、无位置丢失，
+再运行 `headline` 和 `longer_studio11.gc.gz`，最后才判断声音是否接近 `ray2-main`。在此之前不应
+修改 Timer/RMT 参数或 planner 速度参数。
+
 ### 当前结论
 
 尖啸不是已观测到的 RMT 延迟、planner 断供或 junction 数值错误。最有证据的方向是：当前自定义的

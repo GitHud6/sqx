@@ -25,10 +25,11 @@ struct MotionRequest {
     bool has_motion = false;
 };
 
-struct MotionExecutionPlan {
+// Geometry quantized by the motion boundary. Timing belongs to the profile
+// and stepper-prep layers, not to the G-code submission path.
+struct MotionGeometry {
     std::int32_t steps[3] = {};
     bool positive_direction[3] = {};
-    std::uint32_t step_interval_us = 0;
 };
 
 }  // namespace ray2::motion

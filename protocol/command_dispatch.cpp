@@ -16,7 +16,6 @@
 #include "sdcard_driver.hpp"
 #include "rmt_step_pulse_driver.hpp"
 #include "planner.hpp"
-#include "protocol_trace.hpp"
 #include "protocol_tx.hpp"
 #include "realtime_command.hpp"
 #include "stepper_driver.hpp"
@@ -175,10 +174,6 @@ bool report_coordinate_parameters() {
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
-bool is_protocol_trace_command(const char* line, const std::size_t length) {
-    return equals_ignore_case(line, length, "$PROTOCOL/TRACE");
-}
-
 bool is_profile_self_test_command(const char* line, const std::size_t length) {
     return equals_ignore_case(line, length, "$PROFILE/SELFTEST");
 }
@@ -197,29 +192,6 @@ bool report_profile_self_test() {
                           std::strstr(response, "grbl_ref=(result=ok") != nullptr
                           ? "ok\r\n"
                           : "error:profile-selftest-failed\r\n");
-}
-
-bool report_protocol_trace() {
-    static ProtocolTraceEntry entries[kProtocolTraceCapacity] = {};
-    const std::size_t count = protocol_trace_snapshot(entries, kProtocolTraceCapacity);
-    for (std::size_t index = 0; index < count; ++index) {
-        const ProtocolTraceEntry& entry = entries[index];
-        char response[160] = {};
-        const char* const result = entry.result == command::Error::Ok ||
-                                           entry.result == command::Error::ProgramEnd
-                                       ? "ok"
-                                       : command::error_text(entry.result);
-        const int length = std::snprintf(
-            response, sizeof(response),
-            "[TRACE:seq=%llu|payload=\"%s\"|truncated=%d|result=%s]\r\n",
-            static_cast<unsigned long long>(entry.sequence), entry.payload,
-            entry.truncated ? 1 : 0, result);
-        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
-            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
-            return false;
-        }
-    }
-    return write_text("ok\r\n");
 }
 
 bool report_grbl_settings() {
@@ -612,9 +584,6 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
     if (equals_ignore_case(line, length, "$$")) {
         return report_grbl_settings();
     }
-    if (is_protocol_trace_command(line, length)) {
-        return report_protocol_trace();
-    }
     if (is_profile_self_test_command(line, length)) {
         return report_profile_self_test();
     }
@@ -720,7 +689,6 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
         capacity_blocked = true;
         return true;
     }
-    protocol_trace_record(line, length, result);
     return report_status(result);
 }
 

@@ -16,10 +16,16 @@ enum class GrblTrapezoidRamp : std::uint8_t {
 
 struct GrblTrapezoidPrepSlice {
     std::uint32_t major_steps = 0;
+    std::uint32_t emitted_major_steps = 0;
     std::uint32_t timer_ticks = 0;
     std::uint8_t amass_level = 0;
     double duration_us = 0.0;
     double dt_remainder_us = 0.0;
+    double start_distance_mm = 0.0;
+    double end_distance_mm = 0.0;
+    double start_speed_mm_per_min = 0.0;
+    double end_speed_mm_per_min = 0.0;
+    GrblTrapezoidRamp ramp = GrblTrapezoidRamp::Cruise;
     bool completes_profile = false;
 };
 

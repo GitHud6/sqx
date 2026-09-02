@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "planner.hpp"
+#include "grbl_trapezoid_prep.hpp"
 #include "trapezoid_execution_plan.hpp"
 
 namespace ray2::stepper {
@@ -71,6 +72,12 @@ struct SegmentCompletion {
     SegmentCompletionStatus status = SegmentCompletionStatus::Completed;
 };
 
+enum StepperTransportEvent : std::uint32_t {
+    StepperTransportEventNone = 0,
+    StepperTransportEventRefillRequested = 1U << 0U,
+    StepperTransportEventCompletionAvailable = 1U << 1U,
+};
+
 struct SegmentExecutionDiagnostics {
     std::size_t queued_segments = 0;
     std::size_t segment_capacity = kStepSegmentBufferLength;
@@ -99,6 +106,8 @@ struct StepperProfile {
     bool feed_hold = false;
     bool ends_feed_hold = false;
     bool completes_source_block = true;
+    bool uses_grbl_trapezoid_prep = false;
+    GrblTrapezoidPrep grbl_trapezoid_prep = {};
 };
 
 // Segment entries are disposable cache. This persistent context is retained
@@ -156,6 +165,7 @@ void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment);
 void IRAM_ATTR stepper_segment_clear_active_from_isr();
 
 void stepper_completion_set_notification_task(TaskHandle_t task);
+std::uint32_t stepper_transport_take_events();
 bool IRAM_ATTR stepper_completion_publish_from_isr(const SegmentCompletion& completion,
                                                    BaseType_t* higher_priority_task_woken);
 bool stepper_completion_consume(SegmentCompletion& completion);

@@ -42,6 +42,7 @@ struct MotionState {
     std::int64_t axis_increment[machine::kAxisCount] = {};
     std::int64_t phase_denominator = 0;
     std::uint32_t effective_step_interval_ticks = 0;
+    std::uint8_t amass_level = 0;
     std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
@@ -82,6 +83,7 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
     motion.effective_step_interval_ticks = std::max<std::uint32_t>(
         1U, segment_timer_ticks(segment) / amass_scale);
+    motion.amass_level = segment.amass_level;
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
@@ -146,6 +148,30 @@ void IRAM_ATTR emit_prepared_step_mask(MotionState& motion) {
     const std::uint8_t step_mask = motion.prepared_step_mask;
     motion.prepared_step_mask = 0;
     motion.prepared_step_mask_valid = false;
+    if (motion.uses_block_phase && motion.axis_increment[0] != 0 && motion.axis_increment[1] != 0) {
+        if ((step_mask & 0x03U) == 0x03U && !motion.axis_stopped[0] && !motion.axis_stopped[1]) {
+            trigger_pulse(0);
+            trigger_pulse(1);
+            ++motion.emitted_axis_steps[0];
+            ++motion.emitted_axis_steps[1];
+            if (motion.system_motion) {
+                stepper_record_executed_steps_from_isr(machine::Axis::X, 1);
+                stepper_record_executed_steps_from_isr(machine::Axis::Y, 1);
+            }
+            return;
+        }
+        for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+            if ((step_mask & static_cast<std::uint8_t>(1U << axis)) == 0 || motion.axis_stopped[axis]) {
+                continue;
+            }
+            trigger_pulse(axis);
+            if (motion.system_motion) {
+                stepper_record_executed_steps_from_isr(static_cast<machine::Axis>(axis), 1);
+            }
+            ++motion.emitted_axis_steps[axis];
+        }
+        return;
+    }
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         if ((step_mask & static_cast<std::uint8_t>(1U << axis)) == 0 || motion.axis_stopped[axis]) {
             continue;

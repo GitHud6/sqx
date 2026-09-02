@@ -26,7 +26,7 @@ enum class MotionBlockType {
 struct PlannerBlock {
     MotionBlockType type = MotionBlockType::Motion;
     motion::MotionRequest request = {};
-    motion::MotionExecutionPlan plan = {};
+    motion::MotionGeometry geometry = {};
     std::array<double, 2> machine_start_mm = {};
     std::array<double, 2> machine_target_mm = {};
     std::int32_t step_event_count = 0;
@@ -107,7 +107,7 @@ struct ExecutionEvent {
     ExecutionEventType type = ExecutionEventType::QueueDrained;
     std::uint64_t execution_id = 0;
     motion::MotionRequest request = {};
-    motion::MotionExecutionPlan plan = {};
+    motion::MotionGeometry geometry = {};
     double segment_power = 0.0;
     double segment_start_speed_mm_per_min = 0.0;
     double segment_end_speed_mm_per_min = 0.0;

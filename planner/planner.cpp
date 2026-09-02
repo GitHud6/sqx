@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "timer_stepper_executor.hpp"
+#include "segment_producer.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
@@ -71,24 +72,6 @@ constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
 constexpr char kLogTag[] = "planner";
-constexpr TickType_t kTrapezoidFlowLogPeriod = pdMS_TO_TICKS(1000);
-
-struct TrapezoidFlowLogSnapshot {
-    TickType_t timestamp_ticks = 0;
-    std::uint64_t boundary_stops = 0;
-    std::uint64_t boundary_restarts = 0;
-    std::uint64_t underflows = 0;
-    std::uint32_t scheduled_timer_events = 0;
-    std::uint32_t scheduled_timer_ticks = 0;
-    std::uint32_t segment_handoffs = 0;
-    std::uint32_t block_phase_continuations = 0;
-    std::uint32_t block_phase_initializations = 0;
-    std::uint32_t pulse_callbacks = 0;
-    std::uint32_t rmt_triggers[machine::kAxisCount] = {};
-    std::uint32_t direction_writes = 0;
-};
-
-TrapezoidFlowLogSnapshot s_trapezoid_flow_log = {};
 
 std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
@@ -135,8 +118,8 @@ bool coalesce_tail_block_locked(const MotionBlock& candidate) {
                                  tail.unit_vector[1] * candidate.unit_vector[1];
     if (direction_dot < kCoalescingDirectionCosine) return false;
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (tail.plan.steps[axis] != 0 && candidate.plan.steps[axis] != 0 &&
-            tail.plan.positive_direction[axis] != candidate.plan.positive_direction[axis]) {
+        if (tail.geometry.steps[axis] != 0 && candidate.geometry.steps[axis] != 0 &&
+            tail.geometry.positive_direction[axis] != candidate.geometry.positive_direction[axis]) {
             return false;
         }
     }
@@ -154,12 +137,12 @@ bool coalesce_tail_block_locked(const MotionBlock& candidate) {
     tail.request.target_mm[0] = candidate.request.target_mm[0];
     tail.request.target_mm[1] = candidate.request.target_mm[1];
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        tail.plan.steps[axis] += candidate.plan.steps[axis];
-        if (candidate.plan.steps[axis] != 0) {
-            tail.plan.positive_direction[axis] = candidate.plan.positive_direction[axis];
+        tail.geometry.steps[axis] += candidate.geometry.steps[axis];
+        if (candidate.geometry.steps[axis] != 0) {
+            tail.geometry.positive_direction[axis] = candidate.geometry.positive_direction[axis];
         }
     }
-    tail.step_event_count = std::max(tail.plan.steps[0], tail.plan.steps[1]);
+        tail.step_event_count = std::max(tail.geometry.steps[0], tail.geometry.steps[1]);
     tail.millimeters = merged_length;
     tail.unit_vector[0] = merged_dx / merged_length;
     tail.unit_vector[1] = merged_dy / merged_length;
@@ -302,6 +285,7 @@ void planner_recalculate_locked() {
         }
         index = next_index;
     }
+
     s_block_planned = s_block_head;
 }
 
@@ -324,7 +308,7 @@ void emit_execution_event(ExecutionEventType type,
     if (block != nullptr) {
         event.execution_id = block->execution_id;
         event.request = block->request;
-        event.plan = block->plan;
+        event.geometry = block->geometry;
     }
     if (segment != nullptr) {
         if (block == nullptr) {
@@ -369,8 +353,8 @@ void report_queue_drained() {
     const bool is_empty = s_block_count == 0;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     if (is_empty && !stepper::timer_stepper_executor_is_busy() &&
-        stepper::stepper_segment_count() == 0 &&
-        stepper::stepper_prep_diagnostics().context_used == 0) {
+        !stepper::segment_producer_has_pending_segments() &&
+        stepper::segment_producer_diagnostics().context_used == 0) {
         stepper::stepper_segment_clear_block_boundary_pending();
     }
     if (is_empty && !s_queue_drain_reported.exchange(true)) {
@@ -380,10 +364,9 @@ void report_queue_drained() {
 
 SubmitResult submit_block(MotionBlock block) {
     if (s_planner_task == nullptr) {
-        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=task-not-started type=%d steps=%ld interval=%lu",
+        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=task-not-started type=%d steps=%ld",
                  static_cast<int>(block.type),
-                 static_cast<long>(block.step_event_count),
-                 static_cast<unsigned long>(block.plan.step_interval_us));
+                 static_cast<long>(block.step_event_count));
         return SubmitResult::Rejected;
     }
     block.reset_generation = s_reset_generation.load();
@@ -486,7 +469,7 @@ void capture_feed_hold_snapshot() {
 
 void capture_feed_hold_stop_if_ready() {
     if (s_control_state.load(std::memory_order_acquire) != ControlState::Hold ||
-        stepper::timer_stepper_executor_is_busy() || !stepper::stepper_prep_hold_complete()) {
+        stepper::timer_stepper_executor_is_busy() || !stepper::segment_producer_hold_complete()) {
         return;
     }
 
@@ -588,33 +571,34 @@ bool wait_for_run_permission(std::uint32_t block_generation) {
     return s_reset_generation.load() == block_generation;
 }
 
-void fill_segment_ring_from_planner() {
+void fill_segment_ring_from_planner(const std::uint32_t transport_events) {
     if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold) {
-        if (stepper::stepper_prep_hold_boundary_pending()) {
+        if (stepper::segment_producer_hold_boundary_pending()) {
             // Old cached segments carry the pre-hold profile and are invalid
             // once the actual boundary speed has been captured.
-            stepper::stepper_segment_discard_pending();
-            stepper::stepper_prep_begin_feed_hold();
+            stepper::segment_producer_discard_pending();
+            stepper::segment_producer_begin_feed_hold();
         }
-        if (!stepper::stepper_prep_profile().active) {
+        if (!stepper::segment_producer_profile().active) {
             MotionBlock candidate = {};
             if (queued_block_snapshot(0, candidate) && candidate.type == MotionBlockType::Motion &&
-                stepper::stepper_prep_continue_feed_hold(candidate)) {
+                stepper::segment_producer_continue_feed_hold(candidate)) {
                 s_segment_prepared_blocks.fetch_add(1, std::memory_order_release);
             }
         }
-        if (stepper::stepper_prep_profile().active &&
-            !stepper::stepper_prep_profile().generation_complete) {
-            stepper::stepper_prep_fill();
+        if (stepper::segment_producer_profile().active &&
+            !stepper::segment_producer_profile().generation_complete) {
+            stepper::segment_producer_process_events(transport_events);
         }
         return;
     }
-    while (stepper::stepper_segment_free_slots() != 0) {
-        if (stepper::stepper_prep_fill() != 0) {
-            continue;
+    stepper::segment_producer_process_events(transport_events);
+    while (true) {
+        if (stepper::segment_producer_profile().active &&
+            !stepper::segment_producer_profile().generation_complete) {
+            return;
         }
-        if (stepper::stepper_prep_profile().active &&
-            !stepper::stepper_prep_profile().generation_complete) {
+        if (!stepper::segment_producer_can_accept_plan()) {
             return;
         }
 
@@ -623,7 +607,7 @@ void fill_segment_ring_from_planner() {
         if (!queued_block_snapshot(offset, candidate) || candidate.type != MotionBlockType::Motion) {
             return;
         }
-        if (!stepper::stepper_prep_start_block(candidate)) {
+        if (!stepper::segment_producer_submit_plan(candidate)) {
             return;
         }
         // Freeze before publishing the first segment. Concurrent submission
@@ -656,103 +640,27 @@ bool start_segment_ring() {
         // an exact integer-step boundary rather than a planned approximation.
         record_feed_hold_checkpoint(block);
     }
-    if (stepper::timer_stepper_executor_start_from_segment_ring() != ESP_OK) {
+    if (!stepper::segment_producer_start()) {
         return false;
     }
     mark_isr_started_block_active();
     return true;
 }
 
-void log_trapezoid_flow_periodically() {
-    const TickType_t now_ticks = xTaskGetTickCount();
-    if (s_trapezoid_flow_log.timestamp_ticks != 0 &&
-        now_ticks - s_trapezoid_flow_log.timestamp_ticks < kTrapezoidFlowLogPeriod) {
-        return;
-    }
-
-    const auto segment = stepper::stepper_segment_diagnostics();
-    const auto prep = stepper::stepper_prep_diagnostics();
-    const auto timer = stepper::timer_stepper_executor_diagnostics();
-    const std::uint64_t delta_stops =
-        segment.block_boundary_stop_count - s_trapezoid_flow_log.boundary_stops;
-    const std::uint64_t delta_restarts =
-        segment.block_boundary_restart_count - s_trapezoid_flow_log.boundary_restarts;
-    const std::uint64_t delta_underflows =
-        segment.underflow_count - s_trapezoid_flow_log.underflows;
-    const std::uint32_t delta_scheduled_timer_events =
-        timer.scheduled_timer_events - s_trapezoid_flow_log.scheduled_timer_events;
-    const std::uint32_t delta_scheduled_timer_ticks =
-        timer.scheduled_timer_ticks - s_trapezoid_flow_log.scheduled_timer_ticks;
-    const std::uint32_t delta_handoffs =
-        timer.segment_handoffs - s_trapezoid_flow_log.segment_handoffs;
-    const std::uint32_t delta_phase_continuations =
-        timer.block_phase_continuations - s_trapezoid_flow_log.block_phase_continuations;
-    const std::uint32_t delta_phase_initializations =
-        timer.block_phase_initializations - s_trapezoid_flow_log.block_phase_initializations;
-    const std::uint32_t delta_pulse_callbacks =
-        timer.pulse_callbacks - s_trapezoid_flow_log.pulse_callbacks;
-    const std::uint32_t delta_rmt_triggers_x =
-        timer.rmt_triggers[0] - s_trapezoid_flow_log.rmt_triggers[0];
-    const std::uint32_t delta_rmt_triggers_y =
-        timer.rmt_triggers[1] - s_trapezoid_flow_log.rmt_triggers[1];
-    const std::uint32_t delta_direction_writes =
-        timer.direction_writes - s_trapezoid_flow_log.direction_writes;
-    const double average_interval_us = delta_scheduled_timer_events == 0
-                                           ? 0.0
-                                           : static_cast<double>(delta_scheduled_timer_ticks) /
-                                                 (delta_scheduled_timer_events *
-                                                  stepper::kStepTimerTicksPerMicrosecond);
-    s_trapezoid_flow_log = {
-        .timestamp_ticks = now_ticks,
-        .boundary_stops = segment.block_boundary_stop_count,
-        .boundary_restarts = segment.block_boundary_restart_count,
-        .underflows = segment.underflow_count,
-        .scheduled_timer_events = timer.scheduled_timer_events,
-        .scheduled_timer_ticks = timer.scheduled_timer_ticks,
-        .segment_handoffs = timer.segment_handoffs,
-        .block_phase_continuations = timer.block_phase_continuations,
-        .block_phase_initializations = timer.block_phase_initializations,
-        .pulse_callbacks = timer.pulse_callbacks,
-        .rmt_triggers = {timer.rmt_triggers[0], timer.rmt_triggers[1]},
-        .direction_writes = timer.direction_writes,
-    };
-
-    portENTER_CRITICAL(&s_block_buffer_lock);
-    const std::size_t queued_blocks = s_block_count;
-    const std::size_t frozen_blocks = std::min(
-        s_segment_prepared_blocks.load(std::memory_order_acquire), s_block_count);
-    portEXIT_CRITICAL(&s_block_buffer_lock);
-    ESP_LOGI(kLogTag,
-             "TRAPEZOID-TRACE period=1s supply=(block=%u/%u,ctx=%u/%u,segment=%u/%u) "
-             "phase=(handoff=+%u,continue=+%u,init=+%u) "
-             "timer=(events=+%u,pulse=+%u,trigger=(+%u,+%u),dir=+%u,interval_avg=%.2fus) "
-             "fault=(stop=+%llu,restart=+%llu,underflow=+%llu)",
-             static_cast<unsigned>(queued_blocks), static_cast<unsigned>(frozen_blocks),
-             static_cast<unsigned>(prep.context_used), static_cast<unsigned>(prep.context_capacity),
-             static_cast<unsigned>(segment.queued_segments),
-             static_cast<unsigned>(segment.segment_capacity),
-             static_cast<unsigned>(delta_handoffs),
-             static_cast<unsigned>(delta_phase_continuations),
-             static_cast<unsigned>(delta_phase_initializations),
-             static_cast<unsigned>(delta_scheduled_timer_events),
-             static_cast<unsigned>(delta_pulse_callbacks),
-             static_cast<unsigned>(delta_rmt_triggers_x),
-             static_cast<unsigned>(delta_rmt_triggers_y),
-             static_cast<unsigned>(delta_direction_writes),
-             average_interval_us,
-             static_cast<unsigned long long>(delta_stops),
-             static_cast<unsigned long long>(delta_restarts),
-             static_cast<unsigned long long>(delta_underflows));
-}
-
 void consume_segment_completions() {
     stepper::SegmentCompletion completion = {};
-    while (stepper::stepper_completion_consume(completion)) {
+    while (stepper::segment_producer_consume_completion(completion)) {
         MotionBlock block = {};
         if (!current_block_snapshot(block) || block.execution_id != completion.execution_id) {
+            ESP_LOGE(kLogTag,
+                     "EXECUTION-FAULT reason=completion-mismatch completion_id=%llu "
+                     "current_id=%llu status=%u",
+                     static_cast<unsigned long long>(completion.execution_id),
+                     static_cast<unsigned long long>(block.execution_id),
+                     static_cast<unsigned>(completion.status));
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             stepper::timer_stepper_executor_stop();
-            stepper::stepper_prep_abort();
+            stepper::segment_producer_abort();
             planner_reset();
             continue;
         }
@@ -762,11 +670,26 @@ void consume_segment_completions() {
             clear_active_block();
         }
         if (completion.status == stepper::SegmentCompletionStatus::Completed) {
-            if (!stepper::stepper_prep_complete_block(completion.execution_id)) {
+            if (!stepper::segment_producer_complete_plan(completion.execution_id)) {
+                const auto prep = stepper::segment_producer_diagnostics();
+                const auto transport = stepper::segment_producer_transport_diagnostics();
+                ESP_LOGE(kLogTag,
+                         "EXECUTION-FAULT reason=complete-plan-failed id=%llu "
+                         "prep=(active=%d,generation_complete=%d,ctx=%u/%u,major=%ld/%ld) "
+                         "segment=(queued=%u,active=%d,active_id=%llu)",
+                         static_cast<unsigned long long>(completion.execution_id),
+                         prep.active ? 1 : 0, prep.generation_complete ? 1 : 0,
+                         static_cast<unsigned>(prep.context_used),
+                         static_cast<unsigned>(prep.context_capacity),
+                         static_cast<long>(prep.executed_major_steps),
+                         static_cast<long>(prep.total_major_steps),
+                         static_cast<unsigned>(transport.queued_segments),
+                         transport.active ? 1 : 0,
+                         static_cast<unsigned long long>(transport.active_execution_id));
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
                 emit_execution_event(ExecutionEventType::BlockFailed, &block);
                 stepper::timer_stepper_executor_stop();
-                stepper::stepper_prep_abort();
+                stepper::segment_producer_abort();
                 planner_reset();
                 continue;
             }
@@ -776,10 +699,15 @@ void consume_segment_completions() {
             report_queue_drained();
             continue;
         } else {
+            ESP_LOGE(kLogTag,
+                     "EXECUTION-FAULT reason=segment-fault id=%llu queued=%u active=%d",
+                     static_cast<unsigned long long>(completion.execution_id),
+                     static_cast<unsigned>(stepper::segment_producer_transport_diagnostics().queued_segments),
+                     stepper::timer_stepper_executor_is_busy() ? 1 : 0);
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
             stepper::timer_stepper_executor_stop();
-            stepper::stepper_prep_abort();
+            stepper::segment_producer_abort();
             planner_reset();
             continue;
         }
@@ -792,18 +720,20 @@ void planner_task(void*) {
     MotionBlock block = {};
 
     while (true) {
-        consume_segment_completions();
-        fill_segment_ring_from_planner();
+        const std::uint32_t transport_events = stepper::segment_producer_take_events();
+        if ((transport_events & stepper::StepperTransportEventCompletionAvailable) != 0U) {
+            consume_segment_completions();
+        }
+        fill_segment_ring_from_planner(transport_events);
         mark_isr_started_block_active();
         capture_feed_hold_stop_if_ready();
-        log_trapezoid_flow_periodically();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
 
         if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold &&
-            stepper::stepper_segment_count() != 0) {
+            stepper::segment_producer_has_pending_segments()) {
             start_segment_ring();
             continue;
         }
@@ -867,7 +797,7 @@ void planner_task(void*) {
             continue;
         }
         if (!start_segment_ring()) {
-            const auto prep = stepper::stepper_prep_diagnostics();
+            const auto prep = stepper::segment_producer_diagnostics();
             if (prep.active && prep.execution_id == block.execution_id) {
                 // A resumed partial block owns its geometry in prep. An empty
                 // ring is a producer scheduling gap, never an execution
@@ -879,6 +809,13 @@ void planner_task(void*) {
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
                 emit_execution_event(ExecutionEventType::BlockCancelled, &block);
             } else {
+                ESP_LOGE(kLogTag,
+                         "EXECUTION-FAULT reason=start-segment-ring-failed id=%llu "
+                         "queued=%u prep_active=%d prep_id=%llu",
+                         static_cast<unsigned long long>(block.execution_id),
+                         static_cast<unsigned>(stepper::segment_producer_transport_diagnostics().queued_segments),
+                         prep.active ? 1 : 0,
+                         static_cast<unsigned long long>(prep.execution_id));
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
                 emit_execution_event(ExecutionEventType::BlockFailed, &block);
             }
@@ -902,16 +839,15 @@ esp_err_t planner_start() {
     if (xTaskCreate(planner_task, "planner", 4096, nullptr, 7, &s_planner_task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
-    stepper::stepper_completion_set_notification_task(s_planner_task);
+    stepper::segment_producer_set_notification_task(s_planner_task);
     return ESP_OK;
 }
 
 SubmitResult planner_submit(const MotionBlock& block) {
-    if (block.type != MotionBlockType::Motion || block.plan.step_interval_us == 0) {
-        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=invalid-motion-block type=%d steps=%ld interval=%lu",
+    if (block.type != MotionBlockType::Motion || block.step_event_count <= 0) {
+        ESP_LOGE(kLogTag, "PLANNER-REJECT reason=invalid-motion-block type=%d steps=%ld",
                  static_cast<int>(block.type),
-                 static_cast<long>(block.step_event_count),
-                 static_cast<unsigned long>(block.plan.step_interval_us));
+                 static_cast<long>(block.step_event_count));
         return SubmitResult::Rejected;
     }
     return submit_block(block);
@@ -920,7 +856,7 @@ SubmitResult planner_submit(const MotionBlock& block) {
 SubmitResult planner_submit_batch(const MotionBlock* const blocks, const std::size_t count) {
     if (blocks == nullptr || count == 0 || count > kPlannerQueueLength) return SubmitResult::Rejected;
     for (std::size_t index = 0; index < count; ++index) {
-        if (blocks[index].type != MotionBlockType::Motion || blocks[index].plan.step_interval_us == 0) {
+        if (blocks[index].type != MotionBlockType::Motion || blocks[index].step_event_count <= 0) {
             return SubmitResult::Rejected;
         }
     }
@@ -961,8 +897,8 @@ void planner_request_feed_hold() {
 
 void planner_resume() {
     if (feed_hold_is_stopped()) {
-        const bool has_partial_block = stepper::stepper_prep_diagnostics().active;
-        if (has_partial_block && !stepper::stepper_prep_resume_from_hold()) {
+        const bool has_partial_block = stepper::segment_producer_diagnostics().active;
+        if (has_partial_block && !stepper::segment_producer_resume_from_hold()) {
             return;
         }
     }
@@ -986,9 +922,8 @@ void planner_reset() {
     s_reset_generation.fetch_add(1);
     s_control_state.store(ControlState::Running);
     stepper::timer_stepper_executor_stop();
-    s_trapezoid_flow_log = {};
     clear_active_block();
-    stepper::stepper_prep_reset();
+    stepper::segment_producer_reset();
     clear_feed_hold_snapshot();
     portENTER_CRITICAL(&s_feed_hold_lock);
     s_latest_checkpoint = {};

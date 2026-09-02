@@ -15,9 +15,9 @@ enum class MotionSubmitResult {
 
 MotionSubmitResult motion_submit(const MotionRequest& request);
 MotionSubmitResult motion_submit_batch(const MotionRequest* requests, std::size_t count);
-bool build_execution_plan(const MotionRequest& request, MotionExecutionPlan& plan);
+bool build_motion_geometry(const MotionRequest& request, MotionGeometry& geometry);
 const MotionRequest& last_motion_request();
-const MotionExecutionPlan& last_motion_plan();
+const MotionGeometry& last_motion_geometry();
 std::uint64_t submitted_motion_count();
 const char* submit_result_text(MotionSubmitResult result);
 

@@ -23,7 +23,7 @@ TaskHandle_t s_realtime_task = nullptr;
 
 // `$POS/STATUS` deliberately aggregates protocol, planner and driver snapshots.
 // Its formatting path is deeper than ordinary G-code acknowledgement handling.
-constexpr std::uint32_t kProtocolTaskStackBytes = 6144;
+constexpr std::uint32_t kProtocolTaskStackBytes = 7168;
 
 enum class PendingControl : std::uint8_t {
     None,

@@ -705,11 +705,11 @@ Error execute_line_internal(const char* line,
     }
     if (has_axis) {
         request.has_motion = true;
-        motion::MotionExecutionPlan validation_plan = {};
-        if (!motion::build_execution_plan(request, validation_plan)) {
+        motion::MotionGeometry validation_geometry = {};
+        if (!motion::build_motion_geometry(request, validation_geometry)) {
             return Error::MotionRejected;
         }
-        if (validation_plan.steps[0] == 0 && validation_plan.steps[1] == 0) {
+        if (validation_geometry.steps[0] == 0 && validation_geometry.steps[1] == 0) {
             // No STEP pulse is needed for this sub-step endpoint, but retain
             // the floating parser position. The following block quantizes its
             // endpoints absolutely and must inherit this residual distance.

@@ -90,6 +90,9 @@ bool grbl_trapezoid_prep_next(GrblTrapezoidPrep& prep, GrblTrapezoidPrepSlice& s
     double dt_max = dt_segment;
     double dt = 0.0;
     double mm_remaining = prep.mm_remaining;
+    const double start_mm_remaining = mm_remaining;
+    const double start_speed = prep.current_speed_mm_per_min;
+    const GrblTrapezoidRamp start_ramp = prep.ramp;
     const double minimum_mm = std::max(0.0, mm_remaining - prep.required_mm_increment);
 
     for (std::uint32_t guard = 0; guard < 4096; ++guard) {
@@ -192,10 +195,16 @@ bool grbl_trapezoid_prep_next(GrblTrapezoidPrep& prep, GrblTrapezoidPrepSlice& s
     prep.complete = mm_remaining == 0.0 && prep.emitted_major_steps == prep.total_major_steps;
     slice = {
         .major_steps = base_steps,
+        .emitted_major_steps = prep.emitted_major_steps,
         .timer_ticks = timer_ticks,
         .amass_level = amass_level,
         .duration_us = dt * kMinutesToMicroseconds,
         .dt_remainder_us = prep.dt_remainder_minutes * kMinutesToMicroseconds,
+        .start_distance_mm = prep.input.length_mm - start_mm_remaining,
+        .end_distance_mm = prep.input.length_mm - mm_remaining,
+        .start_speed_mm_per_min = start_speed,
+        .end_speed_mm_per_min = prep.current_speed_mm_per_min,
+        .ramp = start_ramp,
         .completes_profile = prep.complete,
     };
     return true;

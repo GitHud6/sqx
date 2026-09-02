@@ -33,6 +33,7 @@ std::array<SegmentCompletion, kStepCompletionBufferLength> s_completion_buffer =
 std::atomic<std::uint32_t> s_completion_head = 0;
 std::atomic<std::uint32_t> s_completion_tail = 0;
 std::atomic<TaskHandle_t> s_completion_notification_task = nullptr;
+std::atomic<std::uint32_t> s_transport_events = StepperTransportEventNone;
 
 // Context slots own profile geometry until the executor confirms completion.
 // Stage one intentionally allows only one occupied slot; later stages will
@@ -229,13 +230,17 @@ StepSegmentPhase phase_from_profile_phase(const MotionProfilePhase phase) {
 }
 
 StepSegment build_segment(const TrapezoidPrepContext& context,
-                          const TrapezoidTimeSlice& slice) {
+                          const TrapezoidTimeSlice& slice,
+                          const std::uint32_t final_step_override = 0,
+                          const std::uint8_t amass_level_override = kAmassMaximumLevel + 1U) {
     const StepperProfile& profile = context.profile;
     const planner::PlannerBlock& source_block = context.source_block;
     const std::int32_t total_steps =
         static_cast<std::int32_t>(profile.execution_plan.total_major_steps);
-    const std::int32_t final_step = static_cast<std::int32_t>(
-        profile.execution_plan.generator.emitted_major_steps);
+    const std::int32_t final_step = final_step_override != 0
+                                         ? static_cast<std::int32_t>(final_step_override)
+                                         : static_cast<std::int32_t>(
+                                               profile.execution_plan.generator.emitted_major_steps);
     const std::int32_t first_step = final_step - static_cast<std::int32_t>(slice.major_steps);
 
     StepSegment segment = {};
@@ -280,23 +285,25 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
         segment.laser_power_per_mille = 0;
     }
     for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {
-        const std::int32_t axis_total = source_block.plan.steps[axis];
+        const std::int32_t axis_total = source_block.geometry.steps[axis];
         const std::int32_t axis_first = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(axis_total) * first_step) / total_steps);
         const std::int32_t axis_final = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(axis_total) * final_step) / total_steps);
         segment.axis_steps[axis] = axis_final - axis_first;
         segment.block_axis_steps[axis] = axis_total;
-        segment.positive_direction[axis] = source_block.plan.positive_direction[axis];
+        segment.positive_direction[axis] = source_block.geometry.positive_direction[axis];
     }
     // AMASS is selected from the source block, not this short segment. A valid
     // diagonal may contain a segment with zero minor-axis steps after integer
     // partitioning, but it still belongs to a multi-axis Bresenham stream.
     const std::array<std::int32_t, machine::kAxisCount> source_axis_steps = {
-        source_block.plan.steps[0],
-        source_block.plan.steps[1],
+        source_block.geometry.steps[0],
+        source_block.geometry.steps[1],
     };
-    segment.amass_level = stepper_select_amass_level(segment.step_interval_ticks, source_axis_steps);
+    segment.amass_level = amass_level_override <= kAmassMaximumLevel
+                              ? amass_level_override
+                              : stepper_select_amass_level(segment.step_interval_ticks, source_axis_steps);
     return segment;
 }
 
@@ -333,6 +340,7 @@ void stepper_prep_reset() {
     s_active_end_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_completion_head.store(0, std::memory_order_relaxed);
     s_completion_tail.store(0, std::memory_order_relaxed);
+    s_transport_events.store(StepperTransportEventNone, std::memory_order_relaxed);
     s_context_execution_id.store(0, std::memory_order_relaxed);
     s_context_total_major_steps.store(0, std::memory_order_relaxed);
     s_context_executed_major_steps.store(0, std::memory_order_relaxed);
@@ -382,6 +390,20 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         s_context_count.fetch_sub(1, std::memory_order_release);
         return false;
     }
+    GrblTrapezoidPrep grbl_prep = {};
+    if (!grbl_trapezoid_prep_init(
+            grbl_prep,
+            {.length_mm = block.millimeters,
+             .entry_speed_mm_per_min = entry_speed,
+             .nominal_speed_mm_per_min = block.programmed_rate_mm_per_min,
+             .exit_speed_mm_per_min = exit_speed,
+             .acceleration_mm_per_min2 = block.acceleration_mm_per_sec2 * 60.0 * 60.0},
+            static_cast<std::uint32_t>(block.step_event_count), kStepSegmentTargetDurationUs,
+            kStepTimerFrequencyHz)) {
+        context->occupied.store(false, std::memory_order_release);
+        s_context_count.fetch_sub(1, std::memory_order_release);
+        return false;
+    }
     context->profile = {
         .next_segment_index = 0,
         .execution_plan = execution_plan,
@@ -390,6 +412,8 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         .feed_hold = false,
         .ends_feed_hold = false,
         .completes_source_block = true,
+        .uses_grbl_trapezoid_prep = true,
+        .grbl_trapezoid_prep = grbl_prep,
     };
     context->current_speed_tenths_mm_per_min.store(
         speed_to_tenths_mm_per_min(entry_speed), std::memory_order_relaxed);
@@ -418,18 +442,49 @@ std::size_t stepper_prep_fill() {
     TrapezoidPrepContext* context = generation_context();
     if (context == nullptr) return 0;
     StepperProfile& profile = context->profile;
-    while (profile.active && !trapezoid_execution_plan_complete(profile.execution_plan)) {
+    while (profile.active &&
+           (profile.uses_grbl_trapezoid_prep
+                ? !profile.grbl_trapezoid_prep.complete
+                : !trapezoid_execution_plan_complete(profile.execution_plan))) {
         if (stepper_segment_free_slots() == 0) break;
         TrapezoidTimeSlice slice = {};
-        if (!trapezoid_execution_plan_next(profile.execution_plan, slice)) break;
-        const StepSegment segment = build_segment(*context, slice);
+        std::uint32_t final_step = 0;
+        std::uint8_t amass_level = kAmassMaximumLevel + 1U;
+        if (profile.uses_grbl_trapezoid_prep) {
+            GrblTrapezoidPrepSlice reference_slice = {};
+            if (!grbl_trapezoid_prep_next(profile.grbl_trapezoid_prep, reference_slice)) break;
+            if (reference_slice.major_steps == 0) continue;
+            slice.major_steps = reference_slice.major_steps;
+            slice.duration_us = static_cast<std::uint32_t>(
+                std::max(1.0, std::ceil(reference_slice.duration_us)));
+            // The reference copies Grbl's prep and therefore returns the AMASS-scaled
+            // timer period. This executor owns AMASS scaling itself, so restore the
+            // pre-scale representation here and pass the original level through.
+            slice.step_interval_ticks = reference_slice.timer_ticks << reference_slice.amass_level;
+            slice.start_distance_mm = reference_slice.start_distance_mm;
+            slice.end_distance_mm = reference_slice.end_distance_mm;
+            slice.start_speed_mm_per_min = reference_slice.start_speed_mm_per_min;
+            slice.end_speed_mm_per_min = reference_slice.end_speed_mm_per_min;
+            slice.phase = reference_slice.ramp == GrblTrapezoidRamp::Accelerate
+                              ? MotionProfilePhase::Accelerate
+                              : reference_slice.ramp == GrblTrapezoidRamp::Decelerate
+                                    ? MotionProfilePhase::Decelerate
+                                    : MotionProfilePhase::Cruise;
+            slice.completes_profile = reference_slice.completes_profile;
+            final_step = reference_slice.emitted_major_steps;
+            amass_level = reference_slice.amass_level;
+        } else {
+            if (!trapezoid_execution_plan_next(profile.execution_plan, slice)) break;
+        }
+        const StepSegment segment = build_segment(*context, slice, final_step, amass_level);
         if (!stepper_segment_publish(segment)) {
             break;
         }
         ++profile.next_segment_index;
         ++generated;
     }
-    if (trapezoid_execution_plan_complete(profile.execution_plan)) {
+    if (profile.uses_grbl_trapezoid_prep ? profile.grbl_trapezoid_prep.complete
+                                         : trapezoid_execution_plan_complete(profile.execution_plan)) {
         // The final segment being published does not mean it has executed.
         profile.generation_complete = true;
         context->generation_complete.store(true, std::memory_order_release);
@@ -488,9 +543,9 @@ bool stepper_prep_begin_feed_hold() {
     planner::PlannerBlock residual = active_source_block();
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const std::int32_t remaining_axis = std::max<std::int32_t>(
-            0, active_source_block().plan.steps[axis] -
+            0, active_source_block().geometry.steps[axis] -
                    s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
-        residual.plan.steps[axis] = static_cast<std::int32_t>(
+        residual.geometry.steps[axis] = static_cast<std::int32_t>(
             (static_cast<std::int64_t>(remaining_axis) * travel_steps) / remaining_steps);
     }
     residual.step_event_count = travel_steps;
@@ -559,8 +614,8 @@ bool stepper_prep_resume_from_hold() {
 
     planner::PlannerBlock residual = active_original_source_block();
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        residual.plan.steps[axis] = std::max<std::int32_t>(
-            0, active_original_source_block().plan.steps[axis] -
+        residual.geometry.steps[axis] = std::max<std::int32_t>(
+            0, active_original_source_block().geometry.steps[axis] -
                    s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
     }
     residual.step_event_count = remaining_steps;
@@ -691,6 +746,7 @@ bool stepper_segment_needs_refill_from_isr() {
 
 void stepper_segment_request_refill_from_isr(
     BaseType_t* const higher_priority_task_woken) {
+    s_transport_events.fetch_or(StepperTransportEventRefillRequested, std::memory_order_release);
     const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
     if (task != nullptr && higher_priority_task_woken != nullptr) {
         vTaskNotifyGiveFromISR(task, higher_priority_task_woken);
@@ -724,6 +780,10 @@ void stepper_completion_set_notification_task(const TaskHandle_t task) {
     s_completion_notification_task.store(task, std::memory_order_release);
 }
 
+std::uint32_t stepper_transport_take_events() {
+    return s_transport_events.exchange(StepperTransportEventNone, std::memory_order_acq_rel);
+}
+
 bool stepper_completion_publish_from_isr(
     const SegmentCompletion& completion, BaseType_t* const higher_priority_task_woken) {
     const std::uint32_t head = s_completion_head.load(std::memory_order_relaxed);
@@ -733,6 +793,7 @@ bool stepper_completion_publish_from_isr(
     }
     s_completion_buffer[head % kStepCompletionBufferLength] = completion;
     s_completion_head.store(head + 1, std::memory_order_release);
+    s_transport_events.fetch_or(StepperTransportEventCompletionAvailable, std::memory_order_release);
 
     const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
     if (task != nullptr && higher_priority_task_woken != nullptr) {

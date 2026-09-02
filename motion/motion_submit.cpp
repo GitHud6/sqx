@@ -13,33 +13,30 @@ namespace ray2::motion {
 namespace {
 
 MotionRequest s_last_request = {};
-MotionExecutionPlan s_last_plan = {};
+MotionGeometry s_last_geometry = {};
 std::uint64_t s_submitted_count = 0;
 // Command dispatch serializes G-code submission. Keep the arc batch workspace
 // out of the protocol task stack, where 32 full PlannerBlock instances would
 // exceed the task's available headroom.
 std::array<planner::PlannerBlock, planner::kPlannerQueueLength> s_batch_blocks = {};
 
-constexpr std::uint32_t kMinStepFrequencyHz = 10;
-constexpr std::uint32_t kMaxStepFrequencyHz = 10000;
 constexpr double kRapidRateMmPerMin = 6000.0;
 constexpr char kLogTag[] = "motion";
 
 void log_rejection(const char* reason,
                    const MotionRequest& request,
-                   const MotionExecutionPlan* plan = nullptr) {
+                   const MotionGeometry* geometry = nullptr) {
     ESP_LOGE(kLogTag,
              "MOTION-REJECT reason=%s mode=%d start=(%.6f,%.6f,%.6f) "
-             "target=(%.6f,%.6f,%.6f) feed=%.3f power=%.3f steps=(%ld,%ld) interval=%lu",
+             "target=(%.6f,%.6f,%.6f) feed=%.3f power=%.3f steps=(%ld,%ld)",
              reason,
              static_cast<int>(request.motion_mode),
              request.start_mm[0], request.start_mm[1], request.start_mm[2],
              request.target_mm[0], request.target_mm[1], request.target_mm[2],
              request.feed_rate_mm_per_min,
              request.spindle_power,
-             plan == nullptr ? 0L : static_cast<long>(plan->steps[0]),
-             plan == nullptr ? 0L : static_cast<long>(plan->steps[1]),
-             plan == nullptr ? 0UL : static_cast<unsigned long>(plan->step_interval_us));
+             geometry == nullptr ? 0L : static_cast<long>(geometry->steps[0]),
+             geometry == nullptr ? 0L : static_cast<long>(geometry->steps[1]));
 }
 
 bool valid_coordinate(double value, double max_travel) {
@@ -59,40 +56,7 @@ bool quantize_absolute_steps(const double position_mm,
     return true;
 }
 
-std::uint32_t step_interval_us(const MotionRequest& request,
-                               const MotionExecutionPlan& plan) {
-    const auto& x_hardware = machine::raycube_axis(machine::Axis::X);
-    const auto& y_hardware = machine::raycube_axis(machine::Axis::Y);
-    const double feed_rate = request.motion_mode == MotionType::Rapid
-                                 ? std::fmin(kRapidRateMmPerMin,
-                                             std::min(static_cast<double>(x_hardware.max_rate_mm_per_min),
-                                                      static_cast<double>(y_hardware.max_rate_mm_per_min)))
-                                 : request.feed_rate_mm_per_min;
-    const double path_length_mm = std::hypot(
-        request.target_mm[0] - request.start_mm[0],
-        request.target_mm[1] - request.start_mm[1]);
-    const std::int32_t major_steps = std::max(plan.steps[0], plan.steps[1]);
-    if (major_steps <= 0 || !std::isfinite(path_length_mm) || path_length_mm <= 0.0) {
-        return 0;
-    }
-
-    const double requested_frequency =
-        feed_rate * major_steps / (path_length_mm * 60.0);
-    if (!std::isfinite(requested_frequency) || requested_frequency <= 0.0) {
-        return 0;
-    }
-
-    const double limited_frequency = std::fmin(
-        std::fmax(requested_frequency, static_cast<double>(kMinStepFrequencyHz)),
-        static_cast<double>(kMaxStepFrequencyHz));
-    const double interval = 1000000.0 / limited_frequency;
-    if (!std::isfinite(interval) || interval < 1.0 || interval > std::numeric_limits<std::uint32_t>::max()) {
-        return 0;
-    }
-    return static_cast<std::uint32_t>(std::lround(interval));
-}
-
-bool build_execution_plan_impl(const MotionRequest& request, MotionExecutionPlan& plan) {
+bool build_motion_geometry_impl(const MotionRequest& request, MotionGeometry& geometry) {
     if (!request.has_motion || !std::isfinite(request.feed_rate_mm_per_min) ||
         request.feed_rate_mm_per_min < 0.0 || !std::isfinite(request.spindle_power) ||
         request.spindle_power < 0.0 || request.spindle_power > 1000.0) {
@@ -100,7 +64,7 @@ bool build_execution_plan_impl(const MotionRequest& request, MotionExecutionPlan
         return false;
     }
 
-    MotionExecutionPlan candidate = {};
+    MotionGeometry candidate = {};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
         if (request.feed_rate_mm_per_min > hardware.max_rate_mm_per_min ||
@@ -134,33 +98,19 @@ bool build_execution_plan_impl(const MotionRequest& request, MotionExecutionPlan
         return false;
     }
 
-    std::size_t active_axis_count = 0;
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (candidate.steps[axis] > 0) {
-            ++active_axis_count;
-        }
-    }
-    if (active_axis_count > 0) {
-        candidate.step_interval_us = step_interval_us(request, candidate);
-        if (candidate.step_interval_us == 0) {
-            log_rejection("step-interval-zero", request, &candidate);
-            return false;
-        }
-    }
-
-    plan = candidate;
+    geometry = candidate;
     return true;
 }
 
 bool make_planner_block(const MotionRequest& request,
-                        const MotionExecutionPlan& plan,
+                        const MotionGeometry& geometry,
                         planner::PlannerBlock& block) {
-    block = {.request = request, .plan = plan};
+    block = {.request = request, .geometry = geometry};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         block.machine_start_mm[axis] = request.start_mm[axis];
         block.machine_target_mm[axis] = request.target_mm[axis];
     }
-    block.step_event_count = std::max(plan.steps[0], plan.steps[1]);
+    block.step_event_count = std::max(geometry.steps[0], geometry.steps[1]);
     const double delta_x = request.target_mm[0] - request.start_mm[0];
     const double delta_y = request.target_mm[1] - request.start_mm[1];
     block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
@@ -171,7 +121,7 @@ bool make_planner_block(const MotionRequest& request,
     block.unit_vector[0] = delta_x / block.millimeters;
     block.unit_vector[1] = delta_y / block.millimeters;
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        if (plan.steps[axis] == 0) continue;
+        if (geometry.steps[axis] == 0) continue;
         const double axis_component = std::abs(block.unit_vector[axis]);
         if (axis_component == 0.0) continue;
         const double axis_limited_acceleration =
@@ -187,30 +137,30 @@ bool make_planner_block(const MotionRequest& request,
 
 }  // namespace
 
-bool build_execution_plan(const MotionRequest& request, MotionExecutionPlan& plan) {
-    return build_execution_plan_impl(request, plan);
+bool build_motion_geometry(const MotionRequest& request, MotionGeometry& geometry) {
+    return build_motion_geometry_impl(request, geometry);
 }
 
 MotionSubmitResult motion_submit(const MotionRequest& request) {
-    MotionExecutionPlan plan = {};
-    if (!build_execution_plan_impl(request, plan)) {
+    MotionGeometry geometry = {};
+    if (!build_motion_geometry_impl(request, geometry)) {
         return MotionSubmitResult::Rejected;
     }
 
     planner::PlannerBlock block = {};
-    if (!make_planner_block(request, plan, block)) return MotionSubmitResult::Rejected;
+    if (!make_planner_block(request, geometry, block)) return MotionSubmitResult::Rejected;
     switch (planner::planner_submit(block)) {
         case planner::SubmitResult::Accepted:
             break;
         case planner::SubmitResult::Full:
             return MotionSubmitResult::Busy;
         case planner::SubmitResult::Rejected:
-            log_rejection("planner-rejected", request, &plan);
+            log_rejection("planner-rejected", request, &geometry);
             return MotionSubmitResult::Rejected;
     }
 
     s_last_request = request;
-    s_last_plan = plan;
+    s_last_geometry = geometry;
     ++s_submitted_count;
     return MotionSubmitResult::Accepted;
 }
@@ -219,19 +169,19 @@ MotionSubmitResult motion_submit_batch(const MotionRequest* const requests, cons
     if (requests == nullptr || count == 0 || count > planner::kPlannerQueueLength) {
         return MotionSubmitResult::Rejected;
     }
-    MotionExecutionPlan final_plan = {};
+    MotionGeometry final_geometry = {};
     for (std::size_t index = 0; index < count; ++index) {
-        MotionExecutionPlan plan = {};
-        if (!build_execution_plan_impl(requests[index], plan) ||
-            !make_planner_block(requests[index], plan, s_batch_blocks[index])) {
+        MotionGeometry geometry = {};
+        if (!build_motion_geometry_impl(requests[index], geometry) ||
+            !make_planner_block(requests[index], geometry, s_batch_blocks[index])) {
             return MotionSubmitResult::Rejected;
         }
-        if (index + 1 == count) final_plan = plan;
+        if (index + 1 == count) final_geometry = geometry;
     }
     switch (planner::planner_submit_batch(s_batch_blocks.data(), count)) {
         case planner::SubmitResult::Accepted:
             s_last_request = requests[count - 1];
-            s_last_plan = final_plan;
+            s_last_geometry = final_geometry;
             s_submitted_count += count;
             return MotionSubmitResult::Accepted;
         case planner::SubmitResult::Full: return MotionSubmitResult::Busy;
@@ -240,8 +190,8 @@ MotionSubmitResult motion_submit_batch(const MotionRequest* const requests, cons
     return MotionSubmitResult::Rejected;
 }
 
-const MotionExecutionPlan& last_motion_plan() {
-    return s_last_plan;
+const MotionGeometry& last_motion_geometry() {
+    return s_last_geometry;
 }
 
 const MotionRequest& last_motion_request() {
