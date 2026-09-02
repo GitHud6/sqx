@@ -35,6 +35,10 @@ constexpr std::uint32_t kRmtClockDivider = 20;
 constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
 
 std::atomic<bool> s_initialized = false;
+std::atomic<std::uint64_t> s_trigger_count[machine::kAxisCount] = {};
+std::atomic<std::uint64_t> s_reset_count[machine::kAxisCount] = {};
+std::atomic<std::uint64_t> s_start_count[machine::kAxisCount] = {};
+std::atomic<std::uint64_t> s_invalid_trigger_count = 0;
 
 void configure_axis(const std::size_t axis_index) {
     const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
@@ -114,12 +118,26 @@ bool rmt_step_pulse_driver_is_initialized() {
 void rmt_step_pulse_driver_trigger(const std::size_t axis_index) {
     // The executor validates initialization and axis ownership before the
     // timer starts. Keep the per-pulse path to the two hardware operations.
+    if (axis_index >= machine::kAxisCount || !s_initialized.load(std::memory_order_relaxed)) {
+        s_invalid_trigger_count.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    s_trigger_count[axis_index].fetch_add(1, std::memory_order_relaxed);
+    s_reset_count[axis_index].fetch_add(1, std::memory_order_relaxed);
     rmt_ll_tx_reset_pointer(&RMT, axis_index);
+    s_start_count[axis_index].fetch_add(1, std::memory_order_relaxed);
     rmt_ll_tx_start(&RMT, axis_index);
 }
 
 RmtStepPulseDiagnostics rmt_step_pulse_driver_diagnostics() {
-    return {};
+    RmtStepPulseDiagnostics diagnostics = {};
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        diagnostics.trigger_count[axis] = s_trigger_count[axis].load(std::memory_order_relaxed);
+        diagnostics.reset_count[axis] = s_reset_count[axis].load(std::memory_order_relaxed);
+        diagnostics.start_count[axis] = s_start_count[axis].load(std::memory_order_relaxed);
+    }
+    diagnostics.invalid_trigger_count = s_invalid_trigger_count.load(std::memory_order_relaxed);
+    return diagnostics;
 }
 
 }  // namespace ray2::driver

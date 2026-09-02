@@ -11,6 +11,8 @@ namespace ray2::driver {
 
 struct RmtStepPulseDiagnostics {
     std::array<std::uint64_t, 2> trigger_count = {};
+    std::array<std::uint64_t, 2> reset_count = {};
+    std::array<std::uint64_t, 2> start_count = {};
     std::array<std::uint64_t, 2> active_retrigger_count = {};
     std::array<std::uint32_t, 2> last_status_word = {};
     std::uint64_t invalid_trigger_count = 0;

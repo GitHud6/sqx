@@ -21,6 +21,7 @@
 #include "stepper_driver.hpp"
 #include "segment_ring.hpp"
 #include "stepper_prep.hpp"
+#include "timer_stepper_executor.hpp"
 #include "trapezoid_segment_generator.hpp"
 #include "uart0_driver.hpp"
 #include "freertos/FreeRTOS.h"
@@ -394,6 +395,7 @@ bool report_position_status() {
     xSemaphoreGive(s_parser_mutex);
     const planner::PlannerDiagnostics planner_diagnostics = planner::planner_diagnostics();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
+    const stepper::TimerStepperDiagnostics timer = stepper::timer_stepper_executor_diagnostics();
     const stepper::StepperPrepDiagnostics prep = stepper::stepper_prep_diagnostics();
     const command::ArcDiagnostics arc = command::arc_diagnostics();
     const driver::RmtStepPulseDiagnostics rmt = driver::rmt_step_pulse_driver_diagnostics();
@@ -405,7 +407,7 @@ bool report_position_status() {
     static char response[2048] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(trigger=(%llu,%llu),reset=(%llu,%llu),start=(%llu,%llu),timer=(%llu,%llu),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -457,10 +459,12 @@ bool report_position_status() {
         segment.pending_completions,
         static_cast<unsigned long long>(rmt.trigger_count[0]),
         static_cast<unsigned long long>(rmt.trigger_count[1]),
-        static_cast<unsigned long long>(rmt.active_retrigger_count[0]),
-        static_cast<unsigned long long>(rmt.active_retrigger_count[1]),
-        static_cast<unsigned long>(rmt.last_status_word[0]),
-        static_cast<unsigned long>(rmt.last_status_word[1]),
+        static_cast<unsigned long long>(rmt.reset_count[0]),
+        static_cast<unsigned long long>(rmt.reset_count[1]),
+        static_cast<unsigned long long>(rmt.start_count[0]),
+        static_cast<unsigned long long>(rmt.start_count[1]),
+        static_cast<unsigned long long>(timer.rmt_triggers[0]),
+        static_cast<unsigned long long>(timer.rmt_triggers[1]),
         static_cast<unsigned long long>(rmt.invalid_trigger_count),
         static_cast<unsigned long long>(realtime.status_report_count),
         static_cast<unsigned long long>(uart.received_bytes),
