@@ -45,7 +45,6 @@ struct PlannerBlock {
     double max_entry_speed_sqr = 0.0;
     double max_junction_speed_sqr = 0.0;
     PlannerBlockState state = PlannerBlockState::Lookahead;
-    std::uint32_t reset_generation = 0;
     std::uint64_t execution_id = 0;
     std::uint32_t dwell_milliseconds = 0;
 };
@@ -57,21 +56,6 @@ enum class SubmitResult {
     Accepted,
     Full,
     Rejected,
-};
-
-enum class FeedHoldState : std::uint8_t {
-    Running,
-    Requested,
-    Stopped,
-};
-
-struct FeedHoldDiagnostics {
-    FeedHoldState state = FeedHoldState::Running;
-    bool snapshot_valid = false;
-    std::uint64_t checkpoint_execution_id = 0;
-    std::array<std::int64_t, 2> checkpoint_steps = {};
-    std::uint64_t active_execution_id = 0;
-    std::array<std::int64_t, 2> stopped_steps = {};
 };
 
 struct PlannerBlockDiagnostics {
@@ -89,15 +73,12 @@ struct PlannerDiagnostics {
     std::size_t frozen_blocks = 0;
     std::uint64_t coalesced_short_blocks = 0;
     std::array<PlannerBlockDiagnostics, kPlannerDiagnosticBlockCount> blocks = {};
-    FeedHoldDiagnostics feed_hold = {};
 };
 
 enum class ExecutionEventType {
     BlockStarted,
     SegmentBatchStarted,
     SegmentBatchCompleted,
-    FeedHoldRequested,
-    Resumed,
     BlockCompleted,
     BlockCancelled,
     BlockFailed,
@@ -128,11 +109,8 @@ SubmitResult planner_submit_spindle_disable();
 SubmitResult planner_submit_program_pause();
 SubmitResult planner_submit_dwell(std::uint32_t milliseconds);
 void planner_set_execution_callback(ExecutionCallback callback, void* user_data);
-void planner_request_feed_hold();
-void planner_resume();
 void planner_reset();
 bool planner_is_idle();
-bool planner_is_holding();
 std::size_t planner_free_blocks();
 void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();

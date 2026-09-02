@@ -79,26 +79,6 @@ bool segment_producer_can_accept_plan() {
     return diagnostics.context_used < diagnostics.context_capacity;
 }
 
-bool segment_producer_begin_feed_hold() {
-    return stepper_prep_begin_feed_hold();
-}
-
-bool segment_producer_continue_feed_hold(const planner::PlannerBlock& block) {
-    return stepper_prep_continue_feed_hold(block);
-}
-
-bool segment_producer_hold_boundary_pending() {
-    return stepper_prep_hold_boundary_pending();
-}
-
-bool segment_producer_hold_complete() {
-    return stepper_prep_hold_complete();
-}
-
-bool segment_producer_resume_from_hold() {
-    return stepper_prep_resume_from_hold();
-}
-
 bool segment_producer_consume_completion(SegmentCompletion& completion) {
     return stepper_completion_consume(completion);
 }

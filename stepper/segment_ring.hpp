@@ -41,8 +41,6 @@ struct StepSegment {
     motion::SpindleMode spindle_mode = motion::SpindleMode::Off;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     bool completes_block = false;
-    bool feed_hold = false;
-    bool ends_feed_hold = false;
     bool system_motion = false;
 };
 

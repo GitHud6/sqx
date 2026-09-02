@@ -34,12 +34,6 @@ bool segment_producer_has_pending_segments();
 // segment-ring capacity. This keeps successor plans ready before a boundary.
 bool segment_producer_can_accept_plan();
 
-bool segment_producer_begin_feed_hold();
-bool segment_producer_continue_feed_hold(const planner::PlannerBlock& block);
-bool segment_producer_hold_boundary_pending();
-bool segment_producer_hold_complete();
-bool segment_producer_resume_from_hold();
-
 bool segment_producer_consume_completion(SegmentCompletion& completion);
 bool segment_producer_record_segment_completed(const SegmentCompletion& completion);
 bool segment_producer_complete_plan(std::uint64_t execution_id);

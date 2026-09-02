@@ -26,8 +26,6 @@ struct StepperProfile {
     TrapezoidExecutionPlan execution_plan = {};
     bool active = false;
     bool generation_complete = false;
-    bool feed_hold = false;
-    bool ends_feed_hold = false;
     bool completes_source_block = true;
 };
 
@@ -36,7 +34,6 @@ struct StepperProfile {
 struct StepperPrepDiagnostics {
     bool active = false;
     bool generation_complete = false;
-    bool hold_boundary = false;
     std::uint64_t execution_id = 0;
     std::int32_t total_major_steps = 0;
     std::int32_t executed_major_steps = 0;
@@ -60,15 +57,7 @@ void stepper_prep_cancel_block();
 // It does not access the segment ring or start the timer.
 bool stepper_prep_next_segment(StepSegment& segment);
 bool stepper_prep_complete_block(std::uint64_t execution_id);
-bool stepper_prep_begin_feed_hold();
-bool stepper_prep_continue_feed_hold(const planner::PlannerBlock& block);
-bool stepper_prep_hold_boundary_pending();
-bool stepper_prep_hold_complete();
-bool stepper_prep_resume_from_hold();
 bool stepper_prep_record_segment_completed(const SegmentCompletion& completion);
-void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr();
-void IRAM_ATTR stepper_prep_record_hold_complete_from_isr();
-void stepper_prep_clear_hold_boundary();
 // Pure AMASS selector. It has no dependency on GPIO, RMT, FreeRTOS, or motion state.
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_ticks,
                                         const std::array<std::int32_t, 2>& axis_steps);

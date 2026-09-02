@@ -90,7 +90,6 @@ bool snapshot_parser_state(command::ParserState& state) {
 const char* realtime_state_text(const stepper::MachinePosition& position) {
     if (homing::homing_is_active()) return "Home";
     if (position.state != stepper::PositionState::Known) return "Alarm";
-    if (planner::planner_is_holding()) return "Hold";
     return planner::planner_is_idle() ? "Idle" : "Run";
 }
 
@@ -236,8 +235,7 @@ bool is_jog_command(const char* line, const std::size_t length) {
 }
 
 bool execute_jog_command(const char* payload, const std::size_t payload_length) {
-    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle() ||
-        planner::planner_is_holding()) {
+    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
         return report_status(command::Error::MotionBusy);
     }
     if (stepper::machine_position_state() != stepper::PositionState::Known) {
@@ -388,15 +386,6 @@ const char* planner_block_state_text(planner::PlannerBlockState state) {
     return "unknown";
 }
 
-const char* feed_hold_state_text(const planner::FeedHoldState state) {
-    switch (state) {
-        case planner::FeedHoldState::Running: return "running";
-        case planner::FeedHoldState::Requested: return "requested";
-        case planner::FeedHoldState::Stopped: return "stopped";
-    }
-    return "unknown";
-}
-
 bool report_position_status() {
     const stepper::MachinePosition position = stepper::machine_position();
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
@@ -416,7 +405,7 @@ bool report_position_status() {
     static char response[2048] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|hold=(state=%s,snapshot=%d,checkpoint=#%llu@(%lld,%lld),active=#%llu,stopped=(%lld,%lld))|prep=(active=%d,generated=%d,hold_boundary=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu,hold=%llu,resume=%llu,reset=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(tx=(%llu,%llu),retrigger=(%llu,%llu),status=(0x%08lx,0x%08lx),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -426,15 +415,7 @@ bool report_position_status() {
         planner_diagnostics.queued_blocks, planner_diagnostics.frozen_blocks,
         static_cast<unsigned long long>(planner::planner_completed_block_count()),
         static_cast<unsigned long long>(planner_diagnostics.coalesced_short_blocks),
-        feed_hold_state_text(planner_diagnostics.feed_hold.state),
-        planner_diagnostics.feed_hold.snapshot_valid ? 1 : 0,
-        static_cast<unsigned long long>(planner_diagnostics.feed_hold.checkpoint_execution_id),
-        static_cast<long long>(planner_diagnostics.feed_hold.checkpoint_steps[0]),
-        static_cast<long long>(planner_diagnostics.feed_hold.checkpoint_steps[1]),
-        static_cast<unsigned long long>(planner_diagnostics.feed_hold.active_execution_id),
-        static_cast<long long>(planner_diagnostics.feed_hold.stopped_steps[0]),
-        static_cast<long long>(planner_diagnostics.feed_hold.stopped_steps[1]),
-        prep.active ? 1 : 0, prep.generation_complete ? 1 : 0, prep.hold_boundary ? 1 : 0,
+        prep.active ? 1 : 0, prep.generation_complete ? 1 : 0,
         motion_profile_mode_text(prep.profile_mode),
         static_cast<unsigned long long>(prep.execution_id),
         static_cast<long>(prep.executed_major_steps), static_cast<long>(prep.total_major_steps),
@@ -482,9 +463,6 @@ bool report_position_status() {
         static_cast<unsigned long>(rmt.last_status_word[1]),
         static_cast<unsigned long long>(rmt.invalid_trigger_count),
         static_cast<unsigned long long>(realtime.status_report_count),
-        static_cast<unsigned long long>(realtime.feed_hold_count),
-        static_cast<unsigned long long>(realtime.cycle_start_count),
-        static_cast<unsigned long long>(realtime.reset_count),
         static_cast<unsigned long long>(uart.received_bytes),
         static_cast<unsigned long long>(uart.realtime_bytes),
         static_cast<unsigned long long>(uart.normal_bytes), uart.queue_high_water_chunks,

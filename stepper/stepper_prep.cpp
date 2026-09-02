@@ -39,10 +39,6 @@ std::atomic<std::int32_t> s_context_executed_major_steps = 0;
 std::array<std::atomic<std::int32_t>, machine::kAxisCount> s_context_executed_axis_steps = {};
 std::atomic<std::uint32_t> s_context_current_speed_tenths_mm_per_min = 0;
 std::atomic<bool> s_context_generation_complete = false;
-std::atomic<bool> s_context_hold_boundary = false;
-std::atomic<bool> s_context_feed_hold_active = false;
-std::atomic<bool> s_context_hold_complete = false;
-std::atomic<std::uint32_t> s_context_hold_carry_speed = 0;
 
 static_assert(kTrapezoidPrepContextCapacity > 0, "prep context FIFO requires storage");
 
@@ -231,12 +227,6 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
     segment.phase = phase_from_profile_phase(slice.phase);
     const bool finishes_profile = slice.completes_profile;
     segment.completes_block = finishes_profile && profile.completes_source_block;
-    segment.feed_hold = profile.feed_hold;
-    segment.ends_feed_hold = profile.ends_feed_hold && finishes_profile;
-    if (segment.feed_hold) {
-        segment.laser_power = 0.0;
-        segment.laser_power_per_mille = 0;
-    }
     for (std::size_t axis = 0; axis < segment.axis_steps.size(); ++axis) {
         const std::int32_t axis_total = source_block.geometry.steps[axis];
         const std::int32_t axis_first = static_cast<std::int32_t>(
@@ -284,10 +274,6 @@ void stepper_prep_reset() {
     }
     s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_relaxed);
     s_context_generation_complete.store(false, std::memory_order_relaxed);
-    s_context_hold_boundary.store(false, std::memory_order_relaxed);
-    s_context_feed_hold_active.store(false, std::memory_order_relaxed);
-    s_context_hold_complete.store(false, std::memory_order_relaxed);
-    s_context_hold_carry_speed.store(0, std::memory_order_relaxed);
     reset_context_fifo();
 }
 
@@ -329,8 +315,6 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
         .execution_plan = execution_plan,
         .active = true,
         .generation_complete = false,
-        .feed_hold = false,
-        .ends_feed_hold = false,
         .completes_source_block = true,
     };
     context->current_speed_tenths_mm_per_min.store(
@@ -352,7 +336,6 @@ bool stepper_prep_start_block(const planner::PlannerBlock& block) {
 void stepper_prep_cancel_block() {
     release_active_context();
     sync_active_context_state();
-    s_context_hold_boundary.store(false, std::memory_order_relaxed);
 }
 
 bool stepper_prep_next_segment(StepSegment& segment) {
@@ -383,156 +366,7 @@ bool stepper_prep_complete_block(const std::uint64_t execution_id) {
             static_cast<std::int32_t>(context->profile.execution_plan.total_major_steps)) {
         return false;
     }
-    const StepperProfile& profile = context->profile;
-    const bool hold_ended = profile.feed_hold && profile.ends_feed_hold;
-    const bool continue_hold = profile.feed_hold && !profile.ends_feed_hold;
-    const std::uint32_t carry_speed =
-        context->current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
     stepper_prep_cancel_block();
-    if (hold_ended) {
-        s_context_hold_complete.store(true, std::memory_order_release);
-    }
-    if (continue_hold) {
-        s_context_hold_carry_speed.store(carry_speed, std::memory_order_release);
-        s_context_feed_hold_active.store(true, std::memory_order_release);
-    }
-    return true;
-}
-
-bool stepper_prep_begin_feed_hold() {
-    StepperProfile& active = active_profile();
-    if (!active.active) return false;
-    const std::int32_t total_steps = s_context_total_major_steps.load(std::memory_order_acquire);
-    const std::int32_t executed_steps = s_context_executed_major_steps.load(std::memory_order_acquire);
-    const std::int32_t remaining_steps = total_steps - executed_steps;
-    const double speed = static_cast<double>(
-        s_context_current_speed_tenths_mm_per_min.load(std::memory_order_acquire)) / 10.0;
-    if (remaining_steps <= 0 || speed <= 0.0) {
-        s_context_hold_complete.store(true, std::memory_order_release);
-        return false;
-    }
-    const double remaining_mm = active.execution_plan.profile.length_mm * remaining_steps /
-                                active.execution_plan.total_major_steps;
-    const double acceleration = active.execution_plan.profile.acceleration_mm_per_min2;
-    const double stop_mm = speed * speed / (2.0 * acceleration);
-    const bool stops_here = stop_mm <= remaining_mm;
-    const double travel_mm = stops_here ? stop_mm : remaining_mm;
-    const std::int32_t travel_steps = std::clamp<std::int32_t>(
-        static_cast<std::int32_t>(std::ceil(remaining_steps * travel_mm / remaining_mm)), 1, remaining_steps);
-
-    planner::PlannerBlock residual = active_source_block();
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        const std::int32_t remaining_axis = std::max<std::int32_t>(
-            0, active_source_block().geometry.steps[axis] -
-                   s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
-        residual.geometry.steps[axis] = static_cast<std::int32_t>(
-            (static_cast<std::int64_t>(remaining_axis) * travel_steps) / remaining_steps);
-    }
-    residual.step_event_count = travel_steps;
-    residual.millimeters = remaining_mm * travel_steps / remaining_steps;
-    residual.programmed_rate_mm_per_min = speed;
-    active_source_block() = residual;
-    const double exit_speed = stops_here ? 0.0 :
-        std::sqrt(std::max(0.0, speed * speed - 2.0 * acceleration * residual.millimeters));
-    TrapezoidExecutionPlan execution_plan = {};
-    if (!trapezoid_execution_plan_build({
-                                            .execution_id = residual.execution_id,
-                                            .total_major_steps = static_cast<std::uint32_t>(travel_steps),
-                                            .profile_input = {
-                                                .length_mm = residual.millimeters,
-                                                .entry_speed_mm_per_min = speed,
-                                                .nominal_speed_mm_per_min = speed,
-                                                .exit_speed_mm_per_min = exit_speed,
-                                                .acceleration_mm_per_min2 = acceleration,
-                                            },
-                                            .segment_duration_us = kStepSegmentTargetDurationUs,
-                                            .timer_ticks_per_us = kStepTimerTicksPerMicrosecond,
-                                        }, execution_plan)) {
-        return false;
-    }
-    active_profile() = {
-        .execution_plan = execution_plan,
-        .active = true,
-        .generation_complete = false,
-        .feed_hold = true,
-        .ends_feed_hold = stops_here,
-        .completes_source_block = travel_steps == remaining_steps,
-    };
-    s_context_hold_boundary.store(false, std::memory_order_release);
-    s_context_feed_hold_active.store(true, std::memory_order_release);
-    return true;
-}
-
-bool stepper_prep_continue_feed_hold(const planner::PlannerBlock& block) {
-    const std::uint32_t carry = s_context_hold_carry_speed.exchange(0, std::memory_order_acq_rel);
-    if (carry == 0 || !stepper_prep_start_block(block)) return false;
-    s_context_current_speed_tenths_mm_per_min.store(carry, std::memory_order_release);
-    return stepper_prep_begin_feed_hold();
-}
-
-bool stepper_prep_hold_boundary_pending() {
-    return s_context_hold_boundary.load(std::memory_order_acquire) &&
-           !s_context_feed_hold_active.load(std::memory_order_acquire);
-}
-
-bool stepper_prep_hold_complete() {
-    return s_context_hold_complete.load(std::memory_order_acquire);
-}
-
-bool stepper_prep_resume_from_hold() {
-    if (!stepper_prep_hold_complete() || !active_profile().active ||
-        s_context_execution_id.load(std::memory_order_acquire) == 0) {
-        return false;
-    }
-    const std::int32_t total_steps = s_context_total_major_steps.load(std::memory_order_acquire);
-    const std::int32_t executed_steps = s_context_executed_major_steps.load(std::memory_order_acquire);
-    const std::int32_t remaining_steps = total_steps - executed_steps;
-    if (!block_is_valid(active_original_source_block()) || remaining_steps <= 0) {
-        return false;
-    }
-
-    planner::PlannerBlock residual = active_original_source_block();
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        residual.geometry.steps[axis] = std::max<std::int32_t>(
-            0, active_original_source_block().geometry.steps[axis] -
-                   s_context_executed_axis_steps[axis].load(std::memory_order_acquire));
-    }
-    residual.step_event_count = remaining_steps;
-    residual.millimeters = active_original_source_block().millimeters * remaining_steps /
-                           active_original_source_block().step_event_count;
-    const double entry_speed = 0.0;
-    const double exit_speed = std::sqrt(std::max(0.0, residual.exit_speed_sqr));
-    TrapezoidExecutionPlan execution_plan = {};
-    if (!trapezoid_execution_plan_build({
-                                            .execution_id = residual.execution_id,
-                                            .total_major_steps = static_cast<std::uint32_t>(remaining_steps),
-                                            .profile_input = {
-                                                .length_mm = residual.millimeters,
-                                                .entry_speed_mm_per_min = entry_speed,
-                                                .nominal_speed_mm_per_min = residual.programmed_rate_mm_per_min,
-                                                .exit_speed_mm_per_min = exit_speed,
-                                                .acceleration_mm_per_min2 =
-                                                    residual.acceleration_mm_per_sec2 * 60.0 * 60.0,
-                                            },
-                                            .segment_duration_us = kStepSegmentTargetDurationUs,
-                                            .timer_ticks_per_us = kStepTimerTicksPerMicrosecond,
-                                        }, execution_plan)) {
-        return false;
-    }
-    active_source_block() = residual;
-    active_profile() = {
-        .execution_plan = execution_plan,
-        .active = true,
-        .generation_complete = false,
-        .feed_hold = false,
-        .ends_feed_hold = false,
-        .completes_source_block = true,
-    };
-    s_context_current_speed_tenths_mm_per_min.store(0, std::memory_order_release);
-    s_context_generation_complete.store(false, std::memory_order_release);
-    s_context_hold_boundary.store(false, std::memory_order_release);
-    s_context_feed_hold_active.store(false, std::memory_order_release);
-    s_context_hold_complete.store(false, std::memory_order_release);
     return true;
 }
 
@@ -550,19 +384,6 @@ bool stepper_prep_record_segment_completed(const SegmentCompletion& completion) 
     return true;
 }
 
-void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr() {
-    s_context_hold_boundary.store(true, std::memory_order_release);
-}
-
-void IRAM_ATTR stepper_prep_record_hold_complete_from_isr() {
-    s_context_hold_boundary.store(false, std::memory_order_release);
-    s_context_hold_complete.store(true, std::memory_order_release);
-}
-
-void stepper_prep_clear_hold_boundary() {
-    s_context_hold_boundary.store(false, std::memory_order_release);
-}
-
 const StepperProfile& stepper_prep_profile() {
     return active_profile();
 }
@@ -573,7 +394,6 @@ StepperPrepDiagnostics stepper_prep_diagnostics() {
     diagnostics.active = diagnostics.execution_id != 0;
     diagnostics.generation_complete =
         s_context_generation_complete.load(std::memory_order_acquire);
-    diagnostics.hold_boundary = stepper_prep_hold_boundary_pending();
     diagnostics.total_major_steps = s_context_total_major_steps.load(std::memory_order_relaxed);
     diagnostics.executed_major_steps = s_context_executed_major_steps.load(std::memory_order_relaxed);
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
@@ -595,5 +415,4 @@ StepperPrepDiagnostics stepper_prep_diagnostics() {
         stepper_segment_diagnostics().active_execution_id;
     return diagnostics;
 }
-
 }  // namespace ray2::stepper

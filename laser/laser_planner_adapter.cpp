@@ -30,12 +30,6 @@ void planner_execution_callback(const planner::ExecutionEvent& event, void*) {
         case planner::ExecutionEventType::SegmentBatchCompleted:
         case planner::ExecutionEventType::BlockCompleted:
             return;
-        case planner::ExecutionEventType::Resumed:
-            laser_set_motion_output_permitted(true);
-            return;
-        case planner::ExecutionEventType::FeedHoldRequested:
-            laser_set_motion_output_permitted(false);
-            return;
         case planner::ExecutionEventType::BlockCancelled:
         case planner::ExecutionEventType::BlockFailed:
             disable_laser();

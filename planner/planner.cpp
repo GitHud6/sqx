@@ -19,11 +19,6 @@
 namespace ray2::planner {
 namespace {
 
-enum class ControlState {
-    Running,
-    Hold,
-};
-
 TaskHandle_t s_planner_task = nullptr;
 std::array<MotionBlock, kPlannerQueueLength> s_block_buffer = {};
 std::size_t s_block_head = 0;
@@ -34,8 +29,6 @@ std::size_t s_block_count = 0;
 double s_tail_entry_speed_sqr = 0.0;
 portMUX_TYPE s_block_buffer_lock = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t s_capacity_waiter = nullptr;
-std::atomic<ControlState> s_control_state = ControlState::Running;
-std::atomic<std::uint32_t> s_reset_generation = 0;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
 std::atomic<std::uint64_t> s_coalesced_short_block_count = 0;
 std::atomic<std::uint64_t> s_next_execution_id = 1;
@@ -46,30 +39,10 @@ void* s_execution_callback_user_data = nullptr;
 MotionBlock s_active_block = {};
 bool s_has_active_block = false;
 
-struct FeedHoldCheckpoint {
-    bool valid = false;
-    MotionBlock block = {};
-    stepper::MachinePosition position = {};
-    std::size_t block_tail = 0;
-};
-
-struct FeedHoldSnapshot {
-    bool valid = false;
-    FeedHoldState state = FeedHoldState::Running;
-    FeedHoldCheckpoint checkpoint = {};
-    std::uint64_t active_execution_id = 0;
-    stepper::MachinePosition stopped_position = {};
-};
-
-portMUX_TYPE s_feed_hold_lock = portMUX_INITIALIZER_UNLOCKED;
-FeedHoldCheckpoint s_latest_checkpoint = {};
-FeedHoldSnapshot s_feed_hold_snapshot = {};
-
 constexpr double kMinimumJunctionSpeedMmPerMin = 1.0;
 constexpr double kCoalescingDirectionCosine = 0.999999;
 constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
-constexpr TickType_t kHoldWaitTime = pdMS_TO_TICKS(10);
 constexpr char kLogTag[] = "planner";
 
 std::size_t block_index_after(const std::size_t index) {
@@ -374,7 +347,6 @@ SubmitResult submit_block(MotionBlock block) {
                  static_cast<long>(block.step_event_count));
         return SubmitResult::Rejected;
     }
-    block.reset_generation = s_reset_generation.load();
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (coalesce_tail_block_locked(block)) {
         planner_recalculate_locked();
@@ -407,10 +379,8 @@ SubmitResult submit_blocks(const MotionBlock* const blocks, const std::size_t co
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return SubmitResult::Full;
     }
-    const std::uint32_t reset_generation = s_reset_generation.load();
     for (std::size_t index = 0; index < count; ++index) {
         MotionBlock block = blocks[index];
-        block.reset_generation = reset_generation;
         block.execution_id = s_next_execution_id.fetch_add(1);
         s_block_buffer[s_block_head] = block;
         s_block_head = (s_block_head + 1) % kPlannerQueueLength;
@@ -432,71 +402,6 @@ bool current_block_snapshot(MotionBlock& block) {
     block = s_block_buffer[s_block_tail];
     portEXIT_CRITICAL(&s_block_buffer_lock);
     return true;
-}
-
-void record_feed_hold_checkpoint(const MotionBlock& block) {
-    FeedHoldCheckpoint checkpoint = {};
-    checkpoint.valid = true;
-    checkpoint.block = block;
-    checkpoint.position = stepper::machine_position();
-    portENTER_CRITICAL(&s_block_buffer_lock);
-    checkpoint.block_tail = s_block_tail;
-    portEXIT_CRITICAL(&s_block_buffer_lock);
-
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    s_latest_checkpoint = checkpoint;
-    portEXIT_CRITICAL(&s_feed_hold_lock);
-}
-
-void capture_feed_hold_snapshot() {
-    MotionBlock active = {};
-    const bool has_active = active_block_snapshot(active);
-    const bool executor_busy = stepper::timer_stepper_executor_is_busy();
-    const stepper::MachinePosition current_position = stepper::machine_position();
-
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    s_feed_hold_snapshot = {};
-    s_feed_hold_snapshot.state = FeedHoldState::Requested;
-    s_feed_hold_snapshot.active_execution_id = has_active ? active.execution_id : 0;
-    s_feed_hold_snapshot.stopped_position = current_position;
-    // An idle Hold must not resurrect the previous job's checkpoint. During a
-    // narrow start-up window the ISR may already be busy before planner has
-    // published the active-block event, so executor activity is also valid.
-    if ((has_active || executor_busy) && s_latest_checkpoint.valid) {
-        s_feed_hold_snapshot.valid = true;
-        s_feed_hold_snapshot.checkpoint = s_latest_checkpoint;
-        if (!has_active) {
-            s_feed_hold_snapshot.active_execution_id = s_latest_checkpoint.block.execution_id;
-        }
-    }
-    portEXIT_CRITICAL(&s_feed_hold_lock);
-}
-
-void capture_feed_hold_stop_if_ready() {
-    if (s_control_state.load(std::memory_order_acquire) != ControlState::Hold ||
-        stepper::timer_stepper_executor_is_busy() || !stepper::segment_producer_hold_complete()) {
-        return;
-    }
-
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    if (s_feed_hold_snapshot.state == FeedHoldState::Requested) {
-        s_feed_hold_snapshot.stopped_position = stepper::machine_position();
-        s_feed_hold_snapshot.state = FeedHoldState::Stopped;
-    }
-    portEXIT_CRITICAL(&s_feed_hold_lock);
-}
-
-void clear_feed_hold_snapshot() {
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    s_feed_hold_snapshot = {};
-    portEXIT_CRITICAL(&s_feed_hold_lock);
-}
-
-bool feed_hold_is_stopped() {
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    const bool stopped = s_feed_hold_snapshot.state == FeedHoldState::Stopped;
-    portEXIT_CRITICAL(&s_feed_hold_lock);
-    return stopped;
 }
 
 bool freeze_next_motion_block(MotionBlock& block) {
@@ -548,8 +453,7 @@ void discard_current_block(const MotionBlock& block, const bool preserve_exit_sp
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (s_block_count != 0) {
         const MotionBlock& current = s_block_buffer[s_block_tail];
-        if (current.execution_id == block.execution_id &&
-            current.reset_generation == block.reset_generation) {
+        if (current.execution_id == block.execution_id) {
             s_block_tail = block_index_after(s_block_tail);
             --s_block_count;
             s_tail_entry_speed_sqr = preserve_exit_speed && s_block_count != 0
@@ -589,36 +493,7 @@ void disable_axes_after_idle() {
     }
 }
 
-bool wait_for_run_permission(std::uint32_t block_generation) {
-    while (s_control_state.load() == ControlState::Hold) {
-        if (s_reset_generation.load() != block_generation) {
-            return false;
-        }
-        vTaskDelay(kHoldWaitTime == 0 ? 1 : kHoldWaitTime);
-    }
-    return s_reset_generation.load() == block_generation;
-}
-
 void fill_segment_ring_from_planner(const std::uint32_t transport_events) {
-    if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold) {
-        if (stepper::segment_producer_hold_boundary_pending()) {
-            // Old cached segments carry the pre-hold profile and are invalid
-            // once the actual boundary speed has been captured.
-            stepper::segment_producer_discard_pending();
-            stepper::segment_producer_begin_feed_hold();
-        }
-        if (!stepper::segment_producer_profile().active) {
-            MotionBlock candidate = {};
-            if (current_block_snapshot(candidate) && candidate.type == MotionBlockType::Motion &&
-                stepper::segment_producer_continue_feed_hold(candidate)) {
-            }
-        }
-        if (stepper::segment_producer_profile().active &&
-            !stepper::segment_producer_profile().generation_complete) {
-            stepper::segment_producer_process_events(transport_events);
-        }
-        return;
-    }
     stepper::segment_producer_process_events(transport_events);
     while (true) {
         if (stepper::segment_producer_profile().active &&
@@ -664,12 +539,6 @@ void mark_isr_started_block_active() {
 }
 
 bool start_segment_ring() {
-    MotionBlock block = {};
-    if (current_block_snapshot(block)) {
-        // Capture before the first STEP of this block, so a later recovery has
-        // an exact integer-step boundary rather than a planned approximation.
-        record_feed_hold_checkpoint(block);
-    }
     if (!stepper::segment_producer_start()) {
         return false;
     }
@@ -769,28 +638,14 @@ void planner_task(void*) {
         }
         fill_segment_ring_from_planner(transport_events);
         mark_isr_started_block_active();
-        capture_feed_hold_stop_if_ready();
         if (stepper::timer_stepper_executor_is_busy()) {
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-            continue;
-        }
-
-        if (s_control_state.load(std::memory_order_acquire) == ControlState::Hold &&
-            stepper::segment_producer_has_pending_segments()) {
-            start_segment_ring();
             continue;
         }
 
         if (!current_block_snapshot(block)) {
             disable_axes_after_idle();
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-            continue;
-        }
-
-        if (!wait_for_run_permission(block.reset_generation)) {
-            stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
-            emit_execution_event(ExecutionEventType::BlockCancelled, &block);
-            report_queue_drained();
             continue;
         }
 
@@ -811,7 +666,6 @@ void planner_task(void*) {
             ++s_completed_block_count;
             emit_execution_event(ExecutionEventType::BlockCompleted, &block);
             discard_current_block(block);
-            s_control_state.store(ControlState::Hold);
             report_queue_drained();
             continue;
         }
@@ -819,22 +673,14 @@ void planner_task(void*) {
             set_active_block(block);
             emit_execution_event(ExecutionEventType::BlockStarted, &block);
             std::uint32_t remaining = block.dwell_milliseconds;
-            while (remaining != 0 && s_reset_generation.load() == block.reset_generation) {
+            while (remaining != 0) {
                 const TickType_t delay = pdMS_TO_TICKS(std::min<std::uint32_t>(remaining, 10));
                 vTaskDelay(delay == 0 ? 1 : delay);
                 remaining = remaining > 10 ? remaining - 10 : 0;
-                while (s_control_state.load() == ControlState::Hold &&
-                       s_reset_generation.load() == block.reset_generation) {
-                    vTaskDelay(kHoldWaitTime == 0 ? 1 : kHoldWaitTime);
-                }
             }
             clear_active_block();
-            if (s_reset_generation.load() != block.reset_generation) {
-                emit_execution_event(ExecutionEventType::BlockCancelled, &block);
-            } else {
-                ++s_completed_block_count;
-                emit_execution_event(ExecutionEventType::BlockCompleted, &block);
-            }
+            ++s_completed_block_count;
+            emit_execution_event(ExecutionEventType::BlockCompleted, &block);
             discard_current_block(block);
             report_queue_drained();
             continue;
@@ -848,10 +694,7 @@ void planner_task(void*) {
                 vTaskDelay(1);
                 continue;
             }
-            if (s_reset_generation.load() != block.reset_generation) {
-                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
-                emit_execution_event(ExecutionEventType::BlockCancelled, &block);
-            } else {
+            {
                 ESP_LOGE(kLogTag,
                          "EXECUTION-FAULT reason=start-segment-ring-failed id=%llu "
                          "queued=%u prep_active=%d prep_id=%llu",
@@ -920,57 +763,10 @@ void planner_set_execution_callback(ExecutionCallback callback, void* user_data)
     portEXIT_CRITICAL(&s_execution_event_lock);
 }
 
-void planner_request_feed_hold() {
-    s_control_state.store(ControlState::Hold);
-    stepper::timer_stepper_executor_request_feed_hold();
-    capture_feed_hold_snapshot();
-    portENTER_CRITICAL(&s_block_buffer_lock);
-    planner_recalculate_locked();
-    portEXIT_CRITICAL(&s_block_buffer_lock);
-    MotionBlock block = {};
-    if (active_block_snapshot(block)) {
-        emit_execution_event(ExecutionEventType::FeedHoldRequested, &block);
-    } else {
-        emit_execution_event(ExecutionEventType::FeedHoldRequested);
-    }
-    if (s_planner_task != nullptr) {
-        xTaskNotifyGive(s_planner_task);
-    }
-}
-
-void planner_resume() {
-    if (feed_hold_is_stopped()) {
-        const bool has_partial_block = stepper::segment_producer_diagnostics().active;
-        if (has_partial_block && !stepper::segment_producer_resume_from_hold()) {
-            return;
-        }
-    }
-    if (s_control_state.load() == ControlState::Hold) {
-        s_control_state.store(ControlState::Running);
-    }
-    stepper::timer_stepper_executor_resume();
-    clear_feed_hold_snapshot();
-    MotionBlock block = {};
-    if (active_block_snapshot(block)) {
-        emit_execution_event(ExecutionEventType::Resumed, &block);
-    } else {
-        emit_execution_event(ExecutionEventType::Resumed);
-    }
-    if (s_planner_task != nullptr) {
-        xTaskNotifyGive(s_planner_task);
-    }
-}
-
 void planner_reset() {
-    s_reset_generation.fetch_add(1);
-    s_control_state.store(ControlState::Running);
     stepper::timer_stepper_executor_stop();
     clear_active_block();
     stepper::segment_producer_reset();
-    clear_feed_hold_snapshot();
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    s_latest_checkpoint = {};
-    portEXIT_CRITICAL(&s_feed_hold_lock);
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
     TaskHandle_t capacity_waiter = nullptr;
     portENTER_CRITICAL(&s_block_buffer_lock);
@@ -998,10 +794,6 @@ bool planner_is_idle() {
     const bool has_active_block = s_has_active_block;
     portEXIT_CRITICAL(&s_execution_event_lock);
     return queue_is_empty && !has_active_block;
-}
-
-bool planner_is_holding() {
-    return s_control_state.load() == ControlState::Hold;
 }
 
 std::size_t planner_free_blocks() {
@@ -1074,15 +866,6 @@ PlannerDiagnostics planner_diagnostics() {
                              : block.state;
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
-    portENTER_CRITICAL(&s_feed_hold_lock);
-    diagnostics.feed_hold.state = s_feed_hold_snapshot.state;
-    diagnostics.feed_hold.snapshot_valid = s_feed_hold_snapshot.valid;
-    diagnostics.feed_hold.active_execution_id = s_feed_hold_snapshot.active_execution_id;
-    diagnostics.feed_hold.checkpoint_execution_id =
-        s_feed_hold_snapshot.checkpoint.valid ? s_feed_hold_snapshot.checkpoint.block.execution_id : 0;
-    diagnostics.feed_hold.checkpoint_steps = s_feed_hold_snapshot.checkpoint.position.steps;
-    diagnostics.feed_hold.stopped_steps = s_feed_hold_snapshot.stopped_position.steps;
-    portEXIT_CRITICAL(&s_feed_hold_lock);
     return diagnostics;
 }
 

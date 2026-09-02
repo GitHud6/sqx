@@ -20,7 +20,6 @@ constexpr char kLogTag[] = "timer_stepper";
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
-std::atomic<bool> s_feed_hold_requested = false;
 // These counters are sampled once per second for diagnostics. 32-bit values
 // are sufficient for that window and avoid expensive 64-bit atomics in ISR.
 std::atomic<std::uint32_t> s_scheduled_timer_ticks = 0;
@@ -46,8 +45,6 @@ struct MotionState {
     std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
-    bool feed_hold = false;
-    bool ends_feed_hold = false;
     bool system_motion = false;
     bool uses_block_phase = false;
     bool axis_stopped[machine::kAxisCount] = {};
@@ -87,8 +84,6 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
-    motion.feed_hold = segment.feed_hold;
-    motion.ends_feed_hold = segment.ends_feed_hold;
     motion.system_motion = segment.system_motion;
     if (segment.block_major_steps > 0 &&
         std::max(segment.block_axis_steps[0], segment.block_axis_steps[1]) ==
@@ -246,22 +241,6 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
             stepper_segment_clear_active_from_isr();
-        } else if (completed_motion.ends_feed_hold) {
-            s_busy.store(false);
-            driver::step_timer_driver_stop_from_isr();
-            laser::laser_disable_from_isr();
-            stepper_segment_clear_active_from_isr();
-            stepper_prep_record_hold_complete_from_isr();
-            stepper_segment_request_refill_from_isr(&task_woken);
-        } else if (s_feed_hold_requested.load(std::memory_order_relaxed) && !completed_motion.feed_hold) {
-            // The executor only ends the active segment. The persistent prep
-            // context owns the later deceleration and resume work.
-            s_busy.store(false);
-            driver::step_timer_driver_stop_from_isr();
-            laser::laser_disable_from_isr();
-            stepper_segment_clear_active_from_isr();
-            stepper_prep_record_hold_boundary_from_isr();
-            stepper_segment_request_refill_from_isr(&task_woken);
         } else if (stepper_segment_consume(next)) {
             apply_segment_direction_from_isr(next);
             MotionState next_motion = motion_from_segment(next);
@@ -404,15 +383,6 @@ esp_err_t timer_stepper_executor_start_from_segment_ring() {
 
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
-void timer_stepper_executor_request_feed_hold() {
-    s_feed_hold_requested.store(true, std::memory_order_release);
-}
-
-void timer_stepper_executor_resume() {
-    s_feed_hold_requested.store(false, std::memory_order_release);
-    stepper_prep_clear_hold_boundary();
-}
-
 void timer_stepper_executor_stop() {
     if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
@@ -426,7 +396,6 @@ void timer_stepper_executor_stop() {
     s_busy.store(false);
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
-    s_feed_hold_requested.store(false, std::memory_order_release);
 }
 
 void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
