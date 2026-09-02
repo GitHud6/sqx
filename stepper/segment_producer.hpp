@@ -41,6 +41,7 @@ bool segment_producer_hold_complete();
 bool segment_producer_resume_from_hold();
 
 bool segment_producer_consume_completion(SegmentCompletion& completion);
+bool segment_producer_record_segment_completed(const SegmentCompletion& completion);
 bool segment_producer_complete_plan(std::uint64_t execution_id);
 void segment_producer_discard_pending();
 

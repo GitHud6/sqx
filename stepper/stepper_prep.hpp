@@ -65,7 +65,7 @@ bool stepper_prep_continue_feed_hold(const planner::PlannerBlock& block);
 bool stepper_prep_hold_boundary_pending();
 bool stepper_prep_hold_complete();
 bool stepper_prep_resume_from_hold();
-void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment);
+bool stepper_prep_record_segment_completed(const SegmentCompletion& completion);
 void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr();
 void IRAM_ATTR stepper_prep_record_hold_complete_from_isr();
 void stepper_prep_clear_hold_boundary();

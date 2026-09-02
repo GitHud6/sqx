@@ -536,16 +536,18 @@ bool stepper_prep_resume_from_hold() {
     return true;
 }
 
-void IRAM_ATTR stepper_prep_record_segment_completed_from_isr(const StepSegment& segment) {
-    TrapezoidPrepContext* context = context_for_execution_id(segment.execution_id);
-    if (context == nullptr) return;
-    context->executed_major_steps.fetch_add(segment.major_steps, std::memory_order_relaxed);
+bool stepper_prep_record_segment_completed(const SegmentCompletion& completion) {
+    if (completion.status != SegmentCompletionStatus::Completed) return false;
+    TrapezoidPrepContext* context = context_for_execution_id(completion.execution_id);
+    if (context == nullptr) return false;
+    context->executed_major_steps.fetch_add(completion.major_steps, std::memory_order_relaxed);
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        context->executed_axis_steps[axis].fetch_add(segment.axis_steps[axis],
+        context->executed_axis_steps[axis].fetch_add(completion.axis_steps[axis],
                                                       std::memory_order_relaxed);
     }
     context->current_speed_tenths_mm_per_min.store(
-        segment.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+        completion.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    return true;
 }
 
 void IRAM_ATTR stepper_prep_record_hold_boundary_from_isr() {

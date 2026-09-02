@@ -103,6 +103,10 @@ bool segment_producer_consume_completion(SegmentCompletion& completion) {
     return stepper_completion_consume(completion);
 }
 
+bool segment_producer_record_segment_completed(const SegmentCompletion& completion) {
+    return stepper_prep_record_segment_completed(completion);
+}
+
 bool segment_producer_complete_plan(const std::uint64_t execution_id) {
     return stepper_prep_complete_block(execution_id);
 }

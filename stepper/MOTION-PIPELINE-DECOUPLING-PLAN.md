@@ -336,6 +336,9 @@ planner 状态。
 
 目标：确保硬件层只消费已完成的 segment，使用固定、短、可预测的脉冲路径。
 
+当前进度：已实机验收。普通运动的 segment 完成已改为由 executor 发布实际执行结果到 completion ring，
+再由 planner task 经 producer 回写 prep 上下文。hold/resume 的控制边界仍留在阶段七处理。
+
 改动范围：硬件 Timer 回调、segment handoff、周期装载、DIR/ENABLE 时序、RMT STEP 触发和错误上报。
 
 删除或迁移：

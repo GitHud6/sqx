@@ -218,28 +218,26 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
         const MotionState completed_motion = s_motion;
-        StepSegment completed_segment = {};
-        completed_segment.execution_id = completed_motion.execution_id;
-        completed_segment.axis_steps = {
-            completed_motion.emitted_axis_steps[0],
-            completed_motion.emitted_axis_steps[1],
+        const SegmentCompletion completion = {
+            .execution_id = completed_motion.execution_id,
+            .status = SegmentCompletionStatus::Completed,
+            .axis_steps = {
+                completed_motion.emitted_axis_steps[0],
+                completed_motion.emitted_axis_steps[1],
+            },
+            .major_steps = completed_motion.axis_steps[0] > completed_motion.axis_steps[1]
+                               ? completed_motion.axis_steps[0]
+                               : completed_motion.axis_steps[1],
+            .end_speed_tenths_mm_per_min = completed_motion.end_speed_tenths_mm_per_min,
+            .completes_block = completed_motion.completes_block,
         };
-        completed_segment.major_steps = completed_motion.axis_steps[0] > completed_motion.axis_steps[1]
-                                            ? completed_motion.axis_steps[0]
-                                            : completed_motion.axis_steps[1];
-        completed_segment.end_speed_tenths_mm_per_min = completed_motion.end_speed_tenths_mm_per_min;
         if (!completed_motion.system_motion) {
             for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
                 stepper_record_executed_steps_from_isr(
                     static_cast<machine::Axis>(axis), completed_motion.emitted_axis_steps[axis]);
             }
         }
-        stepper_prep_record_segment_completed_from_isr(completed_segment);
-        if (completed_motion.completes_block) {
-            const SegmentCompletion completion = {
-                .execution_id = completed_motion.execution_id,
-                .status = SegmentCompletionStatus::Completed,
-            };
+        if (!completed_motion.system_motion) {
             stepper_completion_publish_from_isr(completion, &task_woken);
         }
         StepSegment next = {};

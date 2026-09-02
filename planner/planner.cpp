@@ -695,11 +695,24 @@ void consume_segment_completions() {
             continue;
         }
 
-        MotionBlock active = {};
-        if (active_block_snapshot(active) && active.execution_id == completion.execution_id) {
-            clear_active_block();
-        }
         if (completion.status == stepper::SegmentCompletionStatus::Completed) {
+            if (!stepper::segment_producer_record_segment_completed(completion)) {
+                ESP_LOGE(kLogTag, "EXECUTION-FAULT reason=segment-accounting-failed id=%llu",
+                         static_cast<unsigned long long>(completion.execution_id));
+                stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
+                emit_execution_event(ExecutionEventType::BlockFailed, &block);
+                stepper::timer_stepper_executor_stop();
+                stepper::segment_producer_abort();
+                planner_reset();
+                continue;
+            }
+            if (!completion.completes_block) {
+                continue;
+            }
+            MotionBlock active = {};
+            if (active_block_snapshot(active) && active.execution_id == completion.execution_id) {
+                clear_active_block();
+            }
             if (!stepper::segment_producer_complete_plan(completion.execution_id)) {
                 const auto prep = stepper::segment_producer_diagnostics();
                 const auto transport = stepper::segment_producer_transport_diagnostics();

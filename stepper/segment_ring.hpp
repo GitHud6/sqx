@@ -50,6 +50,10 @@ enum class SegmentCompletionStatus : std::uint8_t { Completed, Faulted };
 struct SegmentCompletion {
     std::uint64_t execution_id = 0;
     SegmentCompletionStatus status = SegmentCompletionStatus::Completed;
+    std::array<std::int32_t, 2> axis_steps = {};
+    std::int32_t major_steps = 0;
+    std::uint32_t end_speed_tenths_mm_per_min = 0;
+    bool completes_block = false;
 };
 
 enum StepperTransportEvent : std::uint32_t {
