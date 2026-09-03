@@ -64,10 +64,6 @@ struct TimerStepperDiagnostics {
     std::uint32_t boundary_prev_end_speed_tenths_mm_per_min = 0;
     std::uint32_t boundary_next_start_speed_tenths_mm_per_min = 0;
     std::uint32_t boundary_next_end_speed_tenths_mm_per_min = 0;
-    std::uint32_t boundary_profile_entry_speed_tenths_mm_per_min = 0;
-    std::uint32_t boundary_profile_exit_speed_tenths_mm_per_min = 0;
-    std::uint32_t boundary_profile_nominal_speed_tenths_mm_per_min = 0;
-    std::uint32_t boundary_planner_junction_speed_tenths_mm_per_min = 0;
     std::uint8_t boundary_prev_phase = 0;
     std::uint8_t boundary_next_phase = 0;
     std::uint8_t boundary_prev_amass_level = 0;

@@ -71,10 +71,6 @@ std::atomic<std::uint32_t> s_boundary_prev_start_speed_tenths_mm_per_min = 0;
 std::atomic<std::uint32_t> s_boundary_prev_end_speed_tenths_mm_per_min = 0;
 std::atomic<std::uint32_t> s_boundary_next_start_speed_tenths_mm_per_min = 0;
 std::atomic<std::uint32_t> s_boundary_next_end_speed_tenths_mm_per_min = 0;
-std::atomic<std::uint32_t> s_boundary_profile_entry_speed_tenths_mm_per_min = 0;
-std::atomic<std::uint32_t> s_boundary_profile_exit_speed_tenths_mm_per_min = 0;
-std::atomic<std::uint32_t> s_boundary_profile_nominal_speed_tenths_mm_per_min = 0;
-std::atomic<std::uint32_t> s_boundary_planner_junction_speed_tenths_mm_per_min = 0;
 std::atomic<std::uint8_t> s_boundary_prev_phase = 0;
 std::atomic<std::uint8_t> s_boundary_next_phase = 0;
 std::atomic<std::uint8_t> s_boundary_prev_amass_level = 0;
@@ -97,10 +93,6 @@ struct MotionState {
     std::uint8_t amass_level = 0;
     std::uint32_t end_speed_tenths_mm_per_min = 0;
     std::uint32_t start_speed_tenths_mm_per_min = 0;
-    std::uint32_t profile_entry_speed_tenths_mm_per_min = 0;
-    std::uint32_t profile_exit_speed_tenths_mm_per_min = 0;
-    std::uint32_t profile_nominal_speed_tenths_mm_per_min = 0;
-    std::uint32_t planner_junction_speed_tenths_mm_per_min = 0;
     StepSegmentPhase phase = StepSegmentPhase::Cruise;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
@@ -196,14 +188,6 @@ void IRAM_ATTR record_interval_delta(const MotionState& previous_motion,
         next_motion.start_speed_tenths_mm_per_min, std::memory_order_relaxed);
     s_boundary_next_end_speed_tenths_mm_per_min.store(
         next_motion.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
-    s_boundary_profile_entry_speed_tenths_mm_per_min.store(
-        next_motion.profile_entry_speed_tenths_mm_per_min, std::memory_order_relaxed);
-    s_boundary_profile_exit_speed_tenths_mm_per_min.store(
-        next_motion.profile_exit_speed_tenths_mm_per_min, std::memory_order_relaxed);
-    s_boundary_profile_nominal_speed_tenths_mm_per_min.store(
-        next_motion.profile_nominal_speed_tenths_mm_per_min, std::memory_order_relaxed);
-    s_boundary_planner_junction_speed_tenths_mm_per_min.store(
-        next_motion.planner_junction_speed_tenths_mm_per_min, std::memory_order_relaxed);
     s_boundary_prev_phase.store(static_cast<std::uint8_t>(previous_motion.phase),
                                 std::memory_order_relaxed);
     s_boundary_next_phase.store(static_cast<std::uint8_t>(next_motion.phase),
@@ -284,10 +268,6 @@ MotionState motion_from_segment(const StepSegment& segment) {
     motion.amass_level = segment.amass_level;
     motion.start_speed_tenths_mm_per_min = segment.start_speed_tenths_mm_per_min;
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
-    motion.profile_entry_speed_tenths_mm_per_min = segment.profile_entry_speed_tenths_mm_per_min;
-    motion.profile_exit_speed_tenths_mm_per_min = segment.profile_exit_speed_tenths_mm_per_min;
-    motion.profile_nominal_speed_tenths_mm_per_min = segment.profile_nominal_speed_tenths_mm_per_min;
-    motion.planner_junction_speed_tenths_mm_per_min = segment.planner_junction_speed_tenths_mm_per_min;
     motion.phase = segment.phase;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
@@ -724,14 +704,6 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
         s_boundary_next_start_speed_tenths_mm_per_min.load();
     diagnostics.boundary_next_end_speed_tenths_mm_per_min =
         s_boundary_next_end_speed_tenths_mm_per_min.load();
-    diagnostics.boundary_profile_entry_speed_tenths_mm_per_min =
-        s_boundary_profile_entry_speed_tenths_mm_per_min.load();
-    diagnostics.boundary_profile_exit_speed_tenths_mm_per_min =
-        s_boundary_profile_exit_speed_tenths_mm_per_min.load();
-    diagnostics.boundary_profile_nominal_speed_tenths_mm_per_min =
-        s_boundary_profile_nominal_speed_tenths_mm_per_min.load();
-    diagnostics.boundary_planner_junction_speed_tenths_mm_per_min =
-        s_boundary_planner_junction_speed_tenths_mm_per_min.load();
     diagnostics.boundary_prev_phase = s_boundary_prev_phase.load();
     diagnostics.boundary_next_phase = s_boundary_next_phase.load();
     diagnostics.boundary_prev_amass_level = s_boundary_prev_amass_level.load();
