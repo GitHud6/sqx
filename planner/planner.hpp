@@ -94,6 +94,13 @@ struct PlannerDiagnostics {
     int planner_task_core = -1;
     std::uint32_t recalculate_calls = 0;
     std::uint32_t recalculate_max_cycles = 0;
+    std::uint32_t snapshot_lock_max_cycles = 0;
+    std::uint32_t commit_lock_max_cycles = 0;
+    std::uint32_t snapshot_lock_samples = 0;
+    std::uint32_t commit_lock_samples = 0;
+    std::uint64_t snapshot_lock_total_cycles = 0;
+    std::uint64_t commit_lock_total_cycles = 0;
+    std::uint32_t stale_snapshot_count = 0;
     std::size_t queued_blocks = 0;
     std::size_t frozen_blocks = 0;
     std::uint64_t coalesced_short_blocks = 0;

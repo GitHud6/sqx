@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "runtime_affinity.hpp"
@@ -23,11 +24,14 @@ namespace ray2::planner {
 namespace {
 
 TaskHandle_t s_planner_task = nullptr;
+SemaphoreHandle_t s_recalculate_mutex = nullptr;
 std::atomic<int> s_planner_task_core = -1;
 std::array<MotionBlock, kPlannerQueueLength> s_block_buffer = {};
 std::size_t s_block_head = 0;
 std::size_t s_block_tail = 0;
 std::size_t s_block_count = 0;
+std::uint32_t s_block_generation = 0;
+bool s_recalculation_required = false;
 // Once the preceding motion block leaves the ring, preserve its exit speed as
 // the immutable entry boundary for the newly exposed queue head.
 double s_tail_entry_speed_sqr = 0.0;
@@ -39,6 +43,13 @@ std::atomic<std::uint64_t> s_next_execution_id = 1;
 PlannerVelocityCollapseDiagnostics s_velocity_collapse = {};
 std::uint32_t s_recalculate_calls = 0;
 std::uint32_t s_recalculate_max_cycles = 0;
+std::uint32_t s_snapshot_lock_max_cycles = 0;
+std::uint32_t s_commit_lock_max_cycles = 0;
+std::uint32_t s_snapshot_lock_samples = 0;
+std::uint32_t s_commit_lock_samples = 0;
+std::uint64_t s_snapshot_lock_total_cycles = 0;
+std::uint64_t s_commit_lock_total_cycles = 0;
+std::uint32_t s_stale_snapshot_count = 0;
 std::atomic<bool> s_queue_drain_reported = false;
 portMUX_TYPE s_execution_event_lock = portMUX_INITIALIZER_UNLOCKED;
 ExecutionCallback s_execution_callback = nullptr;
@@ -57,6 +68,48 @@ void record_recalculate_duration(const std::uint32_t elapsed_cycles) {
     if (elapsed_cycles > s_recalculate_max_cycles) {
         s_recalculate_max_cycles = elapsed_cycles;
     }
+}
+
+void record_max_cycles(std::uint32_t& maximum, const std::uint32_t elapsed_cycles) {
+    if (elapsed_cycles > maximum) {
+        maximum = elapsed_cycles;
+    }
+}
+
+struct PlannerSnapshotBlock {
+    MotionBlockType type = MotionBlockType::Motion;
+    PlannerBlockState state = PlannerBlockState::Lookahead;
+    std::uint64_t execution_id = 0;
+    std::int32_t step_event_count = 0;
+    double millimeters = 0.0;
+    double programmed_rate_mm_per_min = 0.0;
+    double acceleration_mm_per_sec2 = 0.0;
+    double unit_vector[2] = {};
+    double entry_speed_sqr = 0.0;
+    double exit_speed_sqr = 0.0;
+    double max_entry_speed_sqr = 0.0;
+    double max_junction_speed_sqr = 0.0;
+};
+
+struct PlannerSnapshot {
+    std::array<PlannerSnapshotBlock, kPlannerQueueLength> blocks = {};
+    std::size_t head = 0;
+    std::size_t tail = 0;
+    std::size_t count = 0;
+    std::size_t frozen_count = 0;
+    double tail_entry_speed_sqr = 0.0;
+    std::uint32_t generation = 0;
+};
+
+// Only look-ahead fields are stored in static DRAM. Request, geometry,
+// positions and spindle data never participate in velocity bounds.
+// Recalculation only runs in non-realtime CPU1 tasks and is serialized by
+// s_recalculate_mutex.
+PlannerSnapshot s_recalculate_snapshot = {};
+
+void planner_mark_dirty_locked() {
+    ++s_block_generation;
+    s_recalculation_required = true;
 }
 
 std::size_t block_index_after(const std::size_t index) {
@@ -88,6 +141,19 @@ bool is_plannable_motion(const MotionBlock& block) {
 }
 
 double nominal_speed_sqr(const MotionBlock& block) {
+    return block.programmed_rate_mm_per_min * block.programmed_rate_mm_per_min;
+}
+
+bool is_plannable_snapshot_block(const PlannerSnapshotBlock& block) {
+    return block.type == MotionBlockType::Motion && block.step_event_count > 0 &&
+           std::isfinite(block.millimeters) && block.millimeters > 0.0 &&
+           std::isfinite(block.programmed_rate_mm_per_min) &&
+           block.programmed_rate_mm_per_min > 0.0 &&
+           std::isfinite(block.acceleration_mm_per_sec2) &&
+           block.acceleration_mm_per_sec2 > 0.0;
+}
+
+double nominal_speed_sqr(const PlannerSnapshotBlock& block) {
     return block.programmed_rate_mm_per_min * block.programmed_rate_mm_per_min;
 }
 
@@ -176,6 +242,30 @@ double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& curren
                         (1.0 - sin_theta_d2));
 }
 
+double junction_speed_sqr(const PlannerSnapshotBlock& previous,
+                          const PlannerSnapshotBlock& current) {
+    const double minimum_speed_sqr =
+        kMinimumJunctionSpeedMmPerMin * kMinimumJunctionSpeedMmPerMin;
+    if (!is_plannable_snapshot_block(previous) || !is_plannable_snapshot_block(current)) {
+        return 0.0;
+    }
+
+    const double junction_cos_theta =
+        -(previous.unit_vector[0] * current.unit_vector[0] +
+          previous.unit_vector[1] * current.unit_vector[1]);
+    if (junction_cos_theta > 0.999999) return minimum_speed_sqr;
+    if (junction_cos_theta < -0.999999) return std::numeric_limits<double>::infinity();
+
+    const double sin_theta_d2 = std::sqrt(0.5 * (1.0 - junction_cos_theta));
+    if (sin_theta_d2 >= 1.0) return minimum_speed_sqr;
+
+    const double junction_acceleration =
+        std::min(previous.acceleration_mm_per_sec2, current.acceleration_mm_per_sec2) * 60.0 * 60.0;
+    return std::max(minimum_speed_sqr,
+                    (junction_acceleration * kJunctionDeviationMm * sin_theta_d2) /
+                        (1.0 - sin_theta_d2));
+}
+
 void record_velocity_collapse_locked(const MotionBlock& block, const MotionBlock* next) {
     if (!is_plannable_motion(block) || next == nullptr || !is_plannable_motion(*next)) return;
     const double entry = std::sqrt(std::max(0.0, block.entry_speed_sqr));
@@ -221,7 +311,7 @@ void record_velocity_collapse_locked(const MotionBlock& block, const MotionBlock
     s_velocity_collapse.turn_degrees = turn_degrees;
 }
 
-void planner_recalculate_locked() {
+void planner_recalculate_snapshot(PlannerSnapshot& snapshot) {
     const std::uint32_t recalculate_start_cycles = esp_cpu_get_cycle_count();
     struct RecalculateTrace {
         std::uint32_t start_cycles;
@@ -230,40 +320,41 @@ void planner_recalculate_locked() {
         }
     } recalculate_trace{recalculate_start_cycles};
 
-    if (s_block_count == 0) {
+    if (snapshot.count == 0) {
         return;
     }
 
     // A published segment owns its source block profile. Only that prefix is
     // frozen; later blocks must remain eligible for look-ahead when more G-code
     // arrives while the executor is running.
-    const std::size_t frozen_blocks = frozen_block_count_locked();
-    const std::size_t mutable_blocks = s_block_count - frozen_blocks;
+    const std::size_t frozen_blocks = snapshot.frozen_count;
+    const std::size_t mutable_blocks = snapshot.count - frozen_blocks;
     if (mutable_blocks == 0) {
         return;
     }
 
-    std::size_t index = s_block_tail;
+    std::size_t index = snapshot.tail;
     for (std::size_t offset = 0; offset < frozen_blocks; ++offset) {
         index = block_index_after(index);
     }
     const std::size_t mutable_tail = index;
-    MotionBlock* previous = frozen_blocks == 0
-                                ? nullptr
-                                : &s_block_buffer[(mutable_tail + kPlannerQueueLength - 1) % kPlannerQueueLength];
+    PlannerSnapshotBlock* previous = frozen_blocks == 0
+                                        ? nullptr
+                                        : &snapshot.blocks[(mutable_tail + kPlannerQueueLength - 1) %
+                                                           kPlannerQueueLength];
     const double frozen_exit_speed_sqr = previous == nullptr
-                                             ? s_tail_entry_speed_sqr
+                                             ? snapshot.tail_entry_speed_sqr
                                              : previous->exit_speed_sqr;
 
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
-        MotionBlock& block = s_block_buffer[index];
+        PlannerSnapshotBlock& block = snapshot.blocks[index];
         block.entry_speed_sqr = 0.0;
         block.exit_speed_sqr = 0.0;
         block.max_entry_speed_sqr = 0.0;
         block.max_junction_speed_sqr = 0.0;
-        if (is_plannable_motion(block)) {
+        if (is_plannable_snapshot_block(block)) {
             const double nominal_sqr = nominal_speed_sqr(block);
-            if (previous != nullptr && is_plannable_motion(*previous)) {
+            if (previous != nullptr && is_plannable_snapshot_block(*previous)) {
                 block.max_junction_speed_sqr = junction_speed_sqr(*previous, block);
                 block.max_entry_speed_sqr = std::min(
                     std::min(nominal_sqr, nominal_speed_sqr(*previous)),
@@ -280,10 +371,10 @@ void planner_recalculate_locked() {
     // mutable block's entry speed. The tail of the mutable window still has to
     // reach rest because no later block has been accepted yet.
     double next_entry_speed_sqr = 0.0;
-    index = (s_block_head + kPlannerQueueLength - 1) % kPlannerQueueLength;
+    index = (snapshot.head + kPlannerQueueLength - 1) % kPlannerQueueLength;
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
-        MotionBlock& block = s_block_buffer[index];
-        if (is_plannable_motion(block)) {
+        PlannerSnapshotBlock& block = snapshot.blocks[index];
+        if (is_plannable_snapshot_block(block)) {
             const double deceleration_limit = next_entry_speed_sqr +
                 2.0 * block.acceleration_mm_per_sec2 * 60.0 * 60.0 * block.millimeters;
             block.entry_speed_sqr = std::min(block.max_entry_speed_sqr, deceleration_limit);
@@ -302,8 +393,8 @@ void planner_recalculate_locked() {
     double previous_millimeters = 0.0;
     index = mutable_tail;
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
-        MotionBlock& block = s_block_buffer[index];
-        if (is_plannable_motion(block)) {
+        PlannerSnapshotBlock& block = snapshot.blocks[index];
+        if (is_plannable_snapshot_block(block)) {
             if (offset == 0) {
                 block.entry_speed_sqr = std::min(block.entry_speed_sqr, frozen_exit_speed_sqr);
             } else {
@@ -324,14 +415,116 @@ void planner_recalculate_locked() {
 
     index = mutable_tail;
     for (std::size_t offset = 0; offset < mutable_blocks; ++offset) {
-        MotionBlock& block = s_block_buffer[index];
+        PlannerSnapshotBlock& block = snapshot.blocks[index];
         const std::size_t next_index = block_index_after(index);
-        if (offset + 1 < mutable_blocks && is_plannable_motion(s_block_buffer[next_index])) {
-            block.exit_speed_sqr = s_block_buffer[next_index].entry_speed_sqr;
+        if (offset + 1 < mutable_blocks &&
+            is_plannable_snapshot_block(snapshot.blocks[next_index])) {
+            block.exit_speed_sqr = snapshot.blocks[next_index].entry_speed_sqr;
         }
         index = next_index;
     }
 
+}
+
+bool planner_snapshot_locked(PlannerSnapshot& snapshot) {
+    snapshot.head = s_block_head;
+    snapshot.tail = s_block_tail;
+    snapshot.count = s_block_count;
+    snapshot.frozen_count = frozen_block_count_locked();
+    snapshot.tail_entry_speed_sqr = s_tail_entry_speed_sqr;
+    snapshot.generation = s_block_generation;
+    for (std::size_t offset = 0; offset < snapshot.count; ++offset) {
+        const std::size_t index = (snapshot.tail + offset) % kPlannerQueueLength;
+        const MotionBlock& source = s_block_buffer[index];
+        PlannerSnapshotBlock& destination = snapshot.blocks[index];
+        destination.type = source.type;
+        destination.state = source.state;
+        destination.execution_id = source.execution_id;
+        destination.step_event_count = source.step_event_count;
+        destination.millimeters = source.millimeters;
+        destination.programmed_rate_mm_per_min = source.programmed_rate_mm_per_min;
+        destination.acceleration_mm_per_sec2 = source.acceleration_mm_per_sec2;
+        destination.unit_vector[0] = source.unit_vector[0];
+        destination.unit_vector[1] = source.unit_vector[1];
+        destination.entry_speed_sqr = source.entry_speed_sqr;
+        destination.exit_speed_sqr = source.exit_speed_sqr;
+        destination.max_entry_speed_sqr = source.max_entry_speed_sqr;
+        destination.max_junction_speed_sqr = source.max_junction_speed_sqr;
+    }
+    return snapshot.count != 0 && snapshot.frozen_count < snapshot.count;
+}
+
+bool planner_commit_snapshot_locked(const PlannerSnapshot& snapshot) {
+    if (snapshot.generation != s_block_generation || snapshot.head != s_block_head ||
+        snapshot.tail != s_block_tail || snapshot.count != s_block_count ||
+        snapshot.frozen_count != frozen_block_count_locked() ||
+        snapshot.tail_entry_speed_sqr != s_tail_entry_speed_sqr) {
+        return false;
+    }
+    for (std::size_t offset = snapshot.frozen_count; offset < snapshot.count; ++offset) {
+        const std::size_t index = (snapshot.tail + offset) % kPlannerQueueLength;
+        if (s_block_buffer[index].execution_id != snapshot.blocks[index].execution_id ||
+            s_block_buffer[index].state != PlannerBlockState::Lookahead) {
+            return false;
+        }
+    }
+    for (std::size_t offset = snapshot.frozen_count; offset < snapshot.count; ++offset) {
+        const std::size_t index = (snapshot.tail + offset) % kPlannerQueueLength;
+        s_block_buffer[index].entry_speed_sqr = snapshot.blocks[index].entry_speed_sqr;
+        s_block_buffer[index].exit_speed_sqr = snapshot.blocks[index].exit_speed_sqr;
+        s_block_buffer[index].max_entry_speed_sqr = snapshot.blocks[index].max_entry_speed_sqr;
+        s_block_buffer[index].max_junction_speed_sqr = snapshot.blocks[index].max_junction_speed_sqr;
+    }
+    s_recalculation_required = false;
+    return true;
+}
+
+void planner_recalculate() {
+    if (s_recalculate_mutex == nullptr ||
+        xSemaphoreTake(s_recalculate_mutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    PlannerSnapshot& snapshot = s_recalculate_snapshot;
+    const std::uint32_t snapshot_lock_start_cycles = esp_cpu_get_cycle_count();
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool has_mutable_blocks = planner_snapshot_locked(snapshot);
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    const std::uint32_t snapshot_lock_cycles =
+        esp_cpu_get_cycle_count() - snapshot_lock_start_cycles;
+    record_max_cycles(s_snapshot_lock_max_cycles, snapshot_lock_cycles);
+    ++s_snapshot_lock_samples;
+    s_snapshot_lock_total_cycles += snapshot_lock_cycles;
+    if (!has_mutable_blocks) {
+        xSemaphoreGive(s_recalculate_mutex);
+        return;
+    }
+
+    planner_recalculate_snapshot(snapshot);
+
+    const std::uint32_t commit_lock_start_cycles = esp_cpu_get_cycle_count();
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool committed = planner_commit_snapshot_locked(snapshot);
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    const std::uint32_t commit_lock_cycles =
+        esp_cpu_get_cycle_count() - commit_lock_start_cycles;
+    record_max_cycles(s_commit_lock_max_cycles, commit_lock_cycles);
+    ++s_commit_lock_samples;
+    s_commit_lock_total_cycles += commit_lock_cycles;
+    if (!committed) {
+        ++s_stale_snapshot_count;
+        // The next block submission, freeze, release, or completion will
+        // trigger a fresh calculation against the newer queue generation.
+        xSemaphoreGive(s_recalculate_mutex);
+        return;
+    }
+    xSemaphoreGive(s_recalculate_mutex);
+}
+
+bool planner_recalculation_pending() {
+    portENTER_CRITICAL(&s_block_buffer_lock);
+    const bool pending = s_recalculation_required;
+    portEXIT_CRITICAL(&s_block_buffer_lock);
+    return pending;
 }
 
 void emit_execution_event(ExecutionEventType type,
@@ -416,9 +609,10 @@ SubmitResult submit_block(MotionBlock block) {
     }
     portENTER_CRITICAL(&s_block_buffer_lock);
     if (coalesce_tail_block_locked(block)) {
-        planner_recalculate_locked();
+        planner_mark_dirty_locked();
         s_queue_drain_reported.store(false);
         portEXIT_CRITICAL(&s_block_buffer_lock);
+        planner_recalculate();
         xTaskNotifyGive(s_planner_task);
         return SubmitResult::Accepted;
     }
@@ -430,9 +624,10 @@ SubmitResult submit_block(MotionBlock block) {
     s_block_buffer[s_block_head] = block;
     s_block_head = (s_block_head + 1) % kPlannerQueueLength;
     ++s_block_count;
-    planner_recalculate_locked();
+    planner_mark_dirty_locked();
     s_queue_drain_reported.store(false);
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate();
     xTaskNotifyGive(s_planner_task);
     return SubmitResult::Accepted;
 }
@@ -453,9 +648,10 @@ SubmitResult submit_blocks(const MotionBlock* const blocks, const std::size_t co
         s_block_head = (s_block_head + 1) % kPlannerQueueLength;
         ++s_block_count;
     }
-    planner_recalculate_locked();
+    planner_mark_dirty_locked();
     s_queue_drain_reported.store(false);
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate();
     xTaskNotifyGive(s_planner_task);
     return SubmitResult::Accepted;
 }
@@ -473,6 +669,10 @@ bool current_block_snapshot(MotionBlock& block) {
 
 bool freeze_next_motion_block(MotionBlock& block) {
     portENTER_CRITICAL(&s_block_buffer_lock);
+    if (s_recalculation_required) {
+        portEXIT_CRITICAL(&s_block_buffer_lock);
+        return false;
+    }
     const std::size_t frozen_blocks = frozen_block_count_locked();
     if (frozen_blocks >= s_block_count) {
         portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -498,9 +698,10 @@ bool freeze_next_motion_block(MotionBlock& block) {
     // Freeze the solved boundary before handing a copy to the producer. A
     // later G-code submission can only recalculate the remaining look-ahead.
     candidate.state = PlannerBlockState::Frozen;
-    planner_recalculate_locked();
+    planner_mark_dirty_locked();
     block = candidate;
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate();
     return true;
 }
 
@@ -511,11 +712,12 @@ void release_frozen_block(const std::uint64_t execution_id) {
         MotionBlock& block = s_block_buffer[index];
         if (block.execution_id == execution_id && block.state == PlannerBlockState::Frozen) {
             block.state = PlannerBlockState::Lookahead;
-            planner_recalculate_locked();
+            planner_mark_dirty_locked();
             break;
         }
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate();
 }
 
 void discard_current_block(const MotionBlock& block, bool preserve_exit_speed = false);
@@ -531,11 +733,12 @@ void discard_current_block(const MotionBlock& block, const bool preserve_exit_sp
             s_tail_entry_speed_sqr = preserve_exit_speed && s_block_count != 0
                                           ? std::max(0.0, current.exit_speed_sqr)
                                           : 0.0;
-            planner_recalculate_locked();
+            planner_mark_dirty_locked();
             capacity_waiter = s_capacity_waiter;
         }
     }
     portEXIT_CRITICAL(&s_block_buffer_lock);
+    planner_recalculate();
     if (capacity_waiter != nullptr) {
         xTaskNotifyGive(capacity_waiter);
     }
@@ -706,6 +909,9 @@ void planner_task(void*) {
     MotionBlock block = {};
 
     while (true) {
+        if (planner_recalculation_pending()) {
+            planner_recalculate();
+        }
         const std::uint32_t transport_events = stepper::segment_producer_take_events();
         if ((transport_events & stepper::StepperTransportEventCompletionAvailable) != 0U) {
             consume_segment_completions();
@@ -796,8 +1002,15 @@ esp_err_t planner_start() {
         return ESP_ERR_INVALID_STATE;
     }
 
+    s_recalculate_mutex = xSemaphoreCreateMutex();
+    if (s_recalculate_mutex == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
+
     if (xTaskCreatePinnedToCore(planner_task, "planner", 4096, nullptr, 7, &s_planner_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
+        vSemaphoreDelete(s_recalculate_mutex);
+        s_recalculate_mutex = nullptr;
         return ESP_ERR_NO_MEM;
     }
     stepper::segment_producer_set_notification_task(s_planner_task);
@@ -848,10 +1061,19 @@ void planner_reset() {
     s_block_head = 0;
     s_block_tail = 0;
     s_block_count = 0;
+    ++s_block_generation;
+    s_recalculation_required = false;
     s_tail_entry_speed_sqr = 0.0;
     s_velocity_collapse = {};
     s_recalculate_calls = 0;
     s_recalculate_max_cycles = 0;
+    s_snapshot_lock_max_cycles = 0;
+    s_commit_lock_max_cycles = 0;
+    s_snapshot_lock_samples = 0;
+    s_commit_lock_samples = 0;
+    s_snapshot_lock_total_cycles = 0;
+    s_commit_lock_total_cycles = 0;
+    s_stale_snapshot_count = 0;
     s_coalesced_short_block_count.store(0, std::memory_order_relaxed);
     capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -927,6 +1149,13 @@ PlannerDiagnostics planner_diagnostics() {
     diagnostics.planner_task_core = s_planner_task_core.load(std::memory_order_acquire);
     diagnostics.recalculate_calls = s_recalculate_calls;
     diagnostics.recalculate_max_cycles = s_recalculate_max_cycles;
+    diagnostics.snapshot_lock_max_cycles = s_snapshot_lock_max_cycles;
+    diagnostics.commit_lock_max_cycles = s_commit_lock_max_cycles;
+    diagnostics.snapshot_lock_samples = s_snapshot_lock_samples;
+    diagnostics.commit_lock_samples = s_commit_lock_samples;
+    diagnostics.snapshot_lock_total_cycles = s_snapshot_lock_total_cycles;
+    diagnostics.commit_lock_total_cycles = s_commit_lock_total_cycles;
+    diagnostics.stale_snapshot_count = s_stale_snapshot_count;
     diagnostics.queued_blocks = s_block_count;
     diagnostics.frozen_blocks = frozen_block_count_locked();
     diagnostics.coalesced_short_blocks =
