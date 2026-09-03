@@ -415,13 +415,17 @@ bool report_position_status() {
     const RealtimeCommandDiagnostics realtime = realtime_command_diagnostics();
     const driver::Uart0RxDiagnostics uart = driver::uart0_rx_diagnostics();
     const ProtocolTxDiagnostics tx = protocol_tx_diagnostics();
+    const unsigned long long refill_service_average_cycles = producer.refill_services == 0 ? 0 :
+        static_cast<unsigned long long>(producer.refill_service_total_cycles / producer.refill_services);
+    const unsigned long long refill_gap_min_cycles = producer.refill_gap_min_cycles == UINT64_MAX ? 0 :
+        static_cast<unsigned long long>(producer.refill_gap_min_cycles);
 
     // Static storage keeps verbose diagnostics out of the protocol task stack.
     // write_all() fragments this response into the fixed-size TX pool packets.
     static char response[8192] = {};
     int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(core=%d,recalc=(calls=%lu,max_cycles=%lu,lock=(snapshot=%lu/%lu,commit=%lu/%lu),stale=%lu),queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu,collapse=(samples=%lu,severe=%lu,bins=%lu,%lu,%lu,%lu,%lu,id=%llu->%llu,len=%.4f/%.4f,speed=%.1f->%.1f,next=(entry=%.1f,nominal=%.1f,max_entry=%.1f,junction=%.1f),turn=%.2f))|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,low_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu,producer=(requests=%llu,services=%llu,segments=%llu))|timer=(core=(init=%d,isr=%d),interval=%lu->%lu,delta=%lu,boundary_delta=%lu,boundaries=%lu,events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu),hot=(mhz=%lu,samples=%lu,front=%.2fus,normal=%lu/%.2fus/%lu,boundary=%lu/%.2fus/%lu,peak=(interval=%lu->%lu,amass=%u->%u,complete=%d))),amass=(changes=%lu,matrix=%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu),boundary=(id=%llu->%llu,base=%lu->%lu,effective=%lu->%lu,amass=%u->%u,major=%ld->%ld,slice=(duration=%lu->%lu,speed=%.1f->%.1f/%.1f->%.1f,phase=%u->%u)))|rmt=(invalid=%d)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(core=%d,recalc=(calls=%lu,max_cycles=%lu,lock=(snapshot=%lu/%lu,commit=%lu/%lu),stale=%lu),queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu,collapse=(samples=%lu,severe=%lu,bins=%lu,%lu,%lu,%lu,%lu,id=%llu->%llu,len=%.4f/%.4f,speed=%.1f->%.1f,next=(entry=%.1f,nominal=%.1f,max_entry=%.1f,junction=%.1f),turn=%.2f))|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,low_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu,producer=(requests=%llu,services=%llu,segments=%llu,batch=%zu->%zu,empty=(total=%llu,full=%llu,inactive=%llu,done=%llu,unavailable=%llu),service=(avg=%lluc,max=%lluc,gap=%lluc->%lluc)))|timer=(core=(init=%d,isr=%d),interval=%lu->%lu,delta=%lu,boundary_delta=%lu,boundaries=%lu,events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu),hot=(mhz=%lu,samples=%lu,front=%.2fus,normal=%lu/%.2fus/%lu,boundary=%lu/%.2fus/%lu,peak=(interval=%lu->%lu,amass=%u->%u,complete=%d))),amass=(changes=%lu,matrix=%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu),boundary=(id=%llu->%llu,base=%lu->%lu,effective=%lu->%lu,amass=%u->%u,major=%ld->%ld,slice=(duration=%lu->%lu,speed=%.1f->%.1f/%.1f->%.1f,phase=%u->%u)))|rmt=(invalid=%d)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -503,6 +507,17 @@ bool report_position_status() {
         static_cast<unsigned long long>(producer.refill_requests),
         static_cast<unsigned long long>(producer.refill_services),
         static_cast<unsigned long long>(producer.refill_segments),
+        producer.refill_batch_min_segments,
+        producer.refill_batch_max_segments,
+        static_cast<unsigned long long>(producer.refill_empty_services),
+        static_cast<unsigned long long>(producer.refill_empty_ring_full),
+        static_cast<unsigned long long>(producer.refill_empty_profile_inactive),
+        static_cast<unsigned long long>(producer.refill_empty_generation_complete),
+        static_cast<unsigned long long>(producer.refill_empty_unavailable),
+        refill_service_average_cycles,
+        static_cast<unsigned long long>(producer.refill_service_max_cycles),
+        refill_gap_min_cycles,
+        static_cast<unsigned long long>(producer.refill_gap_max_cycles),
         timer.timer_init_core, timer.timer_isr_core,
         static_cast<unsigned long>(timer.interval_min_ticks == UINT32_MAX ? 0 : timer.interval_min_ticks),
         static_cast<unsigned long>(timer.interval_max_ticks),

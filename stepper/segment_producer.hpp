@@ -17,7 +17,18 @@ struct SegmentProducerDiagnostics {
     std::uint64_t refill_requests = 0;
     std::uint64_t refill_services = 0;
     std::uint64_t refill_segments = 0;
+    std::uint64_t refill_empty_services = 0;
+    std::uint64_t refill_empty_ring_full = 0;
+    std::uint64_t refill_empty_profile_inactive = 0;
+    std::uint64_t refill_empty_generation_complete = 0;
+    std::uint64_t refill_empty_unavailable = 0;
+    std::uint64_t refill_service_total_cycles = 0;
+    std::uint64_t refill_service_max_cycles = 0;
+    std::uint64_t refill_gap_min_cycles = 0;
+    std::uint64_t refill_gap_max_cycles = 0;
     std::size_t observed_low_water_segments = kStepSegmentBufferLength;
+    std::size_t refill_batch_min_segments = 0;
+    std::size_t refill_batch_max_segments = 0;
 };
 
 // The producer is the planner-facing transport boundary. It is intentionally
