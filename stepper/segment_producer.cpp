@@ -1,5 +1,6 @@
 #include "segment_producer.hpp"
 
+#include <algorithm>
 #include <atomic>
 
 #include "timer_stepper_executor.hpp"
@@ -10,6 +11,12 @@ namespace {
 std::atomic<std::uint64_t> s_refill_requests = 0;
 std::atomic<std::uint64_t> s_refill_services = 0;
 std::atomic<std::uint64_t> s_refill_segments = 0;
+std::size_t s_observed_low_water_segments = kStepSegmentBufferLength;
+
+void observe_ring_watermark() {
+    s_observed_low_water_segments = std::min(
+        s_observed_low_water_segments, stepper_segment_count());
+}
 
 std::size_t publish_available_segments() {
     std::size_t generated = 0;
@@ -28,6 +35,7 @@ void segment_producer_reset() {
     s_refill_requests.store(0, std::memory_order_relaxed);
     s_refill_services.store(0, std::memory_order_relaxed);
     s_refill_segments.store(0, std::memory_order_relaxed);
+    s_observed_low_water_segments = kStepSegmentBufferLength;
     stepper_segment_ring_reset();
     stepper_prep_reset();
 }
@@ -52,6 +60,7 @@ bool segment_producer_submit_plan(const planner::PlannerBlock& block) {
     // The first publish must not depend on an ISR-generated low-water event.
     // Later refills are driven only by StepperTransportEventRefillRequested.
     publish_available_segments();
+    observe_ring_watermark();
     return true;
 }
 
@@ -61,8 +70,10 @@ std::size_t segment_producer_process_events(const std::uint32_t events) {
     }
     s_refill_requests.fetch_add(1, std::memory_order_relaxed);
     s_refill_services.fetch_add(1, std::memory_order_relaxed);
+    observe_ring_watermark();
     const std::size_t generated = publish_available_segments();
     s_refill_segments.fetch_add(generated, std::memory_order_relaxed);
+    observe_ring_watermark();
     return generated;
 }
 
@@ -112,6 +123,7 @@ SegmentProducerDiagnostics segment_producer_diagnostics_transport() {
         .refill_requests = s_refill_requests.load(std::memory_order_relaxed),
         .refill_services = s_refill_services.load(std::memory_order_relaxed),
         .refill_segments = s_refill_segments.load(std::memory_order_relaxed),
+        .observed_low_water_segments = s_observed_low_water_segments,
     };
 }
 

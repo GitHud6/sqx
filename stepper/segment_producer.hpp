@@ -17,6 +17,7 @@ struct SegmentProducerDiagnostics {
     std::uint64_t refill_requests = 0;
     std::uint64_t refill_services = 0;
     std::uint64_t refill_segments = 0;
+    std::size_t observed_low_water_segments = kStepSegmentBufferLength;
 };
 
 // The producer is the planner-facing transport boundary. It is intentionally
