@@ -28,9 +28,6 @@ std::atomic<bool> s_busy = false;
 // are sufficient for that window and avoid expensive 64-bit atomics in ISR.
 std::atomic<std::uint32_t> s_scheduled_timer_ticks = 0;
 std::atomic<std::uint32_t> s_scheduled_timer_events = 0;
-std::atomic<std::uint32_t> s_segment_handoffs = 0;
-std::atomic<std::uint32_t> s_block_phase_continuations = 0;
-std::atomic<std::uint32_t> s_block_phase_initializations = 0;
 std::atomic<std::uint32_t> s_direction_writes = 0;
 std::atomic<std::uint32_t> s_interval_min_ticks = UINT32_MAX;
 std::atomic<std::uint32_t> s_interval_max_ticks = 0;
@@ -507,7 +504,6 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             MotionState next_motion = motion_from_segment(next);
             boundary_next_interval_ticks = next_motion.effective_step_interval_ticks;
             boundary_next_amass_level = next_motion.amass_level;
-            s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
             record_interval_sample(next_motion.effective_step_interval_ticks);
             record_interval_delta(completed_motion, next_motion, true);
             if (completed_motion.uses_block_phase && next_motion.uses_block_phase &&
@@ -516,12 +512,8 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
                 for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
                     next_motion.axis_error[axis] = completed_motion.axis_error[axis];
                 }
-                s_block_phase_continuations.fetch_add(1, std::memory_order_relaxed);
             } else {
                 initialize_block_phase(next_motion);
-                if (next_motion.uses_block_phase) {
-                    s_block_phase_initializations.fetch_add(1, std::memory_order_relaxed);
-                }
             }
             s_motion = next_motion;
             prepare_next_step_mask(s_motion);
@@ -605,9 +597,6 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     MotionState motion = motion_from_segment(segment);
     record_interval_sample(motion.effective_step_interval_ticks);
     initialize_block_phase(motion);
-    if (motion.uses_block_phase) {
-        s_block_phase_initializations.fetch_add(1, std::memory_order_relaxed);
-    }
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const auto current = static_cast<machine::Axis>(axis);
         const esp_err_t direction_result =
@@ -721,9 +710,6 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.timer_isr_core = driver::step_timer_driver_isr_core();
     diagnostics.scheduled_timer_events = s_scheduled_timer_events.load();
     diagnostics.scheduled_timer_ticks = s_scheduled_timer_ticks.load();
-    diagnostics.segment_handoffs = s_segment_handoffs.load();
-    diagnostics.block_phase_continuations = s_block_phase_continuations.load();
-    diagnostics.block_phase_initializations = s_block_phase_initializations.load();
     diagnostics.direction_writes = s_direction_writes.load();
     diagnostics.interval_min_ticks = s_interval_min_ticks.load();
     diagnostics.interval_max_ticks = s_interval_max_ticks.load();

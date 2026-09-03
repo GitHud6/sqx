@@ -22,9 +22,6 @@ struct TimerStepperDiagnostics {
     // in the Timer ISR. Unsigned subtraction preserves deltas across wrap.
     std::uint32_t scheduled_timer_events = 0;
     std::uint32_t scheduled_timer_ticks = 0;
-    std::uint32_t segment_handoffs = 0;
-    std::uint32_t block_phase_continuations = 0;
-    std::uint32_t block_phase_initializations = 0;
     std::uint32_t direction_writes = 0;
     std::uint32_t interval_min_ticks = 0;
     std::uint32_t interval_max_ticks = 0;
