@@ -10,8 +10,7 @@
 namespace ray2::driver {
 
 struct RmtStepPulseDiagnostics {
-    std::array<std::uint64_t, 2> trigger_count = {};
-    std::uint64_t invalid_trigger_count = 0;
+    bool invalid_trigger_seen = false;
 };
 
 // Owns the ESP32-S3 RMT channels and GPIO matrix used for STEP pulse output.
