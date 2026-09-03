@@ -31,7 +31,6 @@ std::atomic<std::uint32_t> s_scheduled_timer_events = 0;
 std::atomic<std::uint32_t> s_segment_handoffs = 0;
 std::atomic<std::uint32_t> s_block_phase_continuations = 0;
 std::atomic<std::uint32_t> s_block_phase_initializations = 0;
-std::atomic<std::uint32_t> s_pulse_callbacks = 0;
 std::atomic<std::uint32_t> s_direction_writes = 0;
 std::atomic<std::uint32_t> s_interval_min_ticks = UINT32_MAX;
 std::atomic<std::uint32_t> s_interval_max_ticks = 0;
@@ -468,7 +467,6 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     emit_prepared_step_mask(s_motion);
     const std::uint32_t pulse_front_cycles = esp_cpu_get_cycle_count();
     s_last_emitted_step_mask = prepared_step_mask;
-    s_pulse_callbacks.fetch_add(1, std::memory_order_relaxed);
     ++s_motion.completed_ticks;
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
@@ -726,7 +724,6 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.segment_handoffs = s_segment_handoffs.load();
     diagnostics.block_phase_continuations = s_block_phase_continuations.load();
     diagnostics.block_phase_initializations = s_block_phase_initializations.load();
-    diagnostics.pulse_callbacks = s_pulse_callbacks.load();
     diagnostics.direction_writes = s_direction_writes.load();
     diagnostics.interval_min_ticks = s_interval_min_ticks.load();
     diagnostics.interval_max_ticks = s_interval_max_ticks.load();
