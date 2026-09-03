@@ -22,10 +22,14 @@ std::atomic<std::uint64_t> s_refill_service_total_cycles = 0;
 std::atomic<std::uint64_t> s_refill_service_max_cycles = 0;
 std::atomic<std::uint64_t> s_refill_gap_min_cycles = UINT64_MAX;
 std::atomic<std::uint64_t> s_refill_gap_max_cycles = 0;
-std::atomic<std::uint32_t> s_refill_last_service_cycles = 0;
+std::atomic<std::uint32_t> s_refill_last_productive_service_cycles = 0;
 std::atomic<std::size_t> s_observed_low_water_segments = kStepSegmentBufferLength;
 std::atomic<std::size_t> s_refill_batch_min_segments = kStepSegmentBufferLength;
 std::atomic<std::size_t> s_refill_batch_max_segments = 0;
+
+// Refill events within one active burst are much closer than a job-to-job
+// idle period. Keep the interval metric focused on producer scheduling.
+constexpr std::uint32_t kRefillBurstGapLimitCycles = 160000000U;
 
 template <typename T>
 void record_max(std::atomic<T>& maximum, const T value) {
@@ -73,7 +77,7 @@ void segment_producer_reset() {
     s_refill_service_max_cycles.store(0, std::memory_order_relaxed);
     s_refill_gap_min_cycles.store(UINT64_MAX, std::memory_order_relaxed);
     s_refill_gap_max_cycles.store(0, std::memory_order_relaxed);
-    s_refill_last_service_cycles.store(0, std::memory_order_relaxed);
+    s_refill_last_productive_service_cycles.store(0, std::memory_order_relaxed);
     s_observed_low_water_segments.store(kStepSegmentBufferLength, std::memory_order_relaxed);
     s_refill_batch_min_segments.store(kStepSegmentBufferLength, std::memory_order_relaxed);
     s_refill_batch_max_segments.store(0, std::memory_order_relaxed);
@@ -112,13 +116,6 @@ std::size_t segment_producer_process_events(const std::uint32_t events) {
     s_refill_requests.fetch_add(1, std::memory_order_relaxed);
     s_refill_services.fetch_add(1, std::memory_order_relaxed);
     const std::uint32_t service_started_cycles = esp_cpu_get_cycle_count();
-    const std::uint32_t previous_service_cycles =
-        s_refill_last_service_cycles.exchange(service_started_cycles, std::memory_order_relaxed);
-    if (previous_service_cycles != 0) {
-        const std::uint64_t gap_cycles = service_started_cycles - previous_service_cycles;
-        record_min(s_refill_gap_min_cycles, gap_cycles);
-        record_max(s_refill_gap_max_cycles, gap_cycles);
-    }
     const std::size_t free_slots_before_refill = stepper_segment_free_slots();
     const StepperPrepDiagnostics prep_before_refill = stepper_prep_diagnostics();
     observe_ring_watermark();
@@ -140,6 +137,16 @@ std::size_t segment_producer_process_events(const std::uint32_t events) {
             s_refill_empty_unavailable.fetch_add(1, std::memory_order_relaxed);
         }
     } else {
+        const std::uint32_t previous_service_cycles =
+            s_refill_last_productive_service_cycles.exchange(
+                service_started_cycles, std::memory_order_relaxed);
+        if (previous_service_cycles != 0) {
+            const std::uint64_t gap_cycles = service_started_cycles - previous_service_cycles;
+            if (gap_cycles <= kRefillBurstGapLimitCycles) {
+                record_min(s_refill_gap_min_cycles, gap_cycles);
+                record_max(s_refill_gap_max_cycles, gap_cycles);
+            }
+        }
         record_min(s_refill_batch_min_segments, generated);
         record_max(s_refill_batch_max_segments, generated);
     }
