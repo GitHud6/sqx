@@ -36,8 +36,6 @@ constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
 
 std::atomic<bool> s_initialized = false;
 std::atomic<std::uint64_t> s_trigger_count[machine::kAxisCount] = {};
-std::atomic<std::uint64_t> s_reset_count[machine::kAxisCount] = {};
-std::atomic<std::uint64_t> s_start_count[machine::kAxisCount] = {};
 std::atomic<std::uint64_t> s_invalid_trigger_count = 0;
 
 void configure_axis(const std::size_t axis_index) {
@@ -123,9 +121,9 @@ void rmt_step_pulse_driver_trigger(const std::size_t axis_index) {
         return;
     }
     s_trigger_count[axis_index].fetch_add(1, std::memory_order_relaxed);
-    s_reset_count[axis_index].fetch_add(1, std::memory_order_relaxed);
+    // reset and start are unconditional parts of one accepted trigger. Keep
+    // one counter for that operation rather than three atomic RMWs per STEP.
     rmt_ll_tx_reset_pointer(&RMT, axis_index);
-    s_start_count[axis_index].fetch_add(1, std::memory_order_relaxed);
     rmt_ll_tx_start(&RMT, axis_index);
 }
 
@@ -133,8 +131,6 @@ RmtStepPulseDiagnostics rmt_step_pulse_driver_diagnostics() {
     RmtStepPulseDiagnostics diagnostics = {};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         diagnostics.trigger_count[axis] = s_trigger_count[axis].load(std::memory_order_relaxed);
-        diagnostics.reset_count[axis] = s_reset_count[axis].load(std::memory_order_relaxed);
-        diagnostics.start_count[axis] = s_start_count[axis].load(std::memory_order_relaxed);
     }
     diagnostics.invalid_trigger_count = s_invalid_trigger_count.load(std::memory_order_relaxed);
     return diagnostics;
