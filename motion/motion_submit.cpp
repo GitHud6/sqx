@@ -20,7 +20,6 @@ std::uint64_t s_submitted_count = 0;
 // exceed the task's available headroom.
 std::array<planner::PlannerBlock, planner::kPlannerQueueLength> s_batch_blocks = {};
 
-constexpr double kRapidRateMmPerMin = 6000.0;
 constexpr char kLogTag[] = "motion";
 
 void log_rejection(const char* reason,
@@ -67,7 +66,8 @@ bool build_motion_geometry_impl(const MotionRequest& request, MotionGeometry& ge
     MotionGeometry candidate = {};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
-        if (request.feed_rate_mm_per_min > hardware.max_rate_mm_per_min ||
+        if ((request.motion_mode == MotionType::Linear &&
+             request.feed_rate_mm_per_min > hardware.max_rate_mm_per_min) ||
             !valid_coordinate(request.start_mm[axis], hardware.max_travel_mm) ||
             !valid_coordinate(request.target_mm[axis], hardware.max_travel_mm) ||
             !std::isfinite(hardware.steps_per_mm) || hardware.steps_per_mm <= 0.0F) {
@@ -102,6 +102,23 @@ bool build_motion_geometry_impl(const MotionRequest& request, MotionGeometry& ge
     return true;
 }
 
+double rapid_rate_for_direction(const planner::PlannerBlock& block) {
+    double rapid_rate_mm_per_min = std::numeric_limits<double>::infinity();
+    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
+        if (block.geometry.steps[axis] == 0) continue;
+
+        const double axis_component = std::abs(block.unit_vector[axis]);
+        const double axis_max_rate =
+            machine::raycube_axis(static_cast<machine::Axis>(axis)).max_rate_mm_per_min;
+        if (!std::isfinite(axis_component) || axis_component <= 0.0 ||
+            !std::isfinite(axis_max_rate) || axis_max_rate <= 0.0) {
+            return 0.0;
+        }
+        rapid_rate_mm_per_min = std::min(rapid_rate_mm_per_min, axis_max_rate / axis_component);
+    }
+    return std::isfinite(rapid_rate_mm_per_min) ? rapid_rate_mm_per_min : 0.0;
+}
+
 bool make_planner_block(const MotionRequest& request,
                         const MotionGeometry& geometry,
                         planner::PlannerBlock& block) {
@@ -115,11 +132,15 @@ bool make_planner_block(const MotionRequest& request,
     const double delta_y = request.target_mm[1] - request.start_mm[1];
     block.millimeters = std::sqrt(delta_x * delta_x + delta_y * delta_y);
     if (block.millimeters <= 0.0) return false;
-    block.programmed_rate_mm_per_min = request.motion_mode == MotionType::Rapid
-                                            ? kRapidRateMmPerMin
-                                            : request.feed_rate_mm_per_min;
     block.unit_vector[0] = delta_x / block.millimeters;
     block.unit_vector[1] = delta_y / block.millimeters;
+    block.programmed_rate_mm_per_min = request.motion_mode == MotionType::Rapid
+                                            ? rapid_rate_for_direction(block)
+                                            : request.feed_rate_mm_per_min;
+    if (!std::isfinite(block.programmed_rate_mm_per_min) ||
+        block.programmed_rate_mm_per_min <= 0.0) {
+        return false;
+    }
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         if (geometry.steps[axis] == 0) continue;
         const double axis_component = std::abs(block.unit_vector[axis]);
