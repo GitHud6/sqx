@@ -32,7 +32,6 @@ std::atomic<std::uint32_t> s_segment_handoffs = 0;
 std::atomic<std::uint32_t> s_block_phase_continuations = 0;
 std::atomic<std::uint32_t> s_block_phase_initializations = 0;
 std::atomic<std::uint32_t> s_pulse_callbacks = 0;
-std::atomic<std::uint32_t> s_rmt_triggers[machine::kAxisCount] = {};
 std::atomic<std::uint32_t> s_direction_writes = 0;
 std::atomic<std::uint32_t> s_interval_min_ticks = UINT32_MAX;
 std::atomic<std::uint32_t> s_interval_max_ticks = 0;
@@ -360,7 +359,6 @@ void initialize_block_phase(MotionState& motion) {
 
 void IRAM_ATTR trigger_pulse(const std::size_t axis) {
     driver::rmt_step_pulse_driver_trigger(axis);
-    s_rmt_triggers[axis].fetch_add(1, std::memory_order_relaxed);
 }
 
 void IRAM_ATTR prepare_next_step_mask(MotionState& motion) {
@@ -729,9 +727,6 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.block_phase_continuations = s_block_phase_continuations.load();
     diagnostics.block_phase_initializations = s_block_phase_initializations.load();
     diagnostics.pulse_callbacks = s_pulse_callbacks.load();
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        diagnostics.rmt_triggers[axis] = s_rmt_triggers[axis].load();
-    }
     diagnostics.direction_writes = s_direction_writes.load();
     diagnostics.interval_min_ticks = s_interval_min_ticks.load();
     diagnostics.interval_max_ticks = s_interval_max_ticks.load();
