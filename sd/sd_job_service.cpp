@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "runtime_affinity.hpp"
 #include "planner.hpp"
 #include "plain_file_reader.hpp"
 #include "gzip_file_reader.hpp"
@@ -206,7 +207,8 @@ esp_err_t sd_job_start(const char* path) {
     s_job_current_line.store(0);
     s_abort_requested.store(false, std::memory_order_release);
 
-    if (xTaskCreate(sd_job_task, "sd_job", 4096, nullptr, 5, &s_job_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(sd_job_task, "sd_job", 4096, nullptr, 5, &s_job_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         s_job_state.store(JobState::Faulted);
         return ESP_ERR_NO_MEM;
     }

@@ -9,6 +9,8 @@
 
 #include "esp_log.h"
 
+#include "runtime_affinity.hpp"
+
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -118,7 +120,8 @@ esp_err_t protocol_tx_start() {
         TxMessage* message = &s_normal_tx_messages[index];
         xQueueSend(s_free_tx_queue, &message, 0);
     }
-    if (xTaskCreate(protocol_tx_task, "protocol_tx", 4096, nullptr, 7, &s_tx_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(protocol_tx_task, "protocol_tx", 4096, nullptr, 7, &s_tx_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         vQueueDelete(s_free_tx_queue);
         s_free_tx_queue = nullptr;
         vQueueDelete(s_normal_tx_queue);

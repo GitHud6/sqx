@@ -8,6 +8,8 @@
 
 #include "esp_log.h"
 
+#include "runtime_affinity.hpp"
+
 #include "command_dispatch.hpp"
 #include "line_assembler.hpp"
 #include "planner.hpp"
@@ -156,12 +158,13 @@ esp_err_t protocol_start() {
         return tx_start_result;
     }
 
-    if (xTaskCreate(realtime_task, "realtime", 3072, nullptr, 7, &s_realtime_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(realtime_task, "realtime", 3072, nullptr, 7,
+                                &s_realtime_task, runtime::kNonRealtimeCore) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(protocol_task, "protocol", kProtocolTaskStackBytes, nullptr, 6,
-                    &s_protocol_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(protocol_task, "protocol", kProtocolTaskStackBytes, nullptr, 6,
+                                &s_protocol_task, runtime::kNonRealtimeCore) != pdPASS) {
         vTaskDelete(s_realtime_task);
         s_realtime_task = nullptr;
         return ESP_ERR_NO_MEM;

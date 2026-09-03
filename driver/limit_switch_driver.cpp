@@ -6,6 +6,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "runtime_affinity.hpp"
+
 #include "raycube_machine.hpp"
 
 namespace ray2::driver {
@@ -72,8 +74,8 @@ esp_err_t limit_switch_driver_init() {
         if (result != ESP_OK) return result;
     }
 
-    if (xTaskCreate(limit_switch_debounce_task, "limit_debounce", 2048, nullptr, 5,
-                    &s_debounce_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(limit_switch_debounce_task, "limit_debounce", 2048, nullptr, 5,
+                                &s_debounce_task, runtime::kNonRealtimeCore) != pdPASS) {
         s_debounce_task = nullptr;
         return ESP_ERR_NO_MEM;
     }

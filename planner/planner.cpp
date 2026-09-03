@@ -11,6 +11,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "runtime_affinity.hpp"
+
 #include "timer_stepper_executor.hpp"
 #include "segment_producer.hpp"
 #include "segment_ring.hpp"
@@ -794,7 +796,8 @@ esp_err_t planner_start() {
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (xTaskCreate(planner_task, "planner", 4096, nullptr, 7, &s_planner_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(planner_task, "planner", 4096, nullptr, 7, &s_planner_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     stepper::segment_producer_set_notification_task(s_planner_task);

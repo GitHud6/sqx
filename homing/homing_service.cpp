@@ -6,6 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "runtime_affinity.hpp"
 #include "limit_switch_driver.hpp"
 #include "laser_driver.hpp"
 #include "planner.hpp"
@@ -190,7 +191,8 @@ StartResult homing_start() {
     if (!driver::limit_switch_driver_is_initialized()) return StartResult::Unavailable;
     s_seek_active.store(true, std::memory_order_release);
     s_state.store(HomingState::Running, std::memory_order_release);
-    if (xTaskCreate(homing_task, "homing", 3072, nullptr, 6, &s_seek_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(homing_task, "homing", 3072, nullptr, 6, &s_seek_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         s_seek_active.store(false, std::memory_order_release);
         s_state.store(HomingState::Faulted, std::memory_order_release);
         s_seek_task = nullptr;
@@ -214,7 +216,8 @@ StartResult homing_start_seek_test(const TestAxis axis) {
     s_stop_on_limit.store(true, std::memory_order_release);
     s_seek_active.store(true, std::memory_order_release);
     s_state.store(HomingState::Running, std::memory_order_release);
-    if (xTaskCreate(seek_test_task, "homing_seek", 3072, nullptr, 6, &s_seek_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(seek_test_task, "homing_seek", 3072, nullptr, 6, &s_seek_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         s_seek_active.store(false, std::memory_order_release);
         s_stop_on_limit.store(false, std::memory_order_release);
         s_state.store(HomingState::Faulted, std::memory_order_release);

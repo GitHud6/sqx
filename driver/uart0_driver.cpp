@@ -7,6 +7,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "runtime_affinity.hpp"
+
 namespace ray2::driver {
 
 namespace {
@@ -125,7 +127,8 @@ esp_err_t uart0_start() {
         return ESP_ERR_NO_MEM;
     }
 
-    if (xTaskCreate(uart0_rx_task, "uart0_rx", 4096, nullptr, 8, &s_rx_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(uart0_rx_task, "uart0_rx", 4096, nullptr, 8, &s_rx_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
         vSemaphoreDelete(s_tx_mutex);
         s_tx_mutex = nullptr;
         vQueueDelete(s_rx_queue);
