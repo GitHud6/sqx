@@ -9,6 +9,7 @@
 #endif
 #include "driver/timer.h"
 #include "esp_intr_alloc.h"
+#include "freertos/FreeRTOS.h"
 
 namespace ray2::driver {
 namespace {
@@ -24,10 +25,13 @@ static_assert(kTimerDivider >= 2, "Timer Group divider must be at least two");
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_running = false;
+std::atomic<int> s_init_core = -1;
+std::atomic<int> s_isr_core = -1;
 StepTimerAlarmCallback s_alarm_callback = nullptr;
 void* s_alarm_user_data = nullptr;
 
 bool IRAM_ATTR timer_alarm_callback(void*) {
+    s_isr_core.store(xPortGetCoreID(), std::memory_order_relaxed);
     if (!s_running.load(std::memory_order_relaxed) || s_alarm_callback == nullptr) {
         return false;
     }
@@ -77,6 +81,7 @@ esp_err_t step_timer_driver_init(const StepTimerAlarmCallback callback, void* co
     }
 
     s_initialized.store(true, std::memory_order_release);
+    s_init_core.store(xPortGetCoreID(), std::memory_order_release);
     return ESP_OK;
 }
 
@@ -114,6 +119,14 @@ bool step_timer_driver_is_running() {
     return s_running.load(std::memory_order_acquire);
 }
 
+int step_timer_driver_init_core() {
+    return s_init_core.load(std::memory_order_acquire);
+}
+
+int step_timer_driver_isr_core() {
+    return s_isr_core.load(std::memory_order_acquire);
+}
+
 void IRAM_ATTR step_timer_driver_stop_from_isr() {
     s_running.store(false, std::memory_order_relaxed);
     timer_group_set_counter_enable_in_isr(kStepTimerGroup, kStepTimerIndex, TIMER_PAUSE);
@@ -127,6 +140,10 @@ void IRAM_ATTR step_timer_driver_update_interval_from_isr(const std::uint32_t in
     // the threshold here changes the following period without stopping the
     // counter or reconfiguring the interrupt service.
     timer_group_set_alarm_value_in_isr(kStepTimerGroup, kStepTimerIndex, interval_ticks);
+}
+
+std::uint64_t IRAM_ATTR step_timer_driver_lateness_ticks_from_isr() {
+    return timer_group_get_counter_value_in_isr(kStepTimerGroup, kStepTimerIndex);
 }
 
 }  // namespace ray2::driver

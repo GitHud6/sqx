@@ -1,5 +1,6 @@
 #include "command_dispatch.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -32,7 +33,16 @@ namespace ray2::protocol {
 namespace {
 
 bool write_all(const std::uint8_t* data, std::size_t length) {
-    return protocol_tx_enqueue_normal(data, length);
+    if (data == nullptr || length == 0) return false;
+    // The TX pool deliberately uses small fixed packets. Split verbose
+    // engineering responses here instead of growing every queued packet.
+    while (length != 0) {
+        const std::size_t chunk_length = std::min(length, kProtocolTxMessageCapacity);
+        if (!protocol_tx_enqueue_normal(data, chunk_length)) return false;
+        data += chunk_length;
+        length -= chunk_length;
+    }
+    return true;
 }
 
 bool write_text(const char* text) {
@@ -403,20 +413,42 @@ bool report_position_status() {
     const driver::Uart0RxDiagnostics uart = driver::uart0_rx_diagnostics();
     const ProtocolTxDiagnostics tx = protocol_tx_diagnostics();
 
-    // Keep verbose engineering diagnostics out of the protocol task stack.
-    static char response[2048] = {};
-    const int length = std::snprintf(
+    // Static storage keeps verbose diagnostics out of the protocol task stack.
+    // write_all() fragments this response into the fixed-size TX pool packets.
+    static char response[8192] = {};
+    int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu)|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|rmt=(trigger=(%llu,%llu),reset=(%llu,%llu),start=(%llu,%llu),timer=(%llu,%llu),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(core=%d,recalc=(calls=%lu,max_cycles=%lu),queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu,collapse=(samples=%lu,severe=%lu,bins=%lu,%lu,%lu,%lu,%lu,id=%llu->%llu,len=%.4f/%.4f,speed=%.1f->%.1f,next=(entry=%.1f,nominal=%.1f,max_entry=%.1f,junction=%.1f),turn=%.2f))|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|timer=(core=(init=%d,isr=%d),interval=%lu->%lu,delta=%lu,boundary_delta=%lu,boundaries=%lu,events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu)),amass=(changes=%lu,matrix=%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu),boundary=(id=%llu->%llu,base=%lu->%lu,effective=%lu->%lu,amass=%u->%u,major=%ld->%ld,slice=(duration=%lu->%lu,speed=%.1f->%.1f/%.1f->%.1f,phase=%u->%u),profile=(entry=%.1f,exit=%.1f,nominal=%.1f,junction=%.1f)))|rmt=(trigger=(%llu,%llu),reset=(%llu,%llu),start=(%llu,%llu),timer=(%llu,%llu),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
         planned_x - position.millimeters[0], planned_y - position.millimeters[1],
+        planner_diagnostics.planner_task_core,
+        static_cast<unsigned long>(planner_diagnostics.recalculate_calls),
+        static_cast<unsigned long>(planner_diagnostics.recalculate_max_cycles),
         planner_diagnostics.queued_blocks, planner_diagnostics.frozen_blocks,
         static_cast<unsigned long long>(planner::planner_completed_block_count()),
         static_cast<unsigned long long>(planner_diagnostics.coalesced_short_blocks),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.samples),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_samples),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_turn_bins[0]),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_turn_bins[1]),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_turn_bins[2]),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_turn_bins[3]),
+        static_cast<unsigned long>(planner_diagnostics.velocity_collapse.severe_turn_bins[4]),
+        static_cast<unsigned long long>(planner_diagnostics.velocity_collapse.execution_id),
+        static_cast<unsigned long long>(planner_diagnostics.velocity_collapse.next_execution_id),
+        planner_diagnostics.velocity_collapse.length_mm,
+        planner_diagnostics.velocity_collapse.next_length_mm,
+        planner_diagnostics.velocity_collapse.entry_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.exit_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.next_entry_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.next_nominal_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.next_max_entry_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.next_max_junction_speed_mm_per_min,
+        planner_diagnostics.velocity_collapse.turn_degrees,
         prep.active ? 1 : 0, prep.generation_complete ? 1 : 0,
         motion_profile_mode_text(prep.profile_mode),
         static_cast<unsigned long long>(prep.execution_id),
@@ -457,6 +489,77 @@ bool report_position_status() {
         static_cast<double>(segment.active_start_speed_tenths_mm_per_min) / 10.0,
         static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0,
         segment.pending_completions,
+        timer.timer_init_core, timer.timer_isr_core,
+        static_cast<unsigned long>(timer.interval_min_ticks == UINT32_MAX ? 0 : timer.interval_min_ticks),
+        static_cast<unsigned long>(timer.interval_max_ticks),
+        static_cast<unsigned long>(timer.interval_max_delta_ticks),
+        static_cast<unsigned long>(timer.boundary_max_delta_ticks),
+        static_cast<unsigned long>(timer.boundary_samples),
+        static_cast<unsigned long>(timer.scheduled_timer_events),
+        static_cast<unsigned long>(timer.timer_lateness_samples),
+        static_cast<double>(timer.timer_lateness_max_ticks) /
+            stepper::kStepTimerTicksPerMicrosecond,
+        static_cast<unsigned long>(timer.timer_lateness_boundary_samples),
+        static_cast<double>(timer.timer_lateness_boundary_max_ticks) /
+            stepper::kStepTimerTicksPerMicrosecond,
+        static_cast<unsigned long>(timer.timer_lateness_over_2us),
+        static_cast<unsigned long>(timer.timer_lateness_over_5us),
+        static_cast<unsigned long>(timer.timer_lateness_over_10us),
+        static_cast<unsigned long>(timer.timer_lateness_mask_samples[0]),
+        static_cast<unsigned long>(timer.timer_lateness_mask_samples[1]),
+        static_cast<unsigned long>(timer.timer_lateness_mask_samples[2]),
+        static_cast<unsigned long>(timer.timer_lateness_mask_samples[3]),
+        static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[0]),
+        static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[1]),
+        static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[2]),
+        static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[3]),
+        static_cast<unsigned long>(timer.timer_isr_body_samples),
+        static_cast<double>(timer.timer_isr_body_max_ticks) /
+            stepper::kStepTimerTicksPerMicrosecond,
+        static_cast<unsigned long>(timer.timer_isr_body_boundary_samples),
+        static_cast<double>(timer.timer_isr_body_boundary_max_ticks) /
+            stepper::kStepTimerTicksPerMicrosecond,
+        static_cast<unsigned long>(timer.timer_isr_body_over_10us),
+        static_cast<unsigned long>(timer.timer_isr_body_counter_wrapped),
+        static_cast<unsigned long>(timer.amass_level_changes),
+        static_cast<unsigned long>(timer.amass_transitions[0][0]),
+        static_cast<unsigned long>(timer.amass_transitions[0][1]),
+        static_cast<unsigned long>(timer.amass_transitions[0][2]),
+        static_cast<unsigned long>(timer.amass_transitions[0][3]),
+        static_cast<unsigned long>(timer.amass_transitions[1][0]),
+        static_cast<unsigned long>(timer.amass_transitions[1][1]),
+        static_cast<unsigned long>(timer.amass_transitions[1][2]),
+        static_cast<unsigned long>(timer.amass_transitions[1][3]),
+        static_cast<unsigned long>(timer.amass_transitions[2][0]),
+        static_cast<unsigned long>(timer.amass_transitions[2][1]),
+        static_cast<unsigned long>(timer.amass_transitions[2][2]),
+        static_cast<unsigned long>(timer.amass_transitions[2][3]),
+        static_cast<unsigned long>(timer.amass_transitions[3][0]),
+        static_cast<unsigned long>(timer.amass_transitions[3][1]),
+        static_cast<unsigned long>(timer.amass_transitions[3][2]),
+        static_cast<unsigned long>(timer.amass_transitions[3][3]),
+        static_cast<unsigned long long>(timer.boundary_prev_execution_id),
+        static_cast<unsigned long long>(timer.boundary_next_execution_id),
+        static_cast<unsigned long>(timer.boundary_prev_base_interval_ticks),
+        static_cast<unsigned long>(timer.boundary_next_base_interval_ticks),
+        static_cast<unsigned long>(timer.boundary_prev_interval_ticks),
+        static_cast<unsigned long>(timer.boundary_next_interval_ticks),
+        static_cast<unsigned>(timer.boundary_prev_amass_level),
+        static_cast<unsigned>(timer.boundary_next_amass_level),
+        static_cast<long>(timer.boundary_prev_major_steps),
+        static_cast<long>(timer.boundary_next_major_steps),
+        static_cast<unsigned long>(timer.boundary_prev_duration_us),
+        static_cast<unsigned long>(timer.boundary_next_duration_us),
+        static_cast<double>(timer.boundary_prev_start_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_prev_end_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_next_start_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_next_end_speed_tenths_mm_per_min) / 10.0,
+        static_cast<unsigned>(timer.boundary_prev_phase),
+        static_cast<unsigned>(timer.boundary_next_phase),
+        static_cast<double>(timer.boundary_profile_entry_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_profile_exit_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_profile_nominal_speed_tenths_mm_per_min) / 10.0,
+        static_cast<double>(timer.boundary_planner_junction_speed_tenths_mm_per_min) / 10.0,
         static_cast<unsigned long long>(rmt.trigger_count[0]),
         static_cast<unsigned long long>(rmt.trigger_count[1]),
         static_cast<unsigned long long>(rmt.reset_count[0]),
@@ -477,6 +580,44 @@ bool report_position_status() {
         static_cast<unsigned long long>(tx.status_sent),
         static_cast<unsigned long long>(tx.status_write_failed),
         static_cast<unsigned long long>(tx.status_coalesced));
+    if (length < 0 || static_cast<std::size_t>(length) >= sizeof(response)) {
+        // Long-lived counters can make the full engineering snapshot exceed
+        // its fixed DRAM buffer. Preserve the active timing diagnosis instead
+        // of silently dropping the command response.
+        length = std::snprintf(
+            response, sizeof(response),
+            "[POS:truncated=1|state=%s|reason=%s|steps=(%lld,%lld)|timer=(events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu)))]\r\nok\r\n",
+            position_state_text(position.state),
+            position_invalidation_reason_text(position.invalidation_reason),
+            static_cast<long long>(position.steps[0]),
+            static_cast<long long>(position.steps[1]),
+            static_cast<unsigned long>(timer.scheduled_timer_events),
+            static_cast<unsigned long>(timer.timer_lateness_samples),
+            static_cast<double>(timer.timer_lateness_max_ticks) /
+                stepper::kStepTimerTicksPerMicrosecond,
+            static_cast<unsigned long>(timer.timer_lateness_boundary_samples),
+            static_cast<double>(timer.timer_lateness_boundary_max_ticks) /
+                stepper::kStepTimerTicksPerMicrosecond,
+            static_cast<unsigned long>(timer.timer_lateness_over_2us),
+            static_cast<unsigned long>(timer.timer_lateness_over_5us),
+            static_cast<unsigned long>(timer.timer_lateness_over_10us),
+            static_cast<unsigned long>(timer.timer_lateness_mask_samples[0]),
+            static_cast<unsigned long>(timer.timer_lateness_mask_samples[1]),
+            static_cast<unsigned long>(timer.timer_lateness_mask_samples[2]),
+            static_cast<unsigned long>(timer.timer_lateness_mask_samples[3]),
+            static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[0]),
+            static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[1]),
+            static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[2]),
+            static_cast<unsigned long>(timer.timer_lateness_over_10us_masks[3]),
+            static_cast<unsigned long>(timer.timer_isr_body_samples),
+            static_cast<double>(timer.timer_isr_body_max_ticks) /
+                stepper::kStepTimerTicksPerMicrosecond,
+            static_cast<unsigned long>(timer.timer_isr_body_boundary_samples),
+            static_cast<double>(timer.timer_isr_body_boundary_max_ticks) /
+                stepper::kStepTimerTicksPerMicrosecond,
+            static_cast<unsigned long>(timer.timer_isr_body_over_10us),
+            static_cast<unsigned long>(timer.timer_isr_body_counter_wrapped));
+    }
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }

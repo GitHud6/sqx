@@ -7,6 +7,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "esp_log.h"
+
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -57,6 +59,7 @@ bool take_realtime_status(RealtimeStatusMessage& message) {
 }
 
 void protocol_tx_task(void*) {
+    ESP_LOGI("protocol_tx", "RUNTIME-CORE task=protocol_tx core=%d", xPortGetCoreID());
     TxMessage* normal_message = nullptr;
     RealtimeStatusMessage realtime_status = {};
 

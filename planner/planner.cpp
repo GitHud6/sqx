@@ -7,6 +7,7 @@
 #include <limits>
 
 #include "esp_log.h"
+#include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -20,6 +21,7 @@ namespace ray2::planner {
 namespace {
 
 TaskHandle_t s_planner_task = nullptr;
+std::atomic<int> s_planner_task_core = -1;
 std::array<MotionBlock, kPlannerQueueLength> s_block_buffer = {};
 std::size_t s_block_head = 0;
 std::size_t s_block_tail = 0;
@@ -32,6 +34,9 @@ TaskHandle_t s_capacity_waiter = nullptr;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
 std::atomic<std::uint64_t> s_coalesced_short_block_count = 0;
 std::atomic<std::uint64_t> s_next_execution_id = 1;
+PlannerVelocityCollapseDiagnostics s_velocity_collapse = {};
+std::uint32_t s_recalculate_calls = 0;
+std::uint32_t s_recalculate_max_cycles = 0;
 std::atomic<bool> s_queue_drain_reported = false;
 portMUX_TYPE s_execution_event_lock = portMUX_INITIALIZER_UNLOCKED;
 ExecutionCallback s_execution_callback = nullptr;
@@ -44,6 +49,13 @@ constexpr double kCoalescingDirectionCosine = 0.999999;
 constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr char kLogTag[] = "planner";
+
+void record_recalculate_duration(const std::uint32_t elapsed_cycles) {
+    ++s_recalculate_calls;
+    if (elapsed_cycles > s_recalculate_max_cycles) {
+        s_recalculate_max_cycles = elapsed_cycles;
+    }
+}
 
 std::size_t block_index_after(const std::size_t index) {
     return (index + 1) % kPlannerQueueLength;
@@ -162,7 +174,60 @@ double junction_speed_sqr(const MotionBlock& previous, const MotionBlock& curren
                         (1.0 - sin_theta_d2));
 }
 
+void record_velocity_collapse_locked(const MotionBlock& block, const MotionBlock* next) {
+    if (!is_plannable_motion(block) || next == nullptr || !is_plannable_motion(*next)) return;
+    const double entry = std::sqrt(std::max(0.0, block.entry_speed_sqr));
+    const double exit = std::sqrt(std::max(0.0, block.exit_speed_sqr));
+    if (exit <= 0.0 || entry <= exit) return;
+
+    ++s_velocity_collapse.samples;
+    const double dot = std::clamp(block.unit_vector[0] * next->unit_vector[0] +
+                                      block.unit_vector[1] * next->unit_vector[1],
+                                  -1.0, 1.0);
+    constexpr double kDegreesPerRadian = 57.29577951308232;
+    const double turn_degrees = std::acos(dot) * kDegreesPerRadian;
+    if (exit * 4.0 <= entry) {
+        ++s_velocity_collapse.severe_samples;
+        const std::size_t bin = turn_degrees < 5.0 ? 0U
+                              : turn_degrees < 45.0 ? 1U
+                              : turn_degrees < 135.0 ? 2U
+                              : turn_degrees < 175.0 ? 3U
+                                                    : 4U;
+        ++s_velocity_collapse.severe_turn_bins[bin];
+    }
+    const double previous_ratio = s_velocity_collapse.exit_speed_mm_per_min > 0.0
+                                      ? s_velocity_collapse.entry_speed_mm_per_min /
+                                            s_velocity_collapse.exit_speed_mm_per_min
+                                      : 0.0;
+    const double ratio = entry / exit;
+    if (s_velocity_collapse.execution_id != 0 && ratio <= previous_ratio) return;
+
+    s_velocity_collapse.execution_id = block.execution_id;
+    s_velocity_collapse.next_execution_id = next->execution_id;
+    s_velocity_collapse.length_mm = block.millimeters;
+    s_velocity_collapse.next_length_mm = next->millimeters;
+    s_velocity_collapse.entry_speed_mm_per_min = entry;
+    s_velocity_collapse.exit_speed_mm_per_min = exit;
+    s_velocity_collapse.nominal_speed_mm_per_min = block.programmed_rate_mm_per_min;
+    s_velocity_collapse.next_entry_speed_mm_per_min =
+        std::sqrt(std::max(0.0, next->entry_speed_sqr));
+    s_velocity_collapse.next_nominal_speed_mm_per_min = next->programmed_rate_mm_per_min;
+    s_velocity_collapse.next_max_entry_speed_mm_per_min =
+        std::sqrt(std::max(0.0, next->max_entry_speed_sqr));
+    s_velocity_collapse.next_max_junction_speed_mm_per_min =
+        std::sqrt(std::max(0.0, next->max_junction_speed_sqr));
+    s_velocity_collapse.turn_degrees = turn_degrees;
+}
+
 void planner_recalculate_locked() {
+    const std::uint32_t recalculate_start_cycles = esp_cpu_get_cycle_count();
+    struct RecalculateTrace {
+        std::uint32_t start_cycles;
+        ~RecalculateTrace() {
+            record_recalculate_duration(esp_cpu_get_cycle_count() - start_cycles);
+        }
+    } recalculate_trace{recalculate_start_cycles};
+
     if (s_block_count == 0) {
         return;
     }
@@ -423,6 +488,11 @@ bool freeze_next_motion_block(MotionBlock& block) {
         return false;
     }
 
+    const MotionBlock* next = frozen_blocks + 1U < s_block_count
+                                  ? &s_block_buffer[block_index_after(index)]
+                                  : nullptr;
+    record_velocity_collapse_locked(candidate, next);
+
     // Freeze the solved boundary before handing a copy to the producer. A
     // later G-code submission can only recalculate the remaining look-ahead.
     candidate.state = PlannerBlockState::Frozen;
@@ -629,6 +699,8 @@ void consume_segment_completions() {
 }
 
 void planner_task(void*) {
+    s_planner_task_core.store(xPortGetCoreID(), std::memory_order_release);
+    ESP_LOGI(kLogTag, "RUNTIME-CORE task=planner core=%d", xPortGetCoreID());
     MotionBlock block = {};
 
     while (true) {
@@ -774,6 +846,9 @@ void planner_reset() {
     s_block_tail = 0;
     s_block_count = 0;
     s_tail_entry_speed_sqr = 0.0;
+    s_velocity_collapse = {};
+    s_recalculate_calls = 0;
+    s_recalculate_max_cycles = 0;
     s_coalesced_short_block_count.store(0, std::memory_order_relaxed);
     capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
@@ -846,10 +921,14 @@ PlannerDiagnostics planner_diagnostics() {
     const bool executor_busy = stepper::timer_stepper_executor_is_busy();
 
     portENTER_CRITICAL(&s_block_buffer_lock);
+    diagnostics.planner_task_core = s_planner_task_core.load(std::memory_order_acquire);
+    diagnostics.recalculate_calls = s_recalculate_calls;
+    diagnostics.recalculate_max_cycles = s_recalculate_max_cycles;
     diagnostics.queued_blocks = s_block_count;
     diagnostics.frozen_blocks = frozen_block_count_locked();
     diagnostics.coalesced_short_blocks =
         s_coalesced_short_block_count.load(std::memory_order_relaxed);
+    diagnostics.velocity_collapse = s_velocity_collapse;
     for (std::size_t offset = 0; offset < diagnostics.blocks.size() && offset < s_block_count; ++offset) {
         const std::size_t index = (s_block_tail + offset) % kPlannerQueueLength;
         const MotionBlock& block = s_block_buffer[index];

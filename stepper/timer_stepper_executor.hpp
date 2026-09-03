@@ -15,6 +15,8 @@ struct TimerStepperDiagnostics {
     bool initialized = false;
     bool owns_step_pins = false;
     bool timer_running = false;
+    int timer_init_core = -1;
+    int timer_isr_core = -1;
     // These counters feed a one-second trace window. Keep them 32-bit so
     // segment-boundary diagnostics do not require 64-bit atomic operations
     // in the Timer ISR. Unsigned subtraction preserves deltas across wrap.
@@ -26,6 +28,52 @@ struct TimerStepperDiagnostics {
     std::uint32_t pulse_callbacks = 0;
     std::uint32_t rmt_triggers[machine::kAxisCount] = {};
     std::uint32_t direction_writes = 0;
+    std::uint32_t interval_min_ticks = 0;
+    std::uint32_t interval_max_ticks = 0;
+    std::uint32_t interval_max_delta_ticks = 0;
+    std::uint32_t timer_lateness_samples = 0;
+    std::uint32_t timer_lateness_max_ticks = 0;
+    std::uint32_t timer_lateness_boundary_samples = 0;
+    std::uint32_t timer_lateness_boundary_max_ticks = 0;
+    std::uint32_t timer_lateness_over_2us = 0;
+    std::uint32_t timer_lateness_over_5us = 0;
+    std::uint32_t timer_lateness_over_10us = 0;
+    std::uint32_t timer_lateness_mask_samples[4] = {};
+    std::uint32_t timer_lateness_over_10us_masks[4] = {};
+    std::uint32_t timer_isr_body_samples = 0;
+    std::uint32_t timer_isr_body_max_ticks = 0;
+    std::uint32_t timer_isr_body_boundary_samples = 0;
+    std::uint32_t timer_isr_body_boundary_max_ticks = 0;
+    std::uint32_t timer_isr_body_over_10us = 0;
+    std::uint32_t timer_isr_body_counter_wrapped = 0;
+    std::uint32_t boundary_max_delta_ticks = 0;
+    std::uint32_t boundary_samples = 0;
+    std::uint32_t amass_level_changes = 0;
+    std::uint32_t amass_transitions[4][4] = {};
+    std::uint32_t amass_3_to_0 = 0;
+    std::uint32_t amass_0_to_3 = 0;
+    std::uint64_t boundary_prev_execution_id = 0;
+    std::uint64_t boundary_next_execution_id = 0;
+    std::uint32_t boundary_prev_interval_ticks = 0;
+    std::uint32_t boundary_next_interval_ticks = 0;
+    std::uint32_t boundary_prev_base_interval_ticks = 0;
+    std::uint32_t boundary_next_base_interval_ticks = 0;
+    std::uint32_t boundary_prev_duration_us = 0;
+    std::uint32_t boundary_next_duration_us = 0;
+    std::uint32_t boundary_prev_start_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_prev_end_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_next_start_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_next_end_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_profile_entry_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_profile_exit_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_profile_nominal_speed_tenths_mm_per_min = 0;
+    std::uint32_t boundary_planner_junction_speed_tenths_mm_per_min = 0;
+    std::uint8_t boundary_prev_phase = 0;
+    std::uint8_t boundary_next_phase = 0;
+    std::uint8_t boundary_prev_amass_level = 0;
+    std::uint8_t boundary_next_amass_level = 0;
+    std::int32_t boundary_prev_major_steps = 0;
+    std::int32_t boundary_next_major_steps = 0;
 };
 
 // Stage two initialization remains passive until the new-driver-compatible

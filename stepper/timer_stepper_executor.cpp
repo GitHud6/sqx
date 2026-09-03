@@ -30,6 +30,57 @@ std::atomic<std::uint32_t> s_block_phase_initializations = 0;
 std::atomic<std::uint32_t> s_pulse_callbacks = 0;
 std::atomic<std::uint32_t> s_rmt_triggers[machine::kAxisCount] = {};
 std::atomic<std::uint32_t> s_direction_writes = 0;
+std::atomic<std::uint32_t> s_interval_min_ticks = UINT32_MAX;
+std::atomic<std::uint32_t> s_interval_max_ticks = 0;
+std::atomic<std::uint32_t> s_interval_max_delta_ticks = 0;
+struct TimerLatenessCounters {
+    std::uint32_t samples = 0;
+    std::uint32_t max_ticks = 0;
+    std::uint32_t boundary_samples = 0;
+    std::uint32_t boundary_max_ticks = 0;
+    std::uint32_t over_2us = 0;
+    std::uint32_t over_5us = 0;
+    std::uint32_t over_10us = 0;
+    std::uint32_t mask_samples[4] = {};
+    std::uint32_t over_10us_masks[4] = {};
+    std::uint32_t body_samples = 0;
+    std::uint32_t body_max_ticks = 0;
+    std::uint32_t body_boundary_samples = 0;
+    std::uint32_t body_boundary_max_ticks = 0;
+    std::uint32_t body_over_10us = 0;
+    std::uint32_t body_counter_wrapped = 0;
+};
+// Updated while s_motion_lock is held. Plain counters avoid adding atomic-RMW
+// traffic to the timing path being measured.
+TimerLatenessCounters s_timer_lateness = {};
+std::atomic<std::uint32_t> s_boundary_max_delta_ticks = 0;
+std::atomic<std::uint32_t> s_boundary_samples = 0;
+std::atomic<std::uint32_t> s_amass_level_changes = 0;
+std::atomic<std::uint32_t> s_amass_transitions[4][4] = {};
+std::atomic<std::uint32_t> s_amass_3_to_0 = 0;
+std::atomic<std::uint32_t> s_amass_0_to_3 = 0;
+std::atomic<std::uint64_t> s_boundary_prev_execution_id = 0;
+std::atomic<std::uint64_t> s_boundary_next_execution_id = 0;
+std::atomic<std::uint32_t> s_boundary_prev_interval_ticks = 0;
+std::atomic<std::uint32_t> s_boundary_next_interval_ticks = 0;
+std::atomic<std::uint32_t> s_boundary_prev_base_interval_ticks = 0;
+std::atomic<std::uint32_t> s_boundary_next_base_interval_ticks = 0;
+std::atomic<std::uint32_t> s_boundary_prev_duration_us = 0;
+std::atomic<std::uint32_t> s_boundary_next_duration_us = 0;
+std::atomic<std::uint32_t> s_boundary_prev_start_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_prev_end_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_next_start_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_next_end_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_profile_entry_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_profile_exit_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_profile_nominal_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint32_t> s_boundary_planner_junction_speed_tenths_mm_per_min = 0;
+std::atomic<std::uint8_t> s_boundary_prev_phase = 0;
+std::atomic<std::uint8_t> s_boundary_next_phase = 0;
+std::atomic<std::uint8_t> s_boundary_prev_amass_level = 0;
+std::atomic<std::uint8_t> s_boundary_next_amass_level = 0;
+std::atomic<std::int32_t> s_boundary_prev_major_steps = 0;
+std::atomic<std::int32_t> s_boundary_next_major_steps = 0;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
@@ -40,9 +91,17 @@ struct MotionState {
     std::int64_t axis_error[machine::kAxisCount] = {};
     std::int64_t axis_increment[machine::kAxisCount] = {};
     std::int64_t phase_denominator = 0;
+    std::uint32_t duration_us = 0;
+    std::uint32_t base_step_interval_ticks = 0;
     std::uint32_t effective_step_interval_ticks = 0;
     std::uint8_t amass_level = 0;
     std::uint32_t end_speed_tenths_mm_per_min = 0;
+    std::uint32_t start_speed_tenths_mm_per_min = 0;
+    std::uint32_t profile_entry_speed_tenths_mm_per_min = 0;
+    std::uint32_t profile_exit_speed_tenths_mm_per_min = 0;
+    std::uint32_t profile_nominal_speed_tenths_mm_per_min = 0;
+    std::uint32_t planner_junction_speed_tenths_mm_per_min = 0;
+    StepSegmentPhase phase = StepSegmentPhase::Cruise;
     std::uint64_t execution_id = 0;
     bool completes_block = false;
     bool system_motion = false;
@@ -56,6 +115,7 @@ struct MotionState {
 MotionState s_motion = {};
 bool s_applied_direction[machine::kAxisCount] = {};
 bool s_applied_direction_valid = false;
+std::uint8_t s_last_emitted_step_mask = 0;
 
 void IRAM_ATTR record_segment_schedule(const MotionState& motion) {
     s_scheduled_timer_ticks.fetch_add(
@@ -64,6 +124,145 @@ void IRAM_ATTR record_segment_schedule(const MotionState& motion) {
         std::memory_order_relaxed);
     s_scheduled_timer_events.fetch_add(static_cast<std::uint32_t>(motion.execution_ticks),
                                        std::memory_order_relaxed);
+}
+
+void IRAM_ATTR record_interval_sample(const std::uint32_t interval_ticks) {
+    std::uint32_t previous = s_interval_min_ticks.load(std::memory_order_relaxed);
+    while (interval_ticks < previous &&
+           !s_interval_min_ticks.compare_exchange_weak(previous, interval_ticks,
+                                                        std::memory_order_relaxed)) {
+    }
+    previous = s_interval_max_ticks.load(std::memory_order_relaxed);
+    while (interval_ticks > previous &&
+           !s_interval_max_ticks.compare_exchange_weak(previous, interval_ticks,
+                                                        std::memory_order_relaxed)) {
+    }
+}
+
+void IRAM_ATTR record_interval_delta(const MotionState& previous_motion,
+                                     const MotionState& next_motion,
+                                     const bool at_boundary) {
+    const std::uint32_t previous_ticks = previous_motion.effective_step_interval_ticks;
+    const std::uint32_t next_ticks = next_motion.effective_step_interval_ticks;
+    const std::uint32_t delta = previous_ticks >= next_ticks
+                                    ? previous_ticks - next_ticks
+                                    : next_ticks - previous_ticks;
+    std::uint32_t previous = s_interval_max_delta_ticks.load(std::memory_order_relaxed);
+    while (delta > previous &&
+           !s_interval_max_delta_ticks.compare_exchange_weak(previous, delta,
+                                                             std::memory_order_relaxed)) {
+    }
+    if (!at_boundary) return;
+    s_boundary_samples.fetch_add(1, std::memory_order_relaxed);
+    if (previous_motion.amass_level < 4 && next_motion.amass_level < 4) {
+        s_amass_transitions[previous_motion.amass_level][next_motion.amass_level].fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    if (previous_motion.amass_level != next_motion.amass_level) {
+        s_amass_level_changes.fetch_add(1, std::memory_order_relaxed);
+        if (previous_motion.amass_level == 3 && next_motion.amass_level == 0) {
+            s_amass_3_to_0.fetch_add(1, std::memory_order_relaxed);
+        } else if (previous_motion.amass_level == 0 && next_motion.amass_level == 3) {
+            s_amass_0_to_3.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    // A block's final stop necessarily stretches its final physical step as
+    // velocity approaches zero. Keep it in the aggregate counters, but do not
+    // let that expected terminal tail hide the largest in-motion discontinuity.
+    if (next_motion.completes_block && next_motion.end_speed_tenths_mm_per_min == 0) {
+        return;
+    }
+    previous = s_boundary_max_delta_ticks.load(std::memory_order_relaxed);
+    if (delta <= previous ||
+        !s_boundary_max_delta_ticks.compare_exchange_strong(previous, delta,
+                                                             std::memory_order_relaxed)) {
+        return;
+    }
+    s_boundary_prev_execution_id.store(previous_motion.execution_id, std::memory_order_relaxed);
+    s_boundary_next_execution_id.store(next_motion.execution_id, std::memory_order_relaxed);
+    s_boundary_prev_interval_ticks.store(previous_ticks, std::memory_order_relaxed);
+    s_boundary_next_interval_ticks.store(next_ticks, std::memory_order_relaxed);
+    s_boundary_prev_base_interval_ticks.store(previous_motion.base_step_interval_ticks,
+                                               std::memory_order_relaxed);
+    s_boundary_next_base_interval_ticks.store(next_motion.base_step_interval_ticks,
+                                               std::memory_order_relaxed);
+    s_boundary_prev_duration_us.store(previous_motion.duration_us, std::memory_order_relaxed);
+    s_boundary_next_duration_us.store(next_motion.duration_us, std::memory_order_relaxed);
+    s_boundary_prev_start_speed_tenths_mm_per_min.store(
+        previous_motion.start_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_prev_end_speed_tenths_mm_per_min.store(
+        previous_motion.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_next_start_speed_tenths_mm_per_min.store(
+        next_motion.start_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_next_end_speed_tenths_mm_per_min.store(
+        next_motion.end_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_profile_entry_speed_tenths_mm_per_min.store(
+        next_motion.profile_entry_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_profile_exit_speed_tenths_mm_per_min.store(
+        next_motion.profile_exit_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_profile_nominal_speed_tenths_mm_per_min.store(
+        next_motion.profile_nominal_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_planner_junction_speed_tenths_mm_per_min.store(
+        next_motion.planner_junction_speed_tenths_mm_per_min, std::memory_order_relaxed);
+    s_boundary_prev_phase.store(static_cast<std::uint8_t>(previous_motion.phase),
+                                std::memory_order_relaxed);
+    s_boundary_next_phase.store(static_cast<std::uint8_t>(next_motion.phase),
+                                std::memory_order_relaxed);
+    s_boundary_prev_amass_level.store(previous_motion.amass_level, std::memory_order_relaxed);
+    s_boundary_next_amass_level.store(next_motion.amass_level, std::memory_order_relaxed);
+    s_boundary_prev_major_steps.store(
+        std::max(previous_motion.axis_steps[0], previous_motion.axis_steps[1]),
+        std::memory_order_relaxed);
+    s_boundary_next_major_steps.store(
+        std::max(next_motion.axis_steps[0], next_motion.axis_steps[1]),
+        std::memory_order_relaxed);
+}
+
+void IRAM_ATTR record_timer_lateness(const std::uint64_t lateness_ticks,
+                                     const bool at_segment_boundary,
+                                     const std::uint8_t preceding_step_mask) {
+    const std::uint32_t ticks = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(lateness_ticks, UINT32_MAX));
+    ++s_timer_lateness.samples;
+    const std::size_t mask_index = preceding_step_mask & 0x03U;
+    ++s_timer_lateness.mask_samples[mask_index];
+    s_timer_lateness.max_ticks = std::max(s_timer_lateness.max_ticks, ticks);
+    if (ticks > 2U * kStepTimerTicksPerMicrosecond) {
+        ++s_timer_lateness.over_2us;
+    }
+    if (ticks > 5U * kStepTimerTicksPerMicrosecond) {
+        ++s_timer_lateness.over_5us;
+    }
+    if (ticks > 10U * kStepTimerTicksPerMicrosecond) {
+        ++s_timer_lateness.over_10us;
+        ++s_timer_lateness.over_10us_masks[mask_index];
+    }
+    if (!at_segment_boundary) return;
+    ++s_timer_lateness.boundary_samples;
+    s_timer_lateness.boundary_max_ticks = std::max(s_timer_lateness.boundary_max_ticks, ticks);
+}
+
+void IRAM_ATTR record_timer_isr_body(const std::uint64_t start_counter_ticks,
+                                     const std::uint64_t end_counter_ticks,
+                                     const bool at_segment_boundary) {
+    // Auto-reload crossing makes a single counter subtraction ambiguous. Keep
+    // those events visible but do not turn them into a false short duration.
+    if (end_counter_ticks < start_counter_ticks) {
+        ++s_timer_lateness.body_counter_wrapped;
+        return;
+    }
+    const std::uint64_t elapsed_ticks = end_counter_ticks - start_counter_ticks;
+    const std::uint32_t ticks = static_cast<std::uint32_t>(
+        std::min<std::uint64_t>(elapsed_ticks, UINT32_MAX));
+    ++s_timer_lateness.body_samples;
+    s_timer_lateness.body_max_ticks = std::max(s_timer_lateness.body_max_ticks, ticks);
+    if (ticks > 10U * kStepTimerTicksPerMicrosecond) {
+        ++s_timer_lateness.body_over_10us;
+    }
+    if (!at_segment_boundary) return;
+    ++s_timer_lateness.body_boundary_samples;
+    s_timer_lateness.body_boundary_max_ticks = std::max(
+        s_timer_lateness.body_boundary_max_ticks, ticks);
 }
 
 std::uint32_t segment_timer_ticks(const StepSegment& segment) {
@@ -76,12 +275,20 @@ MotionState motion_from_segment(const StepSegment& segment) {
     MotionState motion = {};
     motion.axis_steps[0] = segment.axis_steps[0];
     motion.axis_steps[1] = segment.axis_steps[1];
+    motion.duration_us = segment.duration_us;
+    motion.base_step_interval_ticks = segment_timer_ticks(segment);
     const std::uint32_t amass_scale = 1U << segment.amass_level;
     motion.execution_ticks = segment.major_steps * static_cast<std::int32_t>(amass_scale);
     motion.effective_step_interval_ticks = std::max<std::uint32_t>(
-        1U, segment_timer_ticks(segment) / amass_scale);
+        1U, motion.base_step_interval_ticks / amass_scale);
     motion.amass_level = segment.amass_level;
+    motion.start_speed_tenths_mm_per_min = segment.start_speed_tenths_mm_per_min;
     motion.end_speed_tenths_mm_per_min = segment.end_speed_tenths_mm_per_min;
+    motion.profile_entry_speed_tenths_mm_per_min = segment.profile_entry_speed_tenths_mm_per_min;
+    motion.profile_exit_speed_tenths_mm_per_min = segment.profile_exit_speed_tenths_mm_per_min;
+    motion.profile_nominal_speed_tenths_mm_per_min = segment.profile_nominal_speed_tenths_mm_per_min;
+    motion.planner_junction_speed_tenths_mm_per_min = segment.planner_junction_speed_tenths_mm_per_min;
+    motion.phase = segment.phase;
     motion.execution_id = segment.execution_id;
     motion.completes_block = segment.completes_block;
     motion.system_motion = segment.system_motion;
@@ -199,15 +406,23 @@ void IRAM_ATTR apply_segment_direction_from_isr(const StepSegment& segment) {
 
 bool IRAM_ATTR timer_alarm_callback(void*) {
     BaseType_t task_woken = pdFALSE;
+    const std::uint64_t lateness_ticks = driver::step_timer_driver_lateness_ticks_from_isr();
     portENTER_CRITICAL_ISR(&s_motion_lock);
     if (!s_busy.load()) {
         portEXIT_CRITICAL_ISR(&s_motion_lock);
         return false;
     }
 
+    const std::uint8_t prepared_step_mask = s_motion.prepared_step_mask_valid
+                                                ? s_motion.prepared_step_mask
+                                                : 0;
+    // The time to this callback was affected by the work emitted by the prior
+    // callback, not by the mask that will be emitted below.
+    const std::uint8_t preceding_step_mask = s_last_emitted_step_mask;
     // Emit the DDA decision prepared by the preceding timer tick before any
     // segment bookkeeping for this tick can delay the RMT trigger.
     emit_prepared_step_mask(s_motion);
+    s_last_emitted_step_mask = prepared_step_mask;
     s_pulse_callbacks.fetch_add(1, std::memory_order_relaxed);
     ++s_motion.completed_ticks;
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
@@ -245,6 +460,8 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             apply_segment_direction_from_isr(next);
             MotionState next_motion = motion_from_segment(next);
             s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
+            record_interval_sample(next_motion.effective_step_interval_ticks);
+            record_interval_delta(completed_motion, next_motion, true);
             if (completed_motion.uses_block_phase && next_motion.uses_block_phase &&
                 completed_motion.execution_id == next_motion.execution_id &&
                 completed_motion.phase_denominator == next_motion.phase_denominator) {
@@ -287,6 +504,10 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     } else {
         prepare_next_step_mask(s_motion);
     }
+    const std::uint64_t isr_end_counter_ticks =
+        driver::step_timer_driver_lateness_ticks_from_isr();
+    record_timer_lateness(lateness_ticks, finished, preceding_step_mask);
+    record_timer_isr_body(lateness_ticks, isr_end_counter_ticks, finished);
     portEXIT_CRITICAL_ISR(&s_motion_lock);
     return task_woken == pdTRUE;
 }
@@ -329,6 +550,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     }
     s_applied_direction_valid = false;
     MotionState motion = motion_from_segment(segment);
+    record_interval_sample(motion.effective_step_interval_ticks);
     initialize_block_phase(motion);
     if (motion.uses_block_phase) {
         s_block_phase_initializations.fetch_add(1, std::memory_order_relaxed);
@@ -355,6 +577,7 @@ esp_err_t timer_stepper_executor_start_segment(const StepSegment& segment) {
     s_applied_direction_valid = true;
     prepare_next_step_mask(motion);
     s_motion = motion;
+    s_last_emitted_step_mask = 0;
     s_busy.store(true);
     portEXIT_CRITICAL(&s_motion_lock);
     record_segment_schedule(motion);
@@ -392,6 +615,7 @@ void timer_stepper_executor_stop() {
     portENTER_CRITICAL(&s_motion_lock);
     motion = s_motion;
     s_motion = {};
+    s_last_emitted_step_mask = 0;
     s_applied_direction_valid = false;
     s_busy.store(false);
     portEXIT_CRITICAL(&s_motion_lock);
@@ -407,6 +631,7 @@ void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
     portENTER_CRITICAL_ISR(&s_motion_lock);
     s_motion.prepared_step_mask = 0;
     s_motion.prepared_step_mask_valid = false;
+    s_last_emitted_step_mask = 0;
     s_applied_direction_valid = false;
     s_busy.store(false, std::memory_order_relaxed);
     portEXIT_CRITICAL_ISR(&s_motion_lock);
@@ -439,6 +664,8 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     TimerStepperDiagnostics diagnostics = {};
     diagnostics.initialized = s_initialized.load(); diagnostics.owns_step_pins = diagnostics.initialized;
     diagnostics.timer_running = s_busy.load();
+    diagnostics.timer_init_core = driver::step_timer_driver_init_core();
+    diagnostics.timer_isr_core = driver::step_timer_driver_isr_core();
     diagnostics.scheduled_timer_events = s_scheduled_timer_events.load();
     diagnostics.scheduled_timer_ticks = s_scheduled_timer_ticks.load();
     diagnostics.segment_handoffs = s_segment_handoffs.load();
@@ -449,6 +676,68 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
         diagnostics.rmt_triggers[axis] = s_rmt_triggers[axis].load();
     }
     diagnostics.direction_writes = s_direction_writes.load();
+    diagnostics.interval_min_ticks = s_interval_min_ticks.load();
+    diagnostics.interval_max_ticks = s_interval_max_ticks.load();
+    diagnostics.interval_max_delta_ticks = s_interval_max_delta_ticks.load();
+    portENTER_CRITICAL(&s_motion_lock);
+    diagnostics.timer_lateness_samples = s_timer_lateness.samples;
+    diagnostics.timer_lateness_max_ticks = s_timer_lateness.max_ticks;
+    diagnostics.timer_lateness_boundary_samples = s_timer_lateness.boundary_samples;
+    diagnostics.timer_lateness_boundary_max_ticks = s_timer_lateness.boundary_max_ticks;
+    diagnostics.timer_lateness_over_2us = s_timer_lateness.over_2us;
+    diagnostics.timer_lateness_over_5us = s_timer_lateness.over_5us;
+    diagnostics.timer_lateness_over_10us = s_timer_lateness.over_10us;
+    for (std::size_t mask = 0; mask < 4; ++mask) {
+        diagnostics.timer_lateness_mask_samples[mask] = s_timer_lateness.mask_samples[mask];
+        diagnostics.timer_lateness_over_10us_masks[mask] = s_timer_lateness.over_10us_masks[mask];
+    }
+    diagnostics.timer_isr_body_samples = s_timer_lateness.body_samples;
+    diagnostics.timer_isr_body_max_ticks = s_timer_lateness.body_max_ticks;
+    diagnostics.timer_isr_body_boundary_samples = s_timer_lateness.body_boundary_samples;
+    diagnostics.timer_isr_body_boundary_max_ticks = s_timer_lateness.body_boundary_max_ticks;
+    diagnostics.timer_isr_body_over_10us = s_timer_lateness.body_over_10us;
+    diagnostics.timer_isr_body_counter_wrapped = s_timer_lateness.body_counter_wrapped;
+    portEXIT_CRITICAL(&s_motion_lock);
+    diagnostics.boundary_max_delta_ticks = s_boundary_max_delta_ticks.load();
+    diagnostics.boundary_samples = s_boundary_samples.load();
+    diagnostics.amass_level_changes = s_amass_level_changes.load();
+    for (std::size_t from = 0; from < 4; ++from) {
+        for (std::size_t to = 0; to < 4; ++to) {
+            diagnostics.amass_transitions[from][to] = s_amass_transitions[from][to].load();
+        }
+    }
+    diagnostics.amass_3_to_0 = s_amass_3_to_0.load();
+    diagnostics.amass_0_to_3 = s_amass_0_to_3.load();
+    diagnostics.boundary_prev_execution_id = s_boundary_prev_execution_id.load();
+    diagnostics.boundary_next_execution_id = s_boundary_next_execution_id.load();
+    diagnostics.boundary_prev_interval_ticks = s_boundary_prev_interval_ticks.load();
+    diagnostics.boundary_next_interval_ticks = s_boundary_next_interval_ticks.load();
+    diagnostics.boundary_prev_base_interval_ticks = s_boundary_prev_base_interval_ticks.load();
+    diagnostics.boundary_next_base_interval_ticks = s_boundary_next_base_interval_ticks.load();
+    diagnostics.boundary_prev_duration_us = s_boundary_prev_duration_us.load();
+    diagnostics.boundary_next_duration_us = s_boundary_next_duration_us.load();
+    diagnostics.boundary_prev_start_speed_tenths_mm_per_min =
+        s_boundary_prev_start_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_prev_end_speed_tenths_mm_per_min =
+        s_boundary_prev_end_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_next_start_speed_tenths_mm_per_min =
+        s_boundary_next_start_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_next_end_speed_tenths_mm_per_min =
+        s_boundary_next_end_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_profile_entry_speed_tenths_mm_per_min =
+        s_boundary_profile_entry_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_profile_exit_speed_tenths_mm_per_min =
+        s_boundary_profile_exit_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_profile_nominal_speed_tenths_mm_per_min =
+        s_boundary_profile_nominal_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_planner_junction_speed_tenths_mm_per_min =
+        s_boundary_planner_junction_speed_tenths_mm_per_min.load();
+    diagnostics.boundary_prev_phase = s_boundary_prev_phase.load();
+    diagnostics.boundary_next_phase = s_boundary_next_phase.load();
+    diagnostics.boundary_prev_amass_level = s_boundary_prev_amass_level.load();
+    diagnostics.boundary_next_amass_level = s_boundary_next_amass_level.load();
+    diagnostics.boundary_prev_major_steps = s_boundary_prev_major_steps.load();
+    diagnostics.boundary_next_major_steps = s_boundary_next_major_steps.load();
     return diagnostics;
 }
 
