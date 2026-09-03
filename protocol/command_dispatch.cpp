@@ -418,7 +418,7 @@ bool report_position_status() {
     static char response[8192] = {};
     int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(core=%d,recalc=(calls=%lu,max_cycles=%lu,lock=(snapshot=%lu/%lu,commit=%lu/%lu),stale=%lu),queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu,collapse=(samples=%lu,severe=%lu,bins=%lu,%lu,%lu,%lu,%lu,id=%llu->%llu,len=%.4f/%.4f,speed=%.1f->%.1f,next=(entry=%.1f,nominal=%.1f,max_entry=%.1f,junction=%.1f),turn=%.2f))|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|timer=(core=(init=%d,isr=%d),interval=%lu->%lu,delta=%lu,boundary_delta=%lu,boundaries=%lu,events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu)),amass=(changes=%lu,matrix=%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu),boundary=(id=%llu->%llu,base=%lu->%lu,effective=%lu->%lu,amass=%u->%u,major=%ld->%ld,slice=(duration=%lu->%lu,speed=%.1f->%.1f/%.1f->%.1f,phase=%u->%u)))|rmt=(trigger=(%llu,%llu),reset=(%llu,%llu),start=(%llu,%llu),timer=(%llu,%llu),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)|planner=(core=%d,recalc=(calls=%lu,max_cycles=%lu,lock=(snapshot=%lu/%lu,commit=%lu/%lu),stale=%lu),queued=%zu,frozen=%zu,completed=%llu,coalesced=%llu,collapse=(samples=%lu,severe=%lu,bins=%lu,%lu,%lu,%lu,%lu,id=%llu->%llu,len=%.4f/%.4f,speed=%.1f->%.1f,next=(entry=%.1f,nominal=%.1f,max_entry=%.1f,junction=%.1f),turn=%.2f))|prep=(active=%d,generated=%d,profile=%s,id=%llu,major=%ld/%ld,axis=(%ld,%ld),speed=%.1f,ctx=(used=%zu/%zu,g=%llu,e=%llu,c=%llu))|arc=(accepted=%llu,error=%.3f,max_chord=%.3f,last=(radius=%.3f,sweep=%.1f,chord=%.3f,segments=%zu))|lookahead=(b0=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b1=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f;b2=%s#%llu:e=%.1f,x=%.1f,j=%.1f,n=%.1f)|segment=(queued=%zu,capacity=%zu,high_water=%zu,underflows=%llu,active=%d,id=%llu,interval=%lu->%lu,amass=%u,speed=(%.1f,%.1f),completed_pending=%zu)|timer=(core=(init=%d,isr=%d),interval=%lu->%lu,delta=%lu,boundary_delta=%lu,boundaries=%lu,events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu),hot=(mhz=%lu,samples=%lu,front=%.2fus,normal=%lu/%.2fus/%lu,boundary=%lu/%.2fus/%lu,peak=(interval=%lu->%lu,amass=%u->%u,complete=%d))),amass=(changes=%lu,matrix=%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu/%lu,%lu,%lu,%lu),boundary=(id=%llu->%llu,base=%lu->%lu,effective=%lu->%lu,amass=%u->%u,major=%ld->%ld,slice=(duration=%lu->%lu,speed=%.1f->%.1f/%.1f->%.1f,phase=%u->%u)))|rmt=(trigger=(%llu,%llu),reset=(%llu,%llu),start=(%llu,%llu),timer=(%llu,%llu),invalid=%llu)|realtime=(status=%llu)|uart=(rx=%llu,rt=%llu,normal=%llu,high_water=%zu)|tx=(pending=%zu,normal=(queued=%llu,sent=%llu,failed=%llu),status=(published=%llu,sent=%llu,failed=%llu,coalesced=%llu))]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
         static_cast<long long>(position.steps[0]),
@@ -528,6 +528,23 @@ bool report_position_status() {
             stepper::kStepTimerTicksPerMicrosecond,
         static_cast<unsigned long>(timer.timer_isr_body_over_10us),
         static_cast<unsigned long>(timer.timer_isr_body_counter_wrapped),
+        static_cast<unsigned long>(timer.timer_isr_cycles_per_microsecond),
+        static_cast<unsigned long>(timer.timer_isr_hot_path_samples),
+        static_cast<double>(timer.timer_isr_pulse_front_max_cycles) /
+            timer.timer_isr_cycles_per_microsecond,
+        static_cast<unsigned long>(timer.timer_isr_normal_samples),
+        static_cast<double>(timer.timer_isr_normal_max_cycles) /
+            timer.timer_isr_cycles_per_microsecond,
+        static_cast<unsigned long>(timer.timer_isr_normal_over_10us),
+        static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_samples),
+        static_cast<double>(timer.timer_isr_boundary_hot_path_max_cycles) /
+            timer.timer_isr_cycles_per_microsecond,
+        static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_over_10us),
+        static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_peak_previous_interval_ticks),
+        static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_peak_next_interval_ticks),
+        static_cast<unsigned>(timer.timer_isr_boundary_hot_path_peak_previous_amass_level),
+        static_cast<unsigned>(timer.timer_isr_boundary_hot_path_peak_next_amass_level),
+        timer.timer_isr_boundary_hot_path_peak_completes_block ? 1 : 0,
         static_cast<unsigned long>(timer.amass_level_changes),
         static_cast<unsigned long>(timer.amass_transitions[0][0]),
         static_cast<unsigned long>(timer.amass_transitions[0][1]),
@@ -589,7 +606,7 @@ bool report_position_status() {
         // of silently dropping the command response.
         length = std::snprintf(
             response, sizeof(response),
-            "[POS:truncated=1|state=%s|reason=%s|steps=(%lld,%lld)|timer=(events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu)))]\r\nok\r\n",
+            "[POS:truncated=1|state=%s|reason=%s|steps=(%lld,%lld)|timer=(events=%lu,jitter=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over2/5/10=%lu/%lu/%lu,mask=(%lu,%lu,%lu,%lu)/(%lu,%lu,%lu,%lu),body=(samples=%lu,max=%.2fus,boundary=%lu/%.2fus,over10=%lu,wrap=%lu),hot=(mhz=%lu,samples=%lu,front=%.2fus,normal=%lu/%.2fus/%lu,boundary=%lu/%.2fus/%lu,peak=(interval=%lu->%lu,amass=%u->%u,complete=%d))))]\r\nok\r\n",
             position_state_text(position.state),
             position_invalidation_reason_text(position.invalidation_reason),
             static_cast<long long>(position.steps[0]),
@@ -619,7 +636,24 @@ bool report_position_status() {
             static_cast<double>(timer.timer_isr_body_boundary_max_ticks) /
                 stepper::kStepTimerTicksPerMicrosecond,
             static_cast<unsigned long>(timer.timer_isr_body_over_10us),
-            static_cast<unsigned long>(timer.timer_isr_body_counter_wrapped));
+            static_cast<unsigned long>(timer.timer_isr_body_counter_wrapped),
+            static_cast<unsigned long>(timer.timer_isr_cycles_per_microsecond),
+            static_cast<unsigned long>(timer.timer_isr_hot_path_samples),
+            static_cast<double>(timer.timer_isr_pulse_front_max_cycles) /
+                timer.timer_isr_cycles_per_microsecond,
+            static_cast<unsigned long>(timer.timer_isr_normal_samples),
+            static_cast<double>(timer.timer_isr_normal_max_cycles) /
+                timer.timer_isr_cycles_per_microsecond,
+            static_cast<unsigned long>(timer.timer_isr_normal_over_10us),
+            static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_samples),
+            static_cast<double>(timer.timer_isr_boundary_hot_path_max_cycles) /
+                timer.timer_isr_cycles_per_microsecond,
+            static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_over_10us),
+            static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_peak_previous_interval_ticks),
+            static_cast<unsigned long>(timer.timer_isr_boundary_hot_path_peak_next_interval_ticks),
+            static_cast<unsigned>(timer.timer_isr_boundary_hot_path_peak_previous_amass_level),
+            static_cast<unsigned>(timer.timer_isr_boundary_hot_path_peak_next_amass_level),
+            timer.timer_isr_boundary_hot_path_peak_completes_block ? 1 : 0);
     }
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));

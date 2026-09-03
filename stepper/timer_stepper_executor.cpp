@@ -6,8 +6,10 @@
 
 #include "rmt_step_pulse_driver.hpp"
 #include "step_timer_driver.hpp"
+#include "esp_cpu.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "sdkconfig.h"
 
 #include "laser_driver.hpp"
 #include "stepper_driver.hpp"
@@ -17,6 +19,8 @@ namespace ray2::stepper {
 namespace {
 
 constexpr char kLogTag[] = "timer_stepper";
+constexpr std::uint32_t kTimerIsrCyclesPerMicrosecond = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+static_assert(kTimerIsrCyclesPerMicrosecond > 0, "CPU frequency must be configured");
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
@@ -50,9 +54,25 @@ struct TimerLatenessCounters {
     std::uint32_t body_over_10us = 0;
     std::uint32_t body_counter_wrapped = 0;
 };
+struct TimerHotPathCounters {
+    std::uint32_t samples = 0;
+    std::uint32_t pulse_front_max_cycles = 0;
+    std::uint32_t normal_samples = 0;
+    std::uint32_t normal_max_cycles = 0;
+    std::uint32_t normal_over_10us = 0;
+    std::uint32_t boundary_samples = 0;
+    std::uint32_t boundary_max_cycles = 0;
+    std::uint32_t boundary_over_10us = 0;
+    std::uint32_t boundary_peak_previous_interval_ticks = 0;
+    std::uint32_t boundary_peak_next_interval_ticks = 0;
+    std::uint8_t boundary_peak_previous_amass_level = 0;
+    std::uint8_t boundary_peak_next_amass_level = 0;
+    bool boundary_peak_completes_block = false;
+};
 // Updated while s_motion_lock is held. Plain counters avoid adding atomic-RMW
 // traffic to the timing path being measured.
 TimerLatenessCounters s_timer_lateness = {};
+TimerHotPathCounters s_timer_hot_path = {};
 std::atomic<std::uint32_t> s_boundary_max_delta_ticks = 0;
 std::atomic<std::uint32_t> s_boundary_samples = 0;
 std::atomic<std::uint32_t> s_amass_level_changes = 0;
@@ -249,6 +269,46 @@ void IRAM_ATTR record_timer_isr_body(const std::uint64_t start_counter_ticks,
         s_timer_lateness.body_boundary_max_ticks, ticks);
 }
 
+void IRAM_ATTR record_timer_hot_path(const std::uint32_t start_cycles,
+                                     const std::uint32_t pulse_front_cycles,
+                                     const std::uint32_t work_end_cycles,
+                                     const bool at_segment_boundary,
+                                     const std::uint32_t boundary_previous_interval_ticks,
+                                     const std::uint32_t boundary_next_interval_ticks,
+                                     const std::uint8_t boundary_previous_amass_level,
+                                     const std::uint8_t boundary_next_amass_level,
+                                     const bool boundary_completes_block) {
+    // CPU CCOUNT is monotonic across Timer Group auto-reloads. Unsigned
+    // subtraction is valid for one ISR even when the 32-bit counter wraps.
+    const std::uint32_t pulse_front_elapsed = pulse_front_cycles - start_cycles;
+    const std::uint32_t work_elapsed = work_end_cycles - start_cycles;
+    ++s_timer_hot_path.samples;
+    s_timer_hot_path.pulse_front_max_cycles = std::max(
+        s_timer_hot_path.pulse_front_max_cycles, pulse_front_elapsed);
+    if (!at_segment_boundary) {
+        ++s_timer_hot_path.normal_samples;
+        s_timer_hot_path.normal_max_cycles = std::max(
+            s_timer_hot_path.normal_max_cycles, work_elapsed);
+        if (work_elapsed > 10U * kTimerIsrCyclesPerMicrosecond) {
+            ++s_timer_hot_path.normal_over_10us;
+        }
+        return;
+    }
+    ++s_timer_hot_path.boundary_samples;
+    if (work_elapsed > s_timer_hot_path.boundary_max_cycles) {
+        s_timer_hot_path.boundary_max_cycles = work_elapsed;
+        s_timer_hot_path.boundary_peak_previous_interval_ticks =
+            boundary_previous_interval_ticks;
+        s_timer_hot_path.boundary_peak_next_interval_ticks = boundary_next_interval_ticks;
+        s_timer_hot_path.boundary_peak_previous_amass_level = boundary_previous_amass_level;
+        s_timer_hot_path.boundary_peak_next_amass_level = boundary_next_amass_level;
+        s_timer_hot_path.boundary_peak_completes_block = boundary_completes_block;
+    }
+    if (work_elapsed > 10U * kTimerIsrCyclesPerMicrosecond) {
+        ++s_timer_hot_path.boundary_over_10us;
+    }
+}
+
 std::uint32_t segment_timer_ticks(const StepSegment& segment) {
     if (segment.step_interval_ticks != 0) return segment.step_interval_ticks;
     if (segment.step_interval_us == 0) return 0;
@@ -386,6 +446,7 @@ void IRAM_ATTR apply_segment_direction_from_isr(const StepSegment& segment) {
 
 bool IRAM_ATTR timer_alarm_callback(void*) {
     BaseType_t task_woken = pdFALSE;
+    const std::uint32_t hot_path_start_cycles = esp_cpu_get_cycle_count();
     const std::uint64_t lateness_ticks = driver::step_timer_driver_lateness_ticks_from_isr();
     portENTER_CRITICAL_ISR(&s_motion_lock);
     if (!s_busy.load()) {
@@ -399,15 +460,24 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     // The time to this callback was affected by the work emitted by the prior
     // callback, not by the mask that will be emitted below.
     const std::uint8_t preceding_step_mask = s_last_emitted_step_mask;
+    std::uint32_t boundary_previous_interval_ticks = 0;
+    std::uint32_t boundary_next_interval_ticks = 0;
+    std::uint8_t boundary_previous_amass_level = 0;
+    std::uint8_t boundary_next_amass_level = 0;
+    bool boundary_completes_block = false;
     // Emit the DDA decision prepared by the preceding timer tick before any
     // segment bookkeeping for this tick can delay the RMT trigger.
     emit_prepared_step_mask(s_motion);
+    const std::uint32_t pulse_front_cycles = esp_cpu_get_cycle_count();
     s_last_emitted_step_mask = prepared_step_mask;
     s_pulse_callbacks.fetch_add(1, std::memory_order_relaxed);
     ++s_motion.completed_ticks;
     const bool finished = s_motion.completed_ticks == s_motion.execution_ticks;
     if (finished) {
         const MotionState completed_motion = s_motion;
+        boundary_previous_interval_ticks = completed_motion.effective_step_interval_ticks;
+        boundary_previous_amass_level = completed_motion.amass_level;
+        boundary_completes_block = completed_motion.completes_block;
         const SegmentCompletion completion = {
             .execution_id = completed_motion.execution_id,
             .status = SegmentCompletionStatus::Completed,
@@ -439,6 +509,8 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
         } else if (stepper_segment_consume(next)) {
             apply_segment_direction_from_isr(next);
             MotionState next_motion = motion_from_segment(next);
+            boundary_next_interval_ticks = next_motion.effective_step_interval_ticks;
+            boundary_next_amass_level = next_motion.amass_level;
             s_segment_handoffs.fetch_add(1, std::memory_order_relaxed);
             record_interval_sample(next_motion.effective_step_interval_ticks);
             record_interval_delta(completed_motion, next_motion, true);
@@ -484,6 +556,11 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
     } else {
         prepare_next_step_mask(s_motion);
     }
+    const std::uint32_t hot_path_end_cycles = esp_cpu_get_cycle_count();
+    record_timer_hot_path(hot_path_start_cycles, pulse_front_cycles, hot_path_end_cycles, finished,
+                          boundary_previous_interval_ticks, boundary_next_interval_ticks,
+                          boundary_previous_amass_level, boundary_next_amass_level,
+                          boundary_completes_block);
     const std::uint64_t isr_end_counter_ticks =
         driver::step_timer_driver_lateness_ticks_from_isr();
     record_timer_lateness(lateness_ticks, finished, preceding_step_mask);
@@ -677,6 +754,25 @@ TimerStepperDiagnostics timer_stepper_executor_diagnostics() {
     diagnostics.timer_isr_body_boundary_max_ticks = s_timer_lateness.body_boundary_max_ticks;
     diagnostics.timer_isr_body_over_10us = s_timer_lateness.body_over_10us;
     diagnostics.timer_isr_body_counter_wrapped = s_timer_lateness.body_counter_wrapped;
+    diagnostics.timer_isr_cycles_per_microsecond = kTimerIsrCyclesPerMicrosecond;
+    diagnostics.timer_isr_hot_path_samples = s_timer_hot_path.samples;
+    diagnostics.timer_isr_pulse_front_max_cycles = s_timer_hot_path.pulse_front_max_cycles;
+    diagnostics.timer_isr_normal_samples = s_timer_hot_path.normal_samples;
+    diagnostics.timer_isr_normal_max_cycles = s_timer_hot_path.normal_max_cycles;
+    diagnostics.timer_isr_normal_over_10us = s_timer_hot_path.normal_over_10us;
+    diagnostics.timer_isr_boundary_hot_path_samples = s_timer_hot_path.boundary_samples;
+    diagnostics.timer_isr_boundary_hot_path_max_cycles = s_timer_hot_path.boundary_max_cycles;
+    diagnostics.timer_isr_boundary_hot_path_over_10us = s_timer_hot_path.boundary_over_10us;
+    diagnostics.timer_isr_boundary_hot_path_peak_previous_interval_ticks =
+        s_timer_hot_path.boundary_peak_previous_interval_ticks;
+    diagnostics.timer_isr_boundary_hot_path_peak_next_interval_ticks =
+        s_timer_hot_path.boundary_peak_next_interval_ticks;
+    diagnostics.timer_isr_boundary_hot_path_peak_previous_amass_level =
+        s_timer_hot_path.boundary_peak_previous_amass_level;
+    diagnostics.timer_isr_boundary_hot_path_peak_next_amass_level =
+        s_timer_hot_path.boundary_peak_next_amass_level;
+    diagnostics.timer_isr_boundary_hot_path_peak_completes_block =
+        s_timer_hot_path.boundary_peak_completes_block;
     portEXIT_CRITICAL(&s_motion_lock);
     diagnostics.boundary_max_delta_ticks = s_boundary_max_delta_ticks.load();
     diagnostics.boundary_samples = s_boundary_samples.load();
