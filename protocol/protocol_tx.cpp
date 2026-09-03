@@ -61,7 +61,6 @@ bool take_realtime_status(RealtimeStatusMessage& message) {
 }
 
 void protocol_tx_task(void*) {
-    ESP_LOGI("protocol_tx", "RUNTIME-CORE task=protocol_tx core=%d", xPortGetCoreID());
     TxMessage* normal_message = nullptr;
     RealtimeStatusMessage realtime_status = {};
 

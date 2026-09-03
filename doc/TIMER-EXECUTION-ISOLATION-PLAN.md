@@ -332,7 +332,13 @@ planner completion mismatch
 边界诊断计数清理。步骤四不实施，因为当前 pulse front 已降至约 8--10 us，
 没有继续修改 RMT 触发结构的证据；阶段四至此结束。
 
-当前进入阶段五，先验证 segment ring 的供给与消费，不改变 planner、profile、
-segment 生产数学、Timer/RMT 触发顺序或 AMASS 判定。阶段五的每个子步骤完成并
-通过对应验收后，先提交该子步骤，再开始下一子步骤，避免多个层次同时变化导致
-无法判断异常来源。
+阶段五已完成并提交：segment ring 最低水位为 7--8，underflow=0；producer
+请求与服务一致，空服务全部属于 profile 已生成完成；边界 interval 与 AMASS
+关系可由原始 interval 阈值解释，未发现供给链路异常。
+
+阶段六已完成只读分析并提交前置结论：严重速度塌陷集中于真实的大转角/近折返，
+没有平滑小转角的异常限速证据，因此不修改 planner 或 profile 数学。
+
+阶段七正在进行日志收口。已删除 protocol、realtime、protocol TX、planner 和
+SD 任务的启动核日志；保留 SD 作业生命周期、故障日志，以及 `$POS/STATUS` 中
+用于位置、供给、Timer 时序和 AMASS 归因的汇总字段。完成整机回归后再提交最终基线。

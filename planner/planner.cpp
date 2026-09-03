@@ -905,7 +905,6 @@ void consume_segment_completions() {
 
 void planner_task(void*) {
     s_planner_task_core.store(xPortGetCoreID(), std::memory_order_release);
-    ESP_LOGI(kLogTag, "RUNTIME-CORE task=planner core=%d", xPortGetCoreID());
     MotionBlock block = {};
 
     while (true) {

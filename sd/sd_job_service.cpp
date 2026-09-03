@@ -92,7 +92,6 @@ void finish_job(JobState state,
 }
 
 void sd_job_task(void*) {
-    ESP_LOGI(kLogTag, "RUNTIME-CORE task=sd_job core=%d", xPortGetCoreID());
     char path[kJobPathCapacity] = {};
     portENTER_CRITICAL(&s_job_lock);
     std::memcpy(path, s_job_path, sizeof(path));

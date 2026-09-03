@@ -103,7 +103,6 @@ bool protocol_process_byte(LineAssembler& assembler, const std::uint8_t byte) {
 }
 
 void protocol_task(void*) {
-    ESP_LOGI("protocol", "RUNTIME-CORE task=protocol core=%d", xPortGetCoreID());
     ray2::driver::Uart0RxChunk chunk = {};
     QueueHandle_t rx_queue = ray2::driver::uart0_rx_queue();
     LineAssembler assembler;
@@ -130,7 +129,6 @@ void protocol_task(void*) {
 }
 
 void realtime_task(void*) {
-    ESP_LOGI("protocol", "RUNTIME-CORE task=realtime core=%d", xPortGetCoreID());
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
