@@ -1,5 +1,8 @@
 # RMT 脉冲重触发验证方案
 
+> 状态：历史诊断记录。相关计数和 `$POS/STATUS` 工程快照已在诊断清理阶段移除；
+> 本文仅保留为问题排查历史，不是当前实施方案。
+
 ## 目标
 
 验证雕刻时的尖啸、呼呼声或卡顿是否由每个步进脉冲都执行一次 RMT
@@ -32,9 +35,8 @@ rmt_ll_tx_start(&RMT, axis_index);
 
 ## 第一阶段：计数对账
 
-当前实现状态：已加入 RMT 的 `trigger/reset/start/invalid` 计数，并通过
-`$POS/STATUS` 输出；Timer 执行器原有的 `rmt_triggers` 作为 DDA/执行器侧对照计数。
-下一步只需烧录后执行测试文件并收集状态输出，不需要逐脉冲串口日志。
+历史实现曾加入 RMT 的 `trigger/reset/start/invalid` 计数，并通过
+`$POS/STATUS` 输出；这些诊断计数已被清理。本文不再规定当前固件的测试步骤。
 
 ### 需要统计的计数
 

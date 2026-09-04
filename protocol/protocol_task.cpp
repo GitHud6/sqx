@@ -24,8 +24,7 @@ namespace {
 TaskHandle_t s_protocol_task = nullptr;
 TaskHandle_t s_realtime_task = nullptr;
 
-// `$POS/STATUS` deliberately aggregates protocol, planner and driver snapshots.
-// Its formatting path is deeper than ordinary G-code acknowledgement handling.
+// Keep the protocol task stack sized for normal command and status handling.
 constexpr std::uint32_t kProtocolTaskStackBytes = 7168;
 
 std::atomic<bool> s_status_report_pending = false;
@@ -114,7 +113,7 @@ void protocol_task(void*) {
 
         // A packet tagged before Ctrl-X is obsolete. New packets must remain
         // usable immediately after the reset, including the first `$H` or
-        // `$POS/STATUS` sent by a host.
+        // A status request sent by a host.
         if (chunk.generation != ray2::driver::uart0_normal_input_generation()) {
             assembler.reset_line();
             continue;
