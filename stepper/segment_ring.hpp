@@ -63,8 +63,6 @@ enum StepperTransportEvent : std::uint32_t {
 struct SegmentExecutionDiagnostics {
     std::size_t queued_segments = 0;
     std::size_t segment_capacity = kStepSegmentBufferLength;
-    std::size_t high_water_segments = 0;
-    std::uint64_t underflow_count = 0;
     bool active = false;
     std::uint64_t active_execution_id = 0;
     std::uint32_t active_step_interval_us = 0;
@@ -73,8 +71,6 @@ struct SegmentExecutionDiagnostics {
     std::uint32_t active_start_speed_tenths_mm_per_min = 0;
     std::uint32_t active_end_speed_tenths_mm_per_min = 0;
     std::size_t pending_completions = 0;
-    std::uint64_t block_boundary_stop_count = 0;
-    std::uint64_t block_boundary_restart_count = 0;
     bool block_boundary_restart_pending = false;
 };
 
@@ -84,7 +80,6 @@ bool IRAM_ATTR stepper_segment_consume(StepSegment& segment);
 void stepper_segment_discard_pending();
 std::size_t stepper_segment_count();
 std::size_t stepper_segment_free_slots();
-void IRAM_ATTR stepper_segment_record_underflow_from_isr();
 void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr();
 void stepper_segment_record_block_boundary_restart();
 void stepper_segment_clear_block_boundary_pending();

@@ -35,7 +35,6 @@ constexpr std::uint32_t kRmtClockDivider = 20;
 constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
 
 std::atomic<bool> s_initialized = false;
-std::atomic<bool> s_invalid_trigger_seen = false;
 
 void configure_axis(const std::size_t axis_index) {
     const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
@@ -116,18 +115,11 @@ void rmt_step_pulse_driver_trigger(const std::size_t axis_index) {
     // The executor validates initialization and axis ownership before the
     // timer starts. Keep the per-pulse path to the two hardware operations.
     if (axis_index >= machine::kAxisCount || !s_initialized.load(std::memory_order_relaxed)) {
-        s_invalid_trigger_seen.store(true, std::memory_order_relaxed);
         return;
     }
     // Reset and start are the fixed hardware sequence for every accepted STEP.
     rmt_ll_tx_reset_pointer(&RMT, axis_index);
     rmt_ll_tx_start(&RMT, axis_index);
-}
-
-RmtStepPulseDiagnostics rmt_step_pulse_driver_diagnostics() {
-    RmtStepPulseDiagnostics diagnostics = {};
-    diagnostics.invalid_trigger_seen = s_invalid_trigger_seen.load(std::memory_order_relaxed);
-    return diagnostics;
 }
 
 }  // namespace ray2::driver

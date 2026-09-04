@@ -9,10 +9,6 @@ namespace {
 std::array<StepSegment, kStepSegmentBufferLength> s_segment_buffer = {};
 std::atomic<std::uint32_t> s_segment_head = 0;
 std::atomic<std::uint32_t> s_segment_tail = 0;
-std::atomic<std::size_t> s_segment_high_water = 0;
-std::atomic<std::uint64_t> s_segment_underflow_count = 0;
-std::atomic<std::uint64_t> s_block_boundary_stop_count = 0;
-std::atomic<std::uint64_t> s_block_boundary_restart_count = 0;
 std::atomic<bool> s_block_boundary_restart_pending = false;
 std::atomic<std::uint64_t> s_active_execution_id = 0;
 std::atomic<std::uint32_t> s_active_step_interval_us = 0;
@@ -39,24 +35,11 @@ std::size_t completion_count_snapshot() {
     return std::min<std::size_t>(head - tail, kStepCompletionBufferLength);
 }
 
-void update_segment_high_water(const std::size_t count) {
-    std::size_t observed = s_segment_high_water.load(std::memory_order_relaxed);
-    while (count > observed &&
-           !s_segment_high_water.compare_exchange_weak(observed, count,
-                                                       std::memory_order_relaxed,
-                                                       std::memory_order_relaxed)) {
-    }
-}
-
 }  // namespace
 
 void stepper_segment_ring_reset() {
     s_segment_head.store(0, std::memory_order_relaxed);
     s_segment_tail.store(0, std::memory_order_relaxed);
-    s_segment_high_water.store(0, std::memory_order_relaxed);
-    s_segment_underflow_count.store(0, std::memory_order_relaxed);
-    s_block_boundary_stop_count.store(0, std::memory_order_relaxed);
-    s_block_boundary_restart_count.store(0, std::memory_order_relaxed);
     s_block_boundary_restart_pending.store(false, std::memory_order_relaxed);
     s_active_execution_id.store(0, std::memory_order_relaxed);
     s_active_step_interval_us.store(0, std::memory_order_relaxed);
@@ -75,7 +58,6 @@ bool stepper_segment_publish(const StepSegment& segment) {
     if (head - tail >= kStepSegmentBufferLength) return false;
     s_segment_buffer[head % kStepSegmentBufferLength] = segment;
     s_segment_head.store(head + 1, std::memory_order_release);
-    update_segment_high_water(head + 1 - tail);
     return true;
 }
 
@@ -97,17 +79,11 @@ std::size_t stepper_segment_count() { return segment_count_snapshot(); }
 std::size_t stepper_segment_free_slots() {
     return kStepSegmentBufferLength - segment_count_snapshot();
 }
-void IRAM_ATTR stepper_segment_record_underflow_from_isr() {
-    s_segment_underflow_count.fetch_add(1, std::memory_order_relaxed);
-}
 void IRAM_ATTR stepper_segment_record_block_boundary_stop_from_isr() {
-    s_block_boundary_stop_count.fetch_add(1, std::memory_order_relaxed);
     s_block_boundary_restart_pending.store(true, std::memory_order_release);
 }
 void stepper_segment_record_block_boundary_restart() {
-    if (s_block_boundary_restart_pending.exchange(false, std::memory_order_acq_rel)) {
-        s_block_boundary_restart_count.fetch_add(1, std::memory_order_relaxed);
-    }
+    s_block_boundary_restart_pending.exchange(false, std::memory_order_acq_rel);
 }
 void stepper_segment_clear_block_boundary_pending() {
     s_block_boundary_restart_pending.store(false, std::memory_order_release);
@@ -175,10 +151,6 @@ bool stepper_completion_consume(SegmentCompletion& completion) {
 SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     SegmentExecutionDiagnostics diagnostics = {};
     diagnostics.queued_segments = segment_count_snapshot();
-    diagnostics.high_water_segments = s_segment_high_water.load(std::memory_order_relaxed);
-    diagnostics.underflow_count = s_segment_underflow_count.load(std::memory_order_relaxed);
-    diagnostics.block_boundary_stop_count = s_block_boundary_stop_count.load(std::memory_order_relaxed);
-    diagnostics.block_boundary_restart_count = s_block_boundary_restart_count.load(std::memory_order_relaxed);
     diagnostics.block_boundary_restart_pending = s_block_boundary_restart_pending.load(std::memory_order_acquire);
     diagnostics.active_execution_id = s_active_execution_id.load(std::memory_order_acquire);
     diagnostics.active = diagnostics.active_execution_id != 0;
