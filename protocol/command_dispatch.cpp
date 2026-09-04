@@ -15,17 +15,10 @@
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
-#include "rmt_step_pulse_driver.hpp"
 #include "planner.hpp"
 #include "protocol_tx.hpp"
-#include "realtime_command.hpp"
-#include "stepper_driver.hpp"
 #include "segment_ring.hpp"
-#include "segment_producer.hpp"
-#include "stepper_prep.hpp"
-#include "timer_stepper_executor.hpp"
-#include "trapezoid_segment_generator.hpp"
-#include "uart0_driver.hpp"
+#include "stepper_driver.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -132,14 +125,6 @@ const char* spindle_mode_text(const command::SpindleMode mode) {
     return "M5";
 }
 
-const char* motion_profile_mode_text(const stepper::MotionProfileMode mode) {
-    switch (mode) {
-        case stepper::MotionProfileMode::Trapezoid: return "trapezoid";
-        case stepper::MotionProfileMode::SCurve: return "s-curve";
-    }
-    return "unknown";
-}
-
 bool report_build_info() {
     static constexpr char kBuildInfo[] =
         "[VER:1.1f.20260826:RayCube-IDF]\r\n"
@@ -184,26 +169,6 @@ bool report_coordinate_parameters() {
         state.work_offset_mm[0], state.work_offset_mm[1], state.work_offset_mm[2]);
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
-}
-
-bool is_profile_self_test_command(const char* line, const std::size_t length) {
-    return equals_ignore_case(line, length, "$PROFILE/SELFTEST");
-}
-
-bool report_profile_self_test() {
-    if (homing::homing_is_active() || sd::sd_job_is_active() || !planner::planner_is_idle()) {
-        return write_text("error:profile-selftest-busy\r\n");
-    }
-    char response[768] = {};
-    if (!stepper::trapezoid_segment_generator_format_self_test(response, sizeof(response))) {
-        return write_text("error:profile-selftest-format\r\n");
-    }
-    const std::size_t length = std::strlen(response);
-    if (!write_all(reinterpret_cast<const std::uint8_t*>(response), length)) return false;
-    return write_text(std::strstr(response, "result=ok") != nullptr &&
-                          std::strstr(response, "grbl_ref=(result=ok") != nullptr
-                          ? "ok\r\n"
-                          : "error:profile-selftest-failed\r\n");
 }
 
 bool report_grbl_settings() {
@@ -389,16 +354,29 @@ bool start_homing_seek_test(const homing::TestAxis axis) {
     return write_text("error:homing-unavailable\r\n");
 }
 
-const char* planner_block_state_text(planner::PlannerBlockState state) {
-    switch (state) {
-        case planner::PlannerBlockState::Executing: return "executing";
-        case planner::PlannerBlockState::Frozen: return "frozen";
-        case planner::PlannerBlockState::Lookahead: return "lookahead";
-    }
-    return "unknown";
+bool report_position_status() {
+    const stepper::MachinePosition position = stepper::machine_position();
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    const double planned_x = s_parser_state.planned_machine_position_mm[0];
+    const double planned_y = s_parser_state.planned_machine_position_mm[1];
+    xSemaphoreGive(s_parser_mutex);
+
+    char response[256] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)]\r\nok\r\n",
+        position_state_text(position.state),
+        position_invalidation_reason_text(position.invalidation_reason),
+        static_cast<long long>(position.steps[0]),
+        static_cast<long long>(position.steps[1]),
+        position.millimeters[0], position.millimeters[1], planned_x, planned_y,
+        planned_x - position.millimeters[0], planned_y - position.millimeters[1]);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
-bool report_position_status() {
+#if 0
+bool report_position_status_diagnostics_disabled() {
     const stepper::MachinePosition position = stepper::machine_position();
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const double planned_x = s_parser_state.planned_machine_position_mm[0];
@@ -672,6 +650,7 @@ bool report_position_status() {
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
+#endif
 
 bool set_known_position(const PositionCommand& command) {
     if (!planner::planner_is_idle() || sd::sd_job_is_active()) {
@@ -758,9 +737,6 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
     }
     if (equals_ignore_case(line, length, "$$")) {
         return report_grbl_settings();
-    }
-    if (is_profile_self_test_command(line, length)) {
-        return report_profile_self_test();
     }
     if (equals_ignore_case(line, length, "$X")) {
         // ray2-old returns ok outside Alarm as a no-op. RayCube currently has
