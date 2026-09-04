@@ -2,7 +2,6 @@
 
 #include <array>
 #include <algorithm>
-#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -31,11 +30,6 @@ constexpr double kTwoPi = 6.28318530717958647692;
 // mutex serializes those calls, so keep the fixed arc workspace here instead
 // of consuming roughly 2 KiB from the SD task's 4 KiB stack.
 std::array<motion::MotionRequest, kArcMaximumSegments> s_arc_requests = {};
-std::atomic<std::uint64_t> s_arc_accepted_count = 0;
-std::atomic<double> s_arc_last_radius_mm = 0.0;
-std::atomic<double> s_arc_last_sweep_degrees = 0.0;
-std::atomic<double> s_arc_last_chord_length_mm = 0.0;
-std::atomic<std::size_t> s_arc_last_segment_count = 0;
 
 int axis_index(char letter) {
     return letter == 'X' ? 0 : letter == 'Y' ? 1 : letter == 'Z' ? 2 : -1;
@@ -393,15 +387,6 @@ Error build_arc_requests(const motion::MotionRequest& request,
     return Error::Ok;
 }
 
-void record_accepted_arc(const ArcGeometry& geometry, const std::size_t count) {
-    s_arc_accepted_count.fetch_add(1, std::memory_order_relaxed);
-    s_arc_last_radius_mm.store(geometry.radius_mm, std::memory_order_relaxed);
-    s_arc_last_sweep_degrees.store(
-        geometry.sweep_radians * 180.0 / 3.14159265358979323846, std::memory_order_relaxed);
-    s_arc_last_chord_length_mm.store(geometry.chord_length_mm, std::memory_order_relaxed);
-    s_arc_last_segment_count.store(count, std::memory_order_relaxed);
-}
-
 Error build_ij_arc_requests(const ParsedBlock& parsed,
                             const motion::MotionRequest& request,
                             const double unit_scale,
@@ -643,7 +628,6 @@ Error execute_line_internal(const char* line,
         if (arc_error != Error::Ok) return arc_error;
         switch (motion::motion_submit_batch(s_arc_requests.data(), arc_request_count)) {
             case motion::MotionSubmitResult::Accepted:
-                record_accepted_arc(arc_geometry, arc_request_count);
                 commit_parser_state(state, next_state, request, true);
                 return Error::Ok;
             case motion::MotionSubmitResult::Busy: return Error::MotionBusy;
@@ -755,18 +739,6 @@ Error sync_parser_position_from_machine(ParserState& state) {
     state.planned_machine_position_mm[1] = position.millimeters[1];
     state.planned_machine_position_mm[2] = 0.0;
     return Error::Ok;
-}
-
-ArcDiagnostics arc_diagnostics() {
-    return {
-        .accepted_count = s_arc_accepted_count.load(std::memory_order_relaxed),
-        .chord_error_mm = kArcMaximumChordErrorMm,
-        .maximum_chord_length_mm = kArcMaximumChordLengthMm,
-        .last_radius_mm = s_arc_last_radius_mm.load(std::memory_order_relaxed),
-        .last_sweep_degrees = s_arc_last_sweep_degrees.load(std::memory_order_relaxed),
-        .last_chord_length_mm = s_arc_last_chord_length_mm.load(std::memory_order_relaxed),
-        .last_segment_count = s_arc_last_segment_count.load(std::memory_order_relaxed),
-    };
 }
 
 const char* error_text(Error error) {

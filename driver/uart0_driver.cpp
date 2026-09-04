@@ -18,10 +18,6 @@ TaskHandle_t s_rx_task = nullptr;
 SemaphoreHandle_t s_tx_mutex = nullptr;
 std::atomic<Uart0IngressHandler> s_ingress_handler = nullptr;
 std::atomic<void*> s_ingress_user_data = nullptr;
-std::atomic<std::uint64_t> s_received_bytes = 0;
-std::atomic<std::uint64_t> s_realtime_bytes = 0;
-std::atomic<std::uint64_t> s_normal_bytes = 0;
-std::atomic<std::size_t> s_queue_high_water_chunks = 0;
 std::atomic<bool> s_discard_normal_input_requested = false;
 std::atomic<std::uint32_t> s_normal_input_generation = 0;
 
@@ -61,7 +57,6 @@ void uart0_rx_task(void*) {
             continue;
         }
 
-        s_received_bytes.fetch_add(static_cast<std::uint64_t>(bytes_read), std::memory_order_relaxed);
         normal_chunk.length = 0;
         const Uart0IngressHandler handler = s_ingress_handler.load(std::memory_order_acquire);
         void* const user_data = s_ingress_user_data.load(std::memory_order_acquire);
@@ -69,7 +64,6 @@ void uart0_rx_task(void*) {
         for (int index = 0; index < bytes_read; ++index) {
             const std::uint8_t byte = read_chunk.data[index];
             if (handler != nullptr && handler(byte, user_data)) {
-                s_realtime_bytes.fetch_add(1, std::memory_order_relaxed);
                 continue;
             }
             normal_chunk.data[normal_chunk.length++] = byte;
@@ -88,16 +82,8 @@ void uart0_rx_task(void*) {
             continue;
         }
 
-        s_normal_bytes.fetch_add(normal_chunk.length, std::memory_order_relaxed);
         normal_chunk.generation = s_normal_input_generation.load(std::memory_order_acquire);
         xQueueSend(s_rx_queue, &normal_chunk, portMAX_DELAY);
-
-        const std::size_t queued_chunks = static_cast<std::size_t>(uxQueueMessagesWaiting(s_rx_queue));
-        std::size_t observed_high_water = s_queue_high_water_chunks.load(std::memory_order_relaxed);
-        while (queued_chunks > observed_high_water &&
-               !s_queue_high_water_chunks.compare_exchange_weak(
-                   observed_high_water, queued_chunks, std::memory_order_relaxed)) {
-        }
     }
 }
 
@@ -152,15 +138,6 @@ esp_err_t uart0_set_ingress_handler(const Uart0IngressHandler handler, void* con
     s_ingress_user_data.store(user_data, std::memory_order_release);
     s_ingress_handler.store(handler, std::memory_order_release);
     return ESP_OK;
-}
-
-Uart0RxDiagnostics uart0_rx_diagnostics() {
-    return {
-        .received_bytes = s_received_bytes.load(std::memory_order_relaxed),
-        .realtime_bytes = s_realtime_bytes.load(std::memory_order_relaxed),
-        .normal_bytes = s_normal_bytes.load(std::memory_order_relaxed),
-        .queue_high_water_chunks = s_queue_high_water_chunks.load(std::memory_order_relaxed),
-    };
 }
 
 void uart0_discard_pending_normal_input() {

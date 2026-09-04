@@ -8,15 +8,10 @@ enum class RealtimeCommand : std::uint8_t {
     StatusReport,
 };
 
-struct RealtimeCommandDiagnostics {
-    std::uint64_t status_report_count = 0;
-};
-
 // Returns true only for a recognized single-byte Grbl realtime command.
 bool realtime_command_from_byte(std::uint8_t byte, RealtimeCommand& command);
 
 // Records a received realtime command. Protocol owns reporting and future control behavior.
 void realtime_command_receive(RealtimeCommand command);
-RealtimeCommandDiagnostics realtime_command_diagnostics();
 
 }  // namespace ray2::protocol
