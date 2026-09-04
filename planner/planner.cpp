@@ -7,7 +7,6 @@
 #include <limits>
 
 #include "esp_log.h"
-#include "esp_cpu.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -25,7 +24,6 @@ namespace {
 
 TaskHandle_t s_planner_task = nullptr;
 SemaphoreHandle_t s_recalculate_mutex = nullptr;
-std::atomic<int> s_planner_task_core = -1;
 std::array<MotionBlock, kPlannerQueueLength> s_block_buffer = {};
 std::size_t s_block_head = 0;
 std::size_t s_block_tail = 0;
@@ -38,18 +36,7 @@ double s_tail_entry_speed_sqr = 0.0;
 portMUX_TYPE s_block_buffer_lock = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t s_capacity_waiter = nullptr;
 std::atomic<std::uint64_t> s_completed_block_count = 0;
-std::atomic<std::uint64_t> s_coalesced_short_block_count = 0;
 std::atomic<std::uint64_t> s_next_execution_id = 1;
-PlannerVelocityCollapseDiagnostics s_velocity_collapse = {};
-std::uint32_t s_recalculate_calls = 0;
-std::uint32_t s_recalculate_max_cycles = 0;
-std::uint32_t s_snapshot_lock_max_cycles = 0;
-std::uint32_t s_commit_lock_max_cycles = 0;
-std::uint32_t s_snapshot_lock_samples = 0;
-std::uint32_t s_commit_lock_samples = 0;
-std::uint64_t s_snapshot_lock_total_cycles = 0;
-std::uint64_t s_commit_lock_total_cycles = 0;
-std::uint32_t s_stale_snapshot_count = 0;
 std::atomic<bool> s_queue_drain_reported = false;
 portMUX_TYPE s_execution_event_lock = portMUX_INITIALIZER_UNLOCKED;
 ExecutionCallback s_execution_callback = nullptr;
@@ -62,19 +49,6 @@ constexpr double kCoalescingDirectionCosine = 0.999999;
 constexpr double kCoalescingMaximumDeviationMm = 0.0125;
 constexpr TickType_t kStepperIdleLockTime = pdMS_TO_TICKS(250);
 constexpr char kLogTag[] = "planner";
-
-void record_recalculate_duration(const std::uint32_t elapsed_cycles) {
-    ++s_recalculate_calls;
-    if (elapsed_cycles > s_recalculate_max_cycles) {
-        s_recalculate_max_cycles = elapsed_cycles;
-    }
-}
-
-void record_max_cycles(std::uint32_t& maximum, const std::uint32_t elapsed_cycles) {
-    if (elapsed_cycles > maximum) {
-        maximum = elapsed_cycles;
-    }
-}
 
 struct PlannerSnapshotBlock {
     MotionBlockType type = MotionBlockType::Motion;
@@ -210,7 +184,6 @@ bool coalesce_tail_block_locked(const MotionBlock& candidate) {
     tail.unit_vector[1] = merged_dy / merged_length;
     tail.acceleration_mm_per_sec2 = std::min(
         tail.acceleration_mm_per_sec2, candidate.acceleration_mm_per_sec2);
-    s_coalesced_short_block_count.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -266,60 +239,7 @@ double junction_speed_sqr(const PlannerSnapshotBlock& previous,
                         (1.0 - sin_theta_d2));
 }
 
-void record_velocity_collapse_locked(const MotionBlock& block, const MotionBlock* next) {
-    if (!is_plannable_motion(block) || next == nullptr || !is_plannable_motion(*next)) return;
-    const double entry = std::sqrt(std::max(0.0, block.entry_speed_sqr));
-    const double exit = std::sqrt(std::max(0.0, block.exit_speed_sqr));
-    if (exit <= 0.0 || entry <= exit) return;
-
-    ++s_velocity_collapse.samples;
-    const double dot = std::clamp(block.unit_vector[0] * next->unit_vector[0] +
-                                      block.unit_vector[1] * next->unit_vector[1],
-                                  -1.0, 1.0);
-    constexpr double kDegreesPerRadian = 57.29577951308232;
-    const double turn_degrees = std::acos(dot) * kDegreesPerRadian;
-    if (exit * 4.0 <= entry) {
-        ++s_velocity_collapse.severe_samples;
-        const std::size_t bin = turn_degrees < 5.0 ? 0U
-                              : turn_degrees < 45.0 ? 1U
-                              : turn_degrees < 135.0 ? 2U
-                              : turn_degrees < 175.0 ? 3U
-                                                    : 4U;
-        ++s_velocity_collapse.severe_turn_bins[bin];
-    }
-    const double previous_ratio = s_velocity_collapse.exit_speed_mm_per_min > 0.0
-                                      ? s_velocity_collapse.entry_speed_mm_per_min /
-                                            s_velocity_collapse.exit_speed_mm_per_min
-                                      : 0.0;
-    const double ratio = entry / exit;
-    if (s_velocity_collapse.execution_id != 0 && ratio <= previous_ratio) return;
-
-    s_velocity_collapse.execution_id = block.execution_id;
-    s_velocity_collapse.next_execution_id = next->execution_id;
-    s_velocity_collapse.length_mm = block.millimeters;
-    s_velocity_collapse.next_length_mm = next->millimeters;
-    s_velocity_collapse.entry_speed_mm_per_min = entry;
-    s_velocity_collapse.exit_speed_mm_per_min = exit;
-    s_velocity_collapse.nominal_speed_mm_per_min = block.programmed_rate_mm_per_min;
-    s_velocity_collapse.next_entry_speed_mm_per_min =
-        std::sqrt(std::max(0.0, next->entry_speed_sqr));
-    s_velocity_collapse.next_nominal_speed_mm_per_min = next->programmed_rate_mm_per_min;
-    s_velocity_collapse.next_max_entry_speed_mm_per_min =
-        std::sqrt(std::max(0.0, next->max_entry_speed_sqr));
-    s_velocity_collapse.next_max_junction_speed_mm_per_min =
-        std::sqrt(std::max(0.0, next->max_junction_speed_sqr));
-    s_velocity_collapse.turn_degrees = turn_degrees;
-}
-
 void planner_recalculate_snapshot(PlannerSnapshot& snapshot) {
-    const std::uint32_t recalculate_start_cycles = esp_cpu_get_cycle_count();
-    struct RecalculateTrace {
-        std::uint32_t start_cycles;
-        ~RecalculateTrace() {
-            record_recalculate_duration(esp_cpu_get_cycle_count() - start_cycles);
-        }
-    } recalculate_trace{recalculate_start_cycles};
-
     if (snapshot.count == 0) {
         return;
     }
@@ -485,15 +405,9 @@ void planner_recalculate() {
         return;
     }
     PlannerSnapshot& snapshot = s_recalculate_snapshot;
-    const std::uint32_t snapshot_lock_start_cycles = esp_cpu_get_cycle_count();
     portENTER_CRITICAL(&s_block_buffer_lock);
     const bool has_mutable_blocks = planner_snapshot_locked(snapshot);
     portEXIT_CRITICAL(&s_block_buffer_lock);
-    const std::uint32_t snapshot_lock_cycles =
-        esp_cpu_get_cycle_count() - snapshot_lock_start_cycles;
-    record_max_cycles(s_snapshot_lock_max_cycles, snapshot_lock_cycles);
-    ++s_snapshot_lock_samples;
-    s_snapshot_lock_total_cycles += snapshot_lock_cycles;
     if (!has_mutable_blocks) {
         xSemaphoreGive(s_recalculate_mutex);
         return;
@@ -501,17 +415,10 @@ void planner_recalculate() {
 
     planner_recalculate_snapshot(snapshot);
 
-    const std::uint32_t commit_lock_start_cycles = esp_cpu_get_cycle_count();
     portENTER_CRITICAL(&s_block_buffer_lock);
     const bool committed = planner_commit_snapshot_locked(snapshot);
     portEXIT_CRITICAL(&s_block_buffer_lock);
-    const std::uint32_t commit_lock_cycles =
-        esp_cpu_get_cycle_count() - commit_lock_start_cycles;
-    record_max_cycles(s_commit_lock_max_cycles, commit_lock_cycles);
-    ++s_commit_lock_samples;
-    s_commit_lock_total_cycles += commit_lock_cycles;
     if (!committed) {
-        ++s_stale_snapshot_count;
         // The next block submission, freeze, release, or completion will
         // trigger a fresh calculation against the newer queue generation.
         xSemaphoreGive(s_recalculate_mutex);
@@ -592,7 +499,7 @@ void report_queue_drained() {
     portEXIT_CRITICAL(&s_block_buffer_lock);
     if (is_empty && !stepper::timer_stepper_executor_is_busy() &&
         !stepper::segment_producer_has_pending_segments() &&
-        stepper::segment_producer_diagnostics().context_used == 0) {
+        !stepper::stepper_prep_has_active_context()) {
         stepper::stepper_segment_clear_block_boundary_pending();
     }
     if (is_empty && !s_queue_drain_reported.exchange(true)) {
@@ -689,11 +596,6 @@ bool freeze_next_motion_block(MotionBlock& block) {
         portEXIT_CRITICAL(&s_block_buffer_lock);
         return false;
     }
-
-    const MotionBlock* next = frozen_blocks + 1U < s_block_count
-                                  ? &s_block_buffer[block_index_after(index)]
-                                  : nullptr;
-    record_velocity_collapse_locked(candidate, next);
 
     // Freeze the solved boundary before handing a copy to the producer. A
     // later G-code submission can only recalculate the remaining look-ahead.
@@ -858,18 +760,11 @@ void consume_segment_completions() {
                 clear_active_block();
             }
             if (!stepper::segment_producer_complete_plan(completion.execution_id)) {
-                const auto prep = stepper::segment_producer_diagnostics();
-                const auto transport = stepper::segment_producer_transport_diagnostics();
+                const auto transport = stepper::stepper_segment_diagnostics();
                 ESP_LOGE(kLogTag,
                          "EXECUTION-FAULT reason=complete-plan-failed id=%llu "
-                         "prep=(active=%d,generation_complete=%d,ctx=%u/%u,major=%ld/%ld) "
                          "segment=(queued=%u,active=%d,active_id=%llu)",
                          static_cast<unsigned long long>(completion.execution_id),
-                         prep.active ? 1 : 0, prep.generation_complete ? 1 : 0,
-                         static_cast<unsigned>(prep.context_used),
-                         static_cast<unsigned>(prep.context_capacity),
-                         static_cast<long>(prep.executed_major_steps),
-                         static_cast<long>(prep.total_major_steps),
                          static_cast<unsigned>(transport.queued_segments),
                          transport.active ? 1 : 0,
                          static_cast<unsigned long long>(transport.active_execution_id));
@@ -889,7 +784,7 @@ void consume_segment_completions() {
             ESP_LOGE(kLogTag,
                      "EXECUTION-FAULT reason=segment-fault id=%llu queued=%u active=%d",
                      static_cast<unsigned long long>(completion.execution_id),
-                     static_cast<unsigned>(stepper::segment_producer_transport_diagnostics().queued_segments),
+                     static_cast<unsigned>(stepper::stepper_segment_diagnostics().queued_segments),
                      stepper::timer_stepper_executor_is_busy() ? 1 : 0);
             stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
             emit_execution_event(ExecutionEventType::BlockFailed, &block);
@@ -904,7 +799,6 @@ void consume_segment_completions() {
 }
 
 void planner_task(void*) {
-    s_planner_task_core.store(xPortGetCoreID(), std::memory_order_release);
     MotionBlock block = {};
 
     while (true) {
@@ -965,8 +859,8 @@ void planner_task(void*) {
             continue;
         }
         if (!start_segment_ring()) {
-            const auto prep = stepper::segment_producer_diagnostics();
-            if (prep.active && prep.execution_id == block.execution_id) {
+            if (stepper::segment_producer_profile().active &&
+                stepper::segment_producer_profile().execution_plan.execution_id == block.execution_id) {
                 // A resumed partial block owns its geometry in prep. An empty
                 // ring is a producer scheduling gap, never an execution
                 // failure or permission to discard the planner head.
@@ -976,11 +870,9 @@ void planner_task(void*) {
             {
                 ESP_LOGE(kLogTag,
                          "EXECUTION-FAULT reason=start-segment-ring-failed id=%llu "
-                         "queued=%u prep_active=%d prep_id=%llu",
+                         "queued=%u",
                          static_cast<unsigned long long>(block.execution_id),
-                         static_cast<unsigned>(stepper::segment_producer_transport_diagnostics().queued_segments),
-                         prep.active ? 1 : 0,
-                         static_cast<unsigned long long>(prep.execution_id));
+                         static_cast<unsigned>(stepper::stepper_segment_diagnostics().queued_segments));
                 stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::ExecutionFailure);
                 emit_execution_event(ExecutionEventType::BlockFailed, &block);
             }
@@ -1063,17 +955,6 @@ void planner_reset() {
     ++s_block_generation;
     s_recalculation_required = false;
     s_tail_entry_speed_sqr = 0.0;
-    s_velocity_collapse = {};
-    s_recalculate_calls = 0;
-    s_recalculate_max_cycles = 0;
-    s_snapshot_lock_max_cycles = 0;
-    s_commit_lock_max_cycles = 0;
-    s_snapshot_lock_samples = 0;
-    s_commit_lock_samples = 0;
-    s_snapshot_lock_total_cycles = 0;
-    s_commit_lock_total_cycles = 0;
-    s_stale_snapshot_count = 0;
-    s_coalesced_short_block_count.store(0, std::memory_order_relaxed);
     capacity_waiter = s_capacity_waiter;
     portEXIT_CRITICAL(&s_block_buffer_lock);
     if (capacity_waiter != nullptr) {
@@ -1138,45 +1019,6 @@ SubmitResult planner_submit_dwell(const std::uint32_t milliseconds) {
     block.type = MotionBlockType::Dwell;
     block.dwell_milliseconds = milliseconds;
     return submit_block(block);
-}
-
-PlannerDiagnostics planner_diagnostics() {
-    PlannerDiagnostics diagnostics = {};
-    const bool executor_busy = stepper::timer_stepper_executor_is_busy();
-
-    portENTER_CRITICAL(&s_block_buffer_lock);
-    diagnostics.planner_task_core = s_planner_task_core.load(std::memory_order_acquire);
-    diagnostics.recalculate_calls = s_recalculate_calls;
-    diagnostics.recalculate_max_cycles = s_recalculate_max_cycles;
-    diagnostics.snapshot_lock_max_cycles = s_snapshot_lock_max_cycles;
-    diagnostics.commit_lock_max_cycles = s_commit_lock_max_cycles;
-    diagnostics.snapshot_lock_samples = s_snapshot_lock_samples;
-    diagnostics.commit_lock_samples = s_commit_lock_samples;
-    diagnostics.snapshot_lock_total_cycles = s_snapshot_lock_total_cycles;
-    diagnostics.commit_lock_total_cycles = s_commit_lock_total_cycles;
-    diagnostics.stale_snapshot_count = s_stale_snapshot_count;
-    diagnostics.queued_blocks = s_block_count;
-    diagnostics.frozen_blocks = frozen_block_count_locked();
-    diagnostics.coalesced_short_blocks =
-        s_coalesced_short_block_count.load(std::memory_order_relaxed);
-    diagnostics.velocity_collapse = s_velocity_collapse;
-    for (std::size_t offset = 0; offset < diagnostics.blocks.size() && offset < s_block_count; ++offset) {
-        const std::size_t index = (s_block_tail + offset) % kPlannerQueueLength;
-        const MotionBlock& block = s_block_buffer[index];
-        PlannerBlockDiagnostics& snapshot = diagnostics.blocks[offset];
-        snapshot.present = true;
-        snapshot.execution_id = block.execution_id;
-        snapshot.entry_speed_mm_per_min = std::sqrt(std::max(0.0, block.entry_speed_sqr));
-        snapshot.exit_speed_mm_per_min = std::sqrt(std::max(0.0, block.exit_speed_sqr));
-        snapshot.max_junction_speed_mm_per_min =
-            std::sqrt(std::max(0.0, block.max_junction_speed_sqr));
-        snapshot.programmed_rate_mm_per_min = block.programmed_rate_mm_per_min;
-        snapshot.state = offset == 0 && executor_busy
-                             ? PlannerBlockState::Executing
-                             : block.state;
-    }
-    portEXIT_CRITICAL(&s_block_buffer_lock);
-    return diagnostics;
 }
 
 }  // namespace ray2::planner

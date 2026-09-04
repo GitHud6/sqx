@@ -98,39 +98,15 @@ D:\RAY2-main\components\Grbl_Esp32_Source\Grbl_Esp32\src\Stepper.cpp
 
 ### 阶段一状态
 
-已完成并通过目标端验收：
+已完成并通过目标端验收。阶段一只验证了时间片生成和整数步数闭环，未改变实际雕刻路径；
+相关离线参考实现和 self-test 入口已在诊断清理阶段移除，不属于当前固件接口。
 
-```text
-stepper/grbl_trapezoid_prep.{hpp,cpp}
-  纯 st_prep_buffer 语义参考后端
+### 阶段二状态：普通梯形 prep 已稳定
 
-stepper/grbl_trapezoid_prep_test.cpp
-  长直线、连续短 block、单步短 block 的整数步数闭环自测
-
-$PROFILE/SELFTEST
-  现有 generator 自测之外，额外报告 grbl_ref=(result=ok,cases=1/1/1)
-```
-
-验收记录：固件编译、烧录后在机器空闲时执行 `$PROFILE/SELFTEST`，原有 case 与 `grbl_ref` 均为
-`result=ok`，命令返回 `ok`。阶段一未改变实际雕刻路径。
-
-### 阶段二状态：普通梯形 prep 适配已开始
-
-已建立运行时适配，首轮实机暴露了 AMASS 表示层不匹配，正在修正后复验：
-
-- 普通运动 block 在 `stepper_prep_start_block()` 中初始化 `GrblTrapezoidPrep`；
-- `stepper_prep_fill()` 优先消费参考 prep 的时间积分结果，再转换为现有 `StepSegment`；
-- `StepSegment`、segment ring、Timer/RMT executor 的接口未改变；
-- feed hold、resume 等特殊路径暂时保留旧执行逻辑，避免把两个问题混在一次切换中；
-- 参考 prep 量化出的零步时间片不会提交到现有 executor，因为当前 executor 明确拒绝
-  `major_steps <= 0`；适配层会继续推进参考状态直到产生可执行步进片段。
-- `GrblTrapezoidPrep` 输出的 `timer_ticks` 已是 Grbl AMASS 缩放后的周期，而当前 executor 会自行
-  缩放周期与事件数。适配层必须先恢复未缩放周期并传递原始 level，保证 AMASS 恰好执行一次；首版
-  漏做这一点，已实测表现为速度异常、龙门剧烈抖动和 `headline` 中途卡死，因此不具备提交条件。
-
-阶段二首轮验收顺序：先编译并执行直线、对角线和短 block，确认无 `TIMER-REJECT`、无位置丢失，
-再运行 `headline` 和 `longer_studio11.gc.gz`，最后才判断声音是否接近 `ray2-main`。在此之前不应
-修改 Timer/RMT 参数或 planner 速度参数。
+普通运动路径已完成实机复验，当前由 `stepper_prep` 将梯形执行计划转换为现有
+`StepSegment`，并继续使用既有的 segment ring、Timer/RMT executor 以及 DDA/AMASS 语义。
+单轴、对角线和 `headline` 均能正常执行，长 SD 作业完成且无位置或供给故障。阶段二的
+目标是建立可用基线，不把机械共振问题伪装成算法修复。
 
 ### 当前结论
 
@@ -325,7 +301,8 @@ distance 单调增加且不越过 length_mm
 
 ### 阶段一：可验证的纯时间片生成器
 
-实施状态：进行中。已新增未接入运行路径的纯时间片生成器和 profile 按时间查询接口；待组件编译及主机侧不变量测试确认后，才允许替换现有 `stepper_prep`。
+实施状态：已结束。纯时间片生成器和离线参考测试已完成阶段性验证；后续运行路径以当前
+稳定的梯形 prep 为准。
 
 实施内容：
 
@@ -333,7 +310,6 @@ distance 单调增加且不越过 length_mm
 - 不接触 segment ring、Timer ISR、RMT、暂停或 homing。
 - 实现累计距离、累计理想步数、最少一 STEP 延展和末尾补齐。
 - 为直线、对角线、短 block、三角 profile 和含 accel/cruise/decel 的 block 写主机侧或组件级测试。
-- 提供仅在机器空闲时可调用的 `$PROFILE/SELFTEST`。该命令只执行纯生成器，不读写 planner、segment ring、Timer 或 RMT；它输出每个 case 的预期/实际步数、时间片数、最终/预期时间和最大余数，随后返回 `ok` 或错误。
 
 验收标准：
 
@@ -342,7 +318,6 @@ distance 单调增加且不越过 length_mm
 - 1 ms 时间片在稳定匀速区的 interval 恒定；
 - 加减速区的 interval 平滑单调变化，无由整数步等分产生的周期性往返；
 - 不更改现有固件运行路径。
-- 烧录后在空闲状态发送 `$PROFILE/SELFTEST`：三组 case 必须均显示 `ok=1`，汇总必须为 `result=ok` 且后续响应为 `ok`。
 - 每个 case 的 `pulse` 是按 `step_interval_ticks * major_steps / timer_ticks_per_us` 累计的实际定时器脉冲时间；`error` 必须为非负且不超过 `slice_count / timer_ticks_per_us + 0.001 us`，证明剩余误差仅来自每个时间片的 tick 向上取整。
 
 ### 阶段二：替换普通梯形 `stepper_prep` 生成

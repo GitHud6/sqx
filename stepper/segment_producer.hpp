@@ -34,7 +34,5 @@ bool segment_producer_complete_plan(std::uint64_t execution_id);
 void segment_producer_discard_pending();
 
 const StepperProfile& segment_producer_profile();
-StepperPrepDiagnostics segment_producer_diagnostics();
-SegmentExecutionDiagnostics segment_producer_transport_diagnostics();
 
 }  // namespace ray2::stepper

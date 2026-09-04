@@ -62,8 +62,7 @@ bool segment_producer_has_pending_segments() {
 }
 
 bool segment_producer_can_accept_plan() {
-    const StepperPrepDiagnostics diagnostics = stepper_prep_diagnostics();
-    return diagnostics.context_used < diagnostics.context_capacity;
+    return stepper_prep_can_accept_block();
 }
 
 bool segment_producer_consume_completion(SegmentCompletion& completion) {
@@ -84,14 +83,6 @@ void segment_producer_discard_pending() {
 
 const StepperProfile& segment_producer_profile() {
     return stepper_prep_profile();
-}
-
-StepperPrepDiagnostics segment_producer_diagnostics() {
-    return stepper_prep_diagnostics();
-}
-
-SegmentExecutionDiagnostics segment_producer_transport_diagnostics() {
-    return stepper_segment_diagnostics();
 }
 
 }  // namespace ray2::stepper

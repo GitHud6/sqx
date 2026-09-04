@@ -29,24 +29,6 @@ struct StepperProfile {
     bool completes_source_block = true;
 };
 
-// Segment entries are disposable cache. This persistent context is retained
-// until the executor confirms that the entire source block was emitted.
-struct StepperPrepDiagnostics {
-    bool active = false;
-    bool generation_complete = false;
-    std::uint64_t execution_id = 0;
-    std::int32_t total_major_steps = 0;
-    std::int32_t executed_major_steps = 0;
-    std::array<std::int32_t, 2> executed_axis_steps = {};
-    std::uint32_t current_speed_tenths_mm_per_min = 0;
-    MotionProfileMode profile_mode = MotionProfileMode::Trapezoid;
-    std::size_t context_used = 0;
-    std::size_t context_capacity = kTrapezoidPrepContextCapacity;
-    std::uint64_t generation_context_execution_id = 0;
-    std::uint64_t execution_context_execution_id = 0;
-    std::uint64_t completion_context_execution_id = 0;
-};
-
 void stepper_prep_reset();
 // Drops all prepared contexts, segments, and completion notifications after
 // an execution fault. The timer consumer must already be stopped.
@@ -62,6 +44,7 @@ bool stepper_prep_record_segment_completed(const SegmentCompletion& completion);
 std::uint8_t stepper_select_amass_level(std::uint32_t step_interval_ticks,
                                         const std::array<std::int32_t, 2>& axis_steps);
 const StepperProfile& stepper_prep_profile();
-StepperPrepDiagnostics stepper_prep_diagnostics();
+bool stepper_prep_can_accept_block();
+bool stepper_prep_has_active_context();
 
 }  // namespace ray2::stepper

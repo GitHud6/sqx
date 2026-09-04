@@ -388,31 +388,11 @@ const StepperProfile& stepper_prep_profile() {
     return active_profile();
 }
 
-StepperPrepDiagnostics stepper_prep_diagnostics() {
-    StepperPrepDiagnostics diagnostics = {};
-    diagnostics.execution_id = s_context_execution_id.load(std::memory_order_acquire);
-    diagnostics.active = diagnostics.execution_id != 0;
-    diagnostics.generation_complete =
-        s_context_generation_complete.load(std::memory_order_acquire);
-    diagnostics.total_major_steps = s_context_total_major_steps.load(std::memory_order_relaxed);
-    diagnostics.executed_major_steps = s_context_executed_major_steps.load(std::memory_order_relaxed);
-    for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        diagnostics.executed_axis_steps[axis] =
-            s_context_executed_axis_steps[axis].load(std::memory_order_relaxed);
-    }
-    diagnostics.current_speed_tenths_mm_per_min =
-        s_context_current_speed_tenths_mm_per_min.load(std::memory_order_relaxed);
-    diagnostics.profile_mode = active_profile().execution_plan.profile.mode;
-    diagnostics.context_used = s_context_count.load(std::memory_order_acquire);
-    if (diagnostics.context_used != 0) {
-        diagnostics.generation_context_execution_id =
-            active_profile().execution_plan.execution_id;
-        diagnostics.completion_context_execution_id = diagnostics.generation_complete
-                                                          ? diagnostics.generation_context_execution_id
-                                                          : 0;
-    }
-    diagnostics.execution_context_execution_id =
-        stepper_segment_diagnostics().active_execution_id;
-    return diagnostics;
+bool stepper_prep_can_accept_block() {
+    return s_context_count.load(std::memory_order_acquire) < kTrapezoidPrepContextCapacity;
+}
+
+bool stepper_prep_has_active_context() {
+    return s_context_count.load(std::memory_order_acquire) != 0;
 }
 }  // namespace ray2::stepper

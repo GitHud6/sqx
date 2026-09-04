@@ -18,8 +18,6 @@ PlannerBlock -> stepper_prep -> StepSegment ring -> Timer Group ISR -> RMT STEP
   `dt_remainder_us`；不存在独立的 segment 序号或 ring cursor 来重新解释 profile 进度。
 - Timer 时基为 20 MHz；AMASS 在低速时增加 DDA 时间分辨率。
 - 同一 block 的 segment 继承 Bresenham/DDA 相位，避免分段时重新开始轴步进分布。
-- `GrblTrapezoidPrep` 仅用于 `$PROFILE/SELFTEST` 的离线参考，不参与正常任务、segment 或
-  硬件执行状态。
 - 普通 G-code 在段结束时按已发出的步数批量提交位置；归零等系统运动逐脉冲提交，
   保证限位停止时位置可信。
 

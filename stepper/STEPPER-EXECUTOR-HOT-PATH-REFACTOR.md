@@ -88,7 +88,7 @@ segment / DDA state N
 
 ### 阶段一：建立脉冲优先的可观测基线
 
-实施状态：已完成并实机验收。`$PROFILE/SELFTEST`、单轴/对角线/圆弧及
+实施状态：已完成并实机验收。单轴/对角线/圆弧及
 `longer_studio11.gc.gz` 均保持执行正确性；长文件无 `underflow`、`SEGMENT-GAP`、
 watchdog、`position-unknown` 或 `TIMER-REJECT`。方向实际写入已降为仅方向变化时发生，
 但持续异响没有改善，因此本阶段只作为执行正确性基线提交，不作为声学修复。
@@ -104,7 +104,6 @@ watchdog、`position-unknown` 或 `TIMER-REJECT`。方向实际写入已降为�
 验收标准：
 
 - 单轴、对角线、圆弧测试到达目标坐标，方向正确；
-- `$PROFILE/SELFTEST` 保持通过；
 - `longer_studio11.gc.gz` 完整结束，`underflow=0`，无 `SEGMENT-GAP`、watchdog、`position-unknown` 或 `TIMER-REJECT`；
 - trigger 总数与每轴实际执行步数一致；
 - 日志证明未发生方向变化的 segment 不产生 DIR 写入；
