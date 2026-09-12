@@ -3,6 +3,8 @@
 #include "laser_driver.hpp"
 #include "laser_planner_adapter.hpp"
 #include "limit_switch_driver.hpp"
+#include "lis2dh12_driver.hpp"
+#include "accelerometer.hpp"
 #include "homing_service.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
@@ -21,6 +23,8 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ray2::driver::uart0_start());
     ESP_ERROR_CHECK(ray2::stepper::timer_stepper_executor_init());
     ESP_ERROR_CHECK(ray2::driver::limit_switch_driver_init());
+    ESP_ERROR_CHECK(ray2::driver::lis2dh12_init());
+    ESP_ERROR_CHECK(ray2::accelerometer::init());
     ESP_ERROR_CHECK(ray2::homing::homing_init());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());

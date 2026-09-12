@@ -5,6 +5,8 @@ idf_component_register(SRCS "app_main.cpp"
                             "../driver/step_timer_driver.cpp"
                             "../driver/uart0_driver.cpp"
                             "../driver/sdcard_driver.cpp"
+                            "../driver/lis2dh12_driver.cpp"
+                            "../accelerometer/accelerometer.cpp"
                             "../homing/homing_service.cpp"
                             "../laser/laser_driver.cpp"
                             "../laser/laser_planner_adapter.cpp"
@@ -32,6 +34,7 @@ idf_component_register(SRCS "app_main.cpp"
                        INCLUDE_DIRS "."
                                     "../command"
                                     "../driver"
+                                    "../accelerometer"
                                     "../homing"
                                     "../laser"
                                     "../machine"
@@ -45,6 +48,7 @@ idf_component_register(SRCS "app_main.cpp"
                                 esp_driver_ledc
                                 esp_driver_rmt
                                 esp_driver_uart
+                                esp_driver_i2c
                                 fatfs
                                 sdmmc
                                 esp_rom)
