@@ -9,6 +9,7 @@
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
+#include "service.hpp"
 #include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
 
@@ -28,5 +29,6 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(ray2::homing::homing_init());
     ESP_ERROR_CHECK(ray2::planner::planner_start());
     ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
+    ESP_ERROR_CHECK(ray2::service::service_start());
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());
 }
