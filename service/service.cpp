@@ -8,7 +8,14 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "command_dispatch.hpp"
+#include "homing_service.hpp"
+#include "laser_driver.hpp"
+#include "planner.hpp"
 #include "runtime_affinity.hpp"
+#include "sd_job_service.hpp"
+#include "timer_stepper_executor.hpp"
+#include "uart0_driver.hpp"
 
 namespace ray2::service {
 namespace {
@@ -46,6 +53,7 @@ bool event_allowed(const State state, const EventType type) {
         case EventType::ResetToIdle:
             return state == State::Completed || state == State::Aborted ||
                    state == State::Faulted;
+        case EventType::HardResetRequested: return true;
     }
     return false;
 }
@@ -57,7 +65,22 @@ void reject_event(const EventType type) {
              static_cast<unsigned>(type));
 }
 
+void apply_hard_reset() {
+    // The realtime ingress path has already made pulse and laser output safe.
+    // Keep all queue, task, and parser cleanup in this non-realtime task.
+    ray2::planner::planner_reset();
+    ray2::protocol::command_reset_after_hard_reset();
+    ray2::laser::laser_set_motion_output_permitted(false);
+    s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
+    s_state.store(State::Aborted, std::memory_order_release);
+    ESP_LOGW(kLogTag, "hard reset completed");
+}
+
 void apply_event(const ServiceEvent& event) {
+    if (event.type == EventType::HardResetRequested) {
+        apply_hard_reset();
+        return;
+    }
     const State current = s_state.load(std::memory_order_acquire);
     if (!event_allowed(current, event.type)) {
         reject_event(event.type);
@@ -83,6 +106,9 @@ void apply_event(const ServiceEvent& event) {
             s_fault_reason.store(FaultReason::None, std::memory_order_release);
             s_state.store(State::Idle);
             break;
+        case EventType::HardResetRequested:
+            // Handled before transition validation above.
+            return;
     }
 }
 
@@ -131,6 +157,26 @@ bool service_post_event(const EventType type, const FaultReason reason) {
     return true;
 }
 
+bool service_request_hard_reset() {
+    if (s_event_queue == nullptr || s_task == nullptr) return false;
+
+    // This makes the output safe before the service task can be scheduled.
+    // The stop function is task-context only and must not be called by an ISR.
+    ray2::laser::laser_set_motion_output_permitted(false);
+    // These are atomic cancellation requests. Send them before stopping the
+    // executor so neither producer can schedule another action in the gap.
+    ray2::sd::sd_job_request_abort();
+    ray2::homing::homing_request_abort();
+    ray2::stepper::timer_stepper_executor_stop();
+    ray2::driver::uart0_discard_pending_normal_input();
+    s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
+    s_state.store(State::Aborted, std::memory_order_release);
+    // Hard reset supersedes every previously queued lifecycle event. This
+    // also guarantees that cleanup cannot be starved by a future full queue.
+    xQueueReset(s_event_queue);
+    return service_post_event(EventType::HardResetRequested, FaultReason::HardReset);
+}
+
 State service_state() {
     return s_state.load(std::memory_order_acquire);
 }
@@ -157,6 +203,7 @@ FaultReason service_fault_reason() {
 const char* service_fault_reason_text(const FaultReason reason) {
     switch (reason) {
         case FaultReason::None: return "none";
+        case FaultReason::HardReset: return "hard-reset";
         case FaultReason::InvalidTransition: return "invalid-transition";
         case FaultReason::EventQueueFull: return "event-queue-full";
         case FaultReason::General: return "general";

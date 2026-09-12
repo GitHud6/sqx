@@ -588,8 +588,19 @@ command::Error command_sync_parser_position_from_machine() {
     }
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
     const command::Error result = command::sync_parser_position_from_machine(s_parser_state);
+    if (result == command::Error::Ok) {
+        s_parser_state.system_state = command::SystemState::Idle;
+    }
     xSemaphoreGive(s_parser_mutex);
     return result;
+}
+
+void command_reset_after_hard_reset() {
+    if (s_parser_mutex == nullptr) return;
+    xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
+    s_parser_state = {};
+    s_parser_state.system_state = command::SystemState::Alarm;
+    xSemaphoreGive(s_parser_mutex);
 }
 
 }  // namespace ray2::protocol

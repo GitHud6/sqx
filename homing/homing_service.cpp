@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "runtime_affinity.hpp"
+#include "service.hpp"
 #include "limit_switch_driver.hpp"
 #include "laser_driver.hpp"
 #include "planner.hpp"
@@ -33,6 +34,7 @@ constexpr double kPullOffMm = 3.0;
 constexpr double kSeekDistanceMultiplier = 1.1;
 constexpr TickType_t kMotionTimeoutMargin = pdMS_TO_TICKS(2000);
 std::atomic<bool> s_stop_on_limit = false;
+std::atomic<bool> s_abort_requested = false;
 
 void IRAM_ATTR on_limit_switch(std::size_t axis, void*) {
     const std::uint32_t axis_bit = 1U << axis;
@@ -76,12 +78,14 @@ bool run_parallel_homing() {
     const TickType_t timeout = pdMS_TO_TICKS(seek.duration_us / 1000U) + kMotionTimeoutMargin;
     const TickType_t deadline = xTaskGetTickCount() + timeout;
     while (stepper::timer_stepper_executor_is_busy() &&
+           !s_abort_requested.load(std::memory_order_acquire) &&
            static_cast<std::int32_t>(deadline - xTaskGetTickCount()) > 0) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
     const bool both_triggered = s_triggered_axes_mask.load(std::memory_order_acquire) == kBothAxes;
     stepper::timer_stepper_executor_stop();
     s_stop_on_limit.store(false, std::memory_order_release);
+    if (s_abort_requested.load(std::memory_order_acquire)) return false;
     if (!both_triggered) return false;
 
     stepper::StepSegment pull_off = {};
@@ -98,8 +102,12 @@ bool run_parallel_homing() {
     pull_off.duration_us = pull_off.step_interval_us * static_cast<std::uint32_t>(pull_off.major_steps);
     s_active_axes_mask.store(0, std::memory_order_relaxed);
     if (stepper::timer_stepper_executor_start_segment(pull_off) != ESP_OK) return false;
-    while (stepper::timer_stepper_executor_is_busy()) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+    while (stepper::timer_stepper_executor_is_busy() &&
+           !s_abort_requested.load(std::memory_order_acquire)) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
+    }
     stepper::timer_stepper_executor_stop();
+    if (s_abort_requested.load(std::memory_order_acquire)) return false;
     return wait_for_limit_state(0, false) && wait_for_limit_state(1, false);
 }
 
@@ -124,7 +132,16 @@ void homing_task(void*) {
     laser::laser_disable();
     const bool completed = run_parallel_homing() && commit_machine_origin();
     s_stop_on_limit.store(false, std::memory_order_release);
-    if (!completed) stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
+    if (!completed) {
+        stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
+    } else {
+        // A successful homing establishes a new trusted coordinate after
+        // Ctrl-X, so laser motion output may be armed for later G-code.
+        laser::laser_set_motion_output_permitted(true);
+        if (service::service_state() == service::State::Aborted) {
+            service::service_post_event(service::EventType::ResetToIdle);
+        }
+    }
     s_state.store(completed ? HomingState::Completed : HomingState::Faulted,
                   std::memory_order_release);
     s_seek_active.store(false, std::memory_order_release);
@@ -160,7 +177,8 @@ void seek_test_task(void*) {
     }
 
     while (stepper::timer_stepper_executor_is_busy() &&
-           !s_limit_triggered.load(std::memory_order_acquire)) {
+           !s_limit_triggered.load(std::memory_order_acquire) &&
+           !s_abort_requested.load(std::memory_order_acquire)) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
     }
     stepper::timer_stepper_executor_stop();
@@ -168,8 +186,10 @@ void seek_test_task(void*) {
     s_stop_on_limit.store(false, std::memory_order_release);
     // A single-axis diagnostic establishes no machine coordinate reference.
     stepper::stepper_invalidate_position(stepper::PositionInvalidationReason::Reset);
-    s_state.store(s_limit_triggered.load(std::memory_order_acquire) ? HomingState::Completed
-                                                                     : HomingState::Faulted,
+    s_state.store(!s_abort_requested.load(std::memory_order_acquire) &&
+                          s_limit_triggered.load(std::memory_order_acquire)
+                      ? HomingState::Completed
+                      : HomingState::Faulted,
                   std::memory_order_release);
     s_seek_task = nullptr;
     vTaskDelete(nullptr);
@@ -190,6 +210,7 @@ StartResult homing_start() {
 
     if (!driver::limit_switch_driver_is_initialized()) return StartResult::Unavailable;
     s_seek_active.store(true, std::memory_order_release);
+    s_abort_requested.store(false, std::memory_order_release);
     s_state.store(HomingState::Running, std::memory_order_release);
     if (xTaskCreatePinnedToCore(homing_task, "homing", 3072, nullptr, 6, &s_seek_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
@@ -215,6 +236,7 @@ StartResult homing_start_seek_test(const TestAxis axis) {
     s_limit_triggered.store(false, std::memory_order_relaxed);
     s_stop_on_limit.store(true, std::memory_order_release);
     s_seek_active.store(true, std::memory_order_release);
+    s_abort_requested.store(false, std::memory_order_release);
     s_state.store(HomingState::Running, std::memory_order_release);
     if (xTaskCreatePinnedToCore(seek_test_task, "homing_seek", 3072, nullptr, 6, &s_seek_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
@@ -233,6 +255,12 @@ HomingState homing_state() {
 
 bool homing_is_active() {
     return homing_state() == HomingState::Running;
+}
+
+void homing_request_abort() {
+    if (homing_is_active()) {
+        s_abort_requested.store(true, std::memory_order_release);
+    }
 }
 
 const char* homing_state_text(const HomingState state) {

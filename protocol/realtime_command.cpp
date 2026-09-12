@@ -7,6 +7,9 @@ bool realtime_command_from_byte(const std::uint8_t byte, RealtimeCommand& comman
         case '?':
             command = RealtimeCommand::StatusReport;
             return true;
+        case 0x18:
+            command = RealtimeCommand::HardReset;
+            return true;
         default:
             return false;
     }
@@ -15,6 +18,8 @@ bool realtime_command_from_byte(const std::uint8_t byte, RealtimeCommand& comman
 void realtime_command_receive(const RealtimeCommand command) {
     switch (command) {
         case RealtimeCommand::StatusReport:
+            return;
+        case RealtimeCommand::HardReset:
             return;
     }
 }

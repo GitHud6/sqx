@@ -27,4 +27,8 @@ command::Error command_dispatch_external(const char* line, std::size_t length);
 // a known machine coordinate. The protocol owns the mutex protecting this state.
 command::Error command_sync_parser_position_from_machine();
 
+// Resets modal/parser state after a realtime hard reset. The position is
+// deliberately unavailable until a later homing operation establishes it.
+void command_reset_after_hard_reset();
+
 }  // namespace ray2::protocol

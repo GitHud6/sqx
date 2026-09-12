@@ -15,6 +15,7 @@
 #include "planner.hpp"
 #include "protocol_tx.hpp"
 #include "realtime_command.hpp"
+#include "service.hpp"
 #include "uart0_driver.hpp"
 
 namespace ray2::protocol {
@@ -55,8 +56,11 @@ bool protocol_handle_overflow() {
 }
 
 bool protocol_handle_realtime_command(const RealtimeCommand realtime_command) {
-    if (realtime_command == RealtimeCommand::StatusReport) {
-        return command_report_realtime_status();
+    switch (realtime_command) {
+        case RealtimeCommand::StatusReport:
+            return command_report_realtime_status();
+        case RealtimeCommand::HardReset:
+            return service::service_request_hard_reset();
     }
     return true;
 }
@@ -71,6 +75,9 @@ bool protocol_uart_ingress_handler(const std::uint8_t byte, void*) {
     switch (realtime_command) {
         case RealtimeCommand::StatusReport:
             s_status_report_pending.store(true, std::memory_order_release);
+            break;
+        case RealtimeCommand::HardReset:
+            service::service_request_hard_reset();
             break;
     }
 

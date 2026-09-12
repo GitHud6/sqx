@@ -31,5 +31,7 @@ HomingState homing_state();
 bool homing_is_active();
 const char* homing_state_text(HomingState state);
 StartResult homing_start_seek_test(TestAxis axis);
+// Requests that an active homing task exit after its system motion is stopped.
+void homing_request_abort();
 
 }  // namespace ray2::homing
