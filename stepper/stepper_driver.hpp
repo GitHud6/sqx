@@ -25,6 +25,8 @@ enum class PositionInvalidationReason {
     None,
     Startup,
     Reset,
+    HardLimit,
+    MotionAlarm,
     RmtFailure,
     ExecutionFailure,
 };

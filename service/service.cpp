@@ -11,10 +11,12 @@
 #include "command_dispatch.hpp"
 #include "homing_service.hpp"
 #include "laser_driver.hpp"
+#include "limit_switch_driver.hpp"
 #include "planner.hpp"
 #include "runtime_affinity.hpp"
 #include "sdcard_driver.hpp"
 #include "sd_job_service.hpp"
+#include "stepper_driver.hpp"
 #include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
 
@@ -59,6 +61,7 @@ bool event_allowed(const State state, const EventType type) {
             return state == State::Completed || state == State::Aborted ||
                    state == State::Faulted;
         case EventType::HardResetRequested: return true;
+        case EventType::SafetyAbortRequested: return true;
         case EventType::InputStarted:
             return state == State::Idle || state == State::Completed ||
                    state == State::Aborted || state == State::Faulted;
@@ -76,6 +79,15 @@ bool event_allowed(const State state, const EventType type) {
                    state != State::Faulted;
     }
     return false;
+}
+
+stepper::PositionInvalidationReason position_reason_for_safety_fault(
+    const FaultReason reason) {
+    switch (reason) {
+        case FaultReason::HardLimit: return stepper::PositionInvalidationReason::HardLimit;
+        case FaultReason::MotionAlarm: return stepper::PositionInvalidationReason::MotionAlarm;
+        default: return stepper::PositionInvalidationReason::ExecutionFailure;
+    }
 }
 
 void reject_event(const EventType type) {
@@ -96,9 +108,33 @@ void apply_hard_reset() {
     ESP_LOGW(kLogTag, "hard reset completed");
 }
 
+void apply_safety_abort(const FaultReason reason) {
+    // Output and executor have already been made safe by the detecting task.
+    // Keep parser, planner, and position cleanup serialized here.
+    ray2::planner::planner_reset();
+    ray2::protocol::command_reset_after_hard_reset();
+    ray2::laser::laser_set_motion_output_permitted(false);
+    ray2::stepper::stepper_invalidate_position(position_reason_for_safety_fault(reason));
+    s_fault_reason.store(reason, std::memory_order_release);
+    s_state.store(State::Faulted, std::memory_order_release);
+    ESP_LOGE(kLogTag, "safety abort completed: reason=%s", service_fault_reason_text(reason));
+}
+
+void on_limit_switch_state(const driver::LimitSwitchState& state, void*) {
+    if ((!state.triggered[0] && !state.triggered[1]) || ray2::homing::homing_is_active() ||
+        ray2::planner::planner_is_idle()) {
+        return;
+    }
+    service_request_safety_abort(FaultReason::HardLimit);
+}
+
 void apply_event(const ServiceEvent& event) {
     if (event.type == EventType::HardResetRequested) {
         apply_hard_reset();
+        return;
+    }
+    if (event.type == EventType::SafetyAbortRequested) {
+        apply_safety_abort(event.reason == FaultReason::None ? FaultReason::General : event.reason);
         return;
     }
     const State current = s_state.load(std::memory_order_acquire);
@@ -165,6 +201,9 @@ void apply_event(const ServiceEvent& event) {
             s_state.store(State::Idle);
             break;
         case EventType::HardResetRequested:
+            // Handled before transition validation above.
+            return;
+        case EventType::SafetyAbortRequested:
             // Handled before transition validation above.
             return;
         case EventType::InputStarted:
@@ -252,6 +291,8 @@ esp_err_t service_start() {
         return ESP_ERR_NO_MEM;
     }
 
+    ray2::driver::limit_switch_driver_set_state_callback(on_limit_switch_state, nullptr);
+
     ESP_LOGI(kLogTag, "started state=idle");
     return ESP_OK;
 }
@@ -317,6 +358,24 @@ bool service_request_hard_reset() {
     // also guarantees that cleanup cannot be starved by a future full queue.
     xQueueReset(s_event_queue);
     return service_post_event(EventType::HardResetRequested, FaultReason::HardReset);
+}
+
+bool service_request_safety_abort(const FaultReason reason) {
+    if (reason != FaultReason::HardLimit && reason != FaultReason::MotionAlarm) return false;
+    if (s_event_queue == nullptr || s_task == nullptr) return false;
+    if (s_state.load(std::memory_order_acquire) == State::Faulted) return true;
+
+    // This function is task-context only. Make the physical outputs safe in
+    // the detecting task so service-queue latency cannot extend motion.
+    ray2::laser::laser_set_motion_output_permitted(false);
+    ray2::sd::sd_job_request_abort();
+    ray2::homing::homing_request_abort();
+    ray2::stepper::timer_stepper_executor_stop();
+    ray2::driver::uart0_discard_pending_normal_input();
+    s_fault_reason.store(reason, std::memory_order_release);
+    s_state.store(State::Faulted, std::memory_order_release);
+    xQueueReset(s_event_queue);
+    return service_post_event(EventType::SafetyAbortRequested, reason);
 }
 
 bool service_request_feed_hold() {
@@ -387,6 +446,8 @@ const char* service_fault_reason_text(const FaultReason reason) {
     switch (reason) {
         case FaultReason::None: return "none";
         case FaultReason::HardReset: return "hard-reset";
+        case FaultReason::HardLimit: return "hard-limit";
+        case FaultReason::MotionAlarm: return "motion-alarm";
         case FaultReason::InvalidTransition: return "invalid-transition";
         case FaultReason::EventQueueFull: return "event-queue-full";
         case FaultReason::General: return "general";

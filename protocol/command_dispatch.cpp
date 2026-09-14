@@ -290,6 +290,8 @@ const char* position_invalidation_reason_text(stepper::PositionInvalidationReaso
         case stepper::PositionInvalidationReason::None: return "none";
         case stepper::PositionInvalidationReason::Startup: return "startup";
         case stepper::PositionInvalidationReason::Reset: return "reset";
+        case stepper::PositionInvalidationReason::HardLimit: return "hard-limit";
+        case stepper::PositionInvalidationReason::MotionAlarm: return "motion-alarm";
         case stepper::PositionInvalidationReason::RmtFailure: return "rmt-failure";
         case stepper::PositionInvalidationReason::ExecutionFailure: return "execution-failure";
     }

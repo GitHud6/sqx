@@ -9,9 +9,9 @@
 #include "freertos/task.h"
 
 #include "lis2dh12_driver.hpp"
-#include "laser_driver.hpp"
 #include "planner.hpp"
 #include "runtime_affinity.hpp"
+#include "service.hpp"
 
 namespace ray2::accelerometer {
 namespace {
@@ -47,8 +47,8 @@ void sample_task(void*) {
         }
 
         if (abnormal_samples == kConfirmSamples) {
-            ray2::laser::laser_set_motion_output_permitted(false);
-            ray2::planner::planner_reset();
+            ray2::service::service_request_safety_abort(
+                ray2::service::FaultReason::MotionAlarm);
             ESP_LOGE(kLogTag, "motion alarm: XY acceleration threshold exceeded");
         }
         vTaskDelayUntil(&next_wake, kCheckPeriod);

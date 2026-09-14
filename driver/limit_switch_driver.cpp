@@ -21,6 +21,8 @@ std::atomic<std::uint32_t> s_debounce_events = 0;
 TaskHandle_t s_debounce_task = nullptr;
 LimitSwitchIsrCallback s_isr_callback = nullptr;
 void* s_isr_callback_user_data = nullptr;
+LimitSwitchStateCallback s_state_callback = nullptr;
+void* s_state_callback_user_data = nullptr;
 
 std::uint32_t read_triggered_mask() {
     std::uint32_t mask = 0;
@@ -51,8 +53,16 @@ void limit_switch_debounce_task(void*) {
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         vTaskDelay(kDebounceDelay);
-        s_triggered_mask.store(read_triggered_mask(), std::memory_order_release);
+        const std::uint32_t mask = read_triggered_mask();
+        s_triggered_mask.store(mask, std::memory_order_release);
         s_debounce_events.fetch_add(1, std::memory_order_relaxed);
+        if (s_state_callback != nullptr) {
+            const LimitSwitchState state = {
+                .triggered = {(mask & 1U) != 0, (mask & 2U) != 0},
+                .debounce_events = s_debounce_events.load(std::memory_order_relaxed),
+            };
+            s_state_callback(state, s_state_callback_user_data);
+        }
     }
 }
 
@@ -114,6 +124,11 @@ LimitSwitchState limit_switch_driver_state() {
 void limit_switch_driver_set_isr_callback(const LimitSwitchIsrCallback callback, void* user_data) {
     s_isr_callback = callback;
     s_isr_callback_user_data = user_data;
+}
+
+void limit_switch_driver_set_state_callback(const LimitSwitchStateCallback callback, void* user_data) {
+    s_state_callback = callback;
+    s_state_callback_user_data = user_data;
 }
 
 }  // namespace ray2::driver

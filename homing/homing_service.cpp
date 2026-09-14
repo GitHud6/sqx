@@ -138,7 +138,8 @@ void homing_task(void*) {
         // A successful homing establishes a new trusted coordinate after
         // Ctrl-X, so laser motion output may be armed for later G-code.
         laser::laser_set_motion_output_permitted(true);
-        if (service::service_state() == service::State::Aborted) {
+        if (service::service_state() == service::State::Aborted ||
+            service::service_state() == service::State::Faulted) {
             service::service_post_event(service::EventType::ResetToIdle);
         }
     }
