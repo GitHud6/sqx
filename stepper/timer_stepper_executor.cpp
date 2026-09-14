@@ -20,6 +20,8 @@ constexpr char kLogTag[] = "timer_stepper";
 
 std::atomic<bool> s_initialized = false;
 std::atomic<bool> s_busy = false;
+std::atomic<bool> s_hold_requested = false;
+std::atomic<bool> s_held = false;
 portMUX_TYPE s_motion_lock = portMUX_INITIALIZER_UNLOCKED;
 
 struct MotionState {
@@ -222,7 +224,16 @@ bool IRAM_ATTR timer_alarm_callback(void*) {
             stepper_completion_publish_from_isr(completion, &task_woken);
         }
         StepSegment next = {};
-        if (completed_motion.system_motion) {
+        if (!completed_motion.system_motion && s_hold_requested.load(std::memory_order_relaxed)) {
+            // The completed segment has already committed all of its emitted
+            // steps. Preserve queued segments and prep contexts for resume.
+            s_busy.store(false);
+            s_held.store(true, std::memory_order_release);
+            driver::step_timer_driver_stop_from_isr();
+            laser::laser_disable_from_isr();
+            stepper_segment_clear_active_from_isr();
+            stepper_segment_record_hold_reached_from_isr(&task_woken);
+        } else if (completed_motion.system_motion) {
             s_busy.store(false);
             driver::step_timer_driver_stop_from_isr();
             laser::laser_disable_from_isr();
@@ -357,6 +368,37 @@ esp_err_t timer_stepper_executor_start_from_segment_ring() {
 
 bool timer_stepper_executor_is_busy() { return s_busy.load(); }
 
+bool timer_stepper_executor_request_hold() {
+    if (!s_initialized.load(std::memory_order_acquire) ||
+        !s_busy.load(std::memory_order_acquire)) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_motion_lock);
+    const bool accepted = s_busy.load(std::memory_order_relaxed) && !s_motion.system_motion;
+    if (accepted) {
+        s_hold_requested.store(true, std::memory_order_release);
+    }
+    portEXIT_CRITICAL(&s_motion_lock);
+    return accepted;
+}
+
+bool timer_stepper_executor_is_held() {
+    return s_held.load(std::memory_order_acquire);
+}
+
+esp_err_t timer_stepper_executor_resume_from_hold() {
+    if (!s_held.load(std::memory_order_acquire) || s_busy.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t result = timer_stepper_executor_start_from_segment_ring();
+    if (result == ESP_OK) {
+        s_hold_requested.store(false, std::memory_order_release);
+        s_held.store(false, std::memory_order_release);
+        stepper_segment_request_refill();
+    }
+    return result;
+}
+
 void timer_stepper_executor_stop() {
     if (driver::step_timer_driver_is_initialized()) driver::step_timer_driver_stop();
     driver::rmt_step_pulse_driver_stop();
@@ -368,6 +410,8 @@ void timer_stepper_executor_stop() {
     s_motion = {};
     s_applied_direction_valid = false;
     s_busy.store(false);
+    s_hold_requested.store(false, std::memory_order_release);
+    s_held.store(false, std::memory_order_release);
     portEXIT_CRITICAL(&s_motion_lock);
     disable_active_axes(motion);
 }
@@ -383,6 +427,8 @@ void IRAM_ATTR timer_stepper_executor_stop_from_isr() {
     s_motion.prepared_step_mask_valid = false;
     s_applied_direction_valid = false;
     s_busy.store(false, std::memory_order_relaxed);
+    s_hold_requested.store(false, std::memory_order_relaxed);
+    s_held.store(false, std::memory_order_relaxed);
     portEXIT_CRITICAL_ISR(&s_motion_lock);
 }
 

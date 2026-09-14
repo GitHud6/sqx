@@ -60,7 +60,14 @@ bool protocol_handle_realtime_command(const RealtimeCommand realtime_command) {
         case RealtimeCommand::StatusReport:
             return command_report_realtime_status();
         case RealtimeCommand::HardReset:
-            return service::service_request_hard_reset();
+            service::service_request_hard_reset();
+            return true;
+        case RealtimeCommand::FeedHold:
+            service::service_request_feed_hold();
+            return true;
+        case RealtimeCommand::CycleStart:
+            service::service_request_cycle_start();
+            return true;
     }
     return true;
 }
@@ -78,6 +85,12 @@ bool protocol_uart_ingress_handler(const std::uint8_t byte, void*) {
             break;
         case RealtimeCommand::HardReset:
             service::service_request_hard_reset();
+            break;
+        case RealtimeCommand::FeedHold:
+            service::service_request_feed_hold();
+            break;
+        case RealtimeCommand::CycleStart:
+            service::service_request_cycle_start();
             break;
     }
 

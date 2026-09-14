@@ -100,6 +100,21 @@ void IRAM_ATTR stepper_segment_request_refill_from_isr(BaseType_t* const higher_
         vTaskNotifyGiveFromISR(task, higher_priority_task_woken);
     }
 }
+void stepper_segment_request_refill() {
+    s_transport_events.fetch_or(StepperTransportEventRefillRequested, std::memory_order_release);
+    const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
+    if (task != nullptr) {
+        xTaskNotifyGive(task);
+    }
+}
+void IRAM_ATTR stepper_segment_record_hold_reached_from_isr(
+    BaseType_t* const higher_priority_task_woken) {
+    s_transport_events.fetch_or(StepperTransportEventHoldReached, std::memory_order_release);
+    const TaskHandle_t task = s_completion_notification_task.load(std::memory_order_acquire);
+    if (task != nullptr && higher_priority_task_woken != nullptr) {
+        vTaskNotifyGiveFromISR(task, higher_priority_task_woken);
+    }
+}
 void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment) {
     s_active_step_interval_us.store(segment.step_interval_us, std::memory_order_relaxed);
     s_active_amass_timer_interval_us.store(

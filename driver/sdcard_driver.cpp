@@ -1,6 +1,7 @@
 #include "sdcard_driver.hpp"
 
 #include "driver/sdmmc_host.h"
+#include "driver/gpio.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
@@ -14,6 +15,21 @@ sdmmc_card_t* s_card = nullptr;
 esp_err_t sdcard_start() {
     if (s_card != nullptr) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    const gpio_config_t detect_config = {
+        .pin_bit_mask = 1ULL << kSdCardDetectPin,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    const esp_err_t detect_result = gpio_config(&detect_config);
+    if (detect_result != ESP_OK) {
+        return detect_result;
+    }
+    if (!sdcard_is_inserted()) {
+        return ESP_ERR_NOT_FOUND;
     }
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
@@ -52,6 +68,10 @@ esp_err_t sdcard_stop() {
 
 bool sdcard_is_mounted() {
     return s_card != nullptr;
+}
+
+bool sdcard_is_inserted() {
+    return gpio_get_level(static_cast<gpio_num_t>(kSdCardDetectPin)) == 0;
 }
 
 }  // namespace ray2::driver

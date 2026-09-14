@@ -16,6 +16,7 @@
 #include "timer_stepper_executor.hpp"
 #include "segment_producer.hpp"
 #include "segment_ring.hpp"
+#include "service.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
@@ -671,6 +672,7 @@ void disable_axes_after_idle() {
 }
 
 void fill_segment_ring_from_planner(const std::uint32_t transport_events) {
+    if (stepper::timer_stepper_executor_is_held()) return;
     stepper::segment_producer_process_events(transport_events);
     while (true) {
         if (stepper::segment_producer_profile().active &&
@@ -809,9 +811,18 @@ void planner_task(void*) {
         if ((transport_events & stepper::StepperTransportEventCompletionAvailable) != 0U) {
             consume_segment_completions();
         }
+        if ((transport_events & stepper::StepperTransportEventHoldReached) != 0U) {
+            service::service_post_event(service::EventType::HoldReached);
+        }
         fill_segment_ring_from_planner(transport_events);
         mark_isr_started_block_active();
         if (stepper::timer_stepper_executor_is_busy()) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
+        }
+        if (stepper::timer_stepper_executor_is_held()) {
+            // The service owns the transition out of hold. Do not consume or
+            // create segments until it explicitly resumes the executor.
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }

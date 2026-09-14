@@ -7,6 +7,8 @@ namespace ray2::protocol {
 enum class RealtimeCommand : std::uint8_t {
     StatusReport,
     HardReset,
+    FeedHold,
+    CycleStart,
 };
 
 // Returns true only for a recognized single-byte Grbl realtime command.

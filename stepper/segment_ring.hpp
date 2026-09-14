@@ -58,6 +58,7 @@ enum StepperTransportEvent : std::uint32_t {
     StepperTransportEventNone = 0,
     StepperTransportEventRefillRequested = 1U << 0U,
     StepperTransportEventCompletionAvailable = 1U << 1U,
+    StepperTransportEventHoldReached = 1U << 2U,
 };
 
 struct SegmentExecutionDiagnostics {
@@ -85,6 +86,10 @@ void stepper_segment_record_block_boundary_restart();
 void stepper_segment_clear_block_boundary_pending();
 bool IRAM_ATTR stepper_segment_needs_refill_from_isr();
 void IRAM_ATTR stepper_segment_request_refill_from_isr(BaseType_t* higher_priority_task_woken);
+// Task-context refill request, used when a held executor resumes.
+void stepper_segment_request_refill();
+void IRAM_ATTR stepper_segment_record_hold_reached_from_isr(
+    BaseType_t* higher_priority_task_woken);
 void IRAM_ATTR stepper_segment_set_active(const StepSegment& segment);
 void IRAM_ATTR stepper_segment_clear_active_from_isr();
 

@@ -38,6 +38,20 @@ enum class EventType : std::uint8_t {
     Faulted,
     ResetToIdle,
     HardResetRequested,
+    InputStarted,
+    InputDataAvailable,
+    InputEnded,
+    InputAborted,
+    InputFaulted,
+};
+
+enum class InputSource : std::uint8_t {
+    Unknown,
+    Uart,
+    Telnet,
+    WebSocket,
+    SdCard,
+    FFat,
 };
 
 esp_err_t service_start();
@@ -48,10 +62,22 @@ bool service_is_started();
 // is rejected when the service task processes the event.
 bool service_post_event(EventType type, FaultReason reason = FaultReason::None);
 
+// Input lifecycle notifications are source-neutral. The producer owns its
+// reader; service only serializes lifecycle state and motion-drain policy.
+bool service_input_started(InputSource source);
+bool service_input_data_available(InputSource source);
+bool service_input_ended(InputSource source);
+bool service_input_aborted(InputSource source);
+bool service_input_faulted(InputSource source, FaultReason reason = FaultReason::General);
+
 // Called from the UART realtime ingress task. It immediately disables laser
 // output and stops pulse generation, then queues the remaining reset cleanup
 // for the service task. It never runs in a hardware ISR.
 bool service_request_hard_reset();
+// Realtime feed-hold controls. Hold completes the active segment before
+// stopping; resume consumes only already-unexecuted segments.
+bool service_request_feed_hold();
+bool service_request_cycle_start();
 
 State service_state();
 const char* service_state_text(State state);

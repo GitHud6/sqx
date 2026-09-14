@@ -18,4 +18,8 @@ esp_err_t sdcard_stop();
 
 bool sdcard_is_mounted();
 
+// The board's card-detect switch is active-low: low means that a card is
+// physically inserted. This is independent from the filesystem mount state.
+bool sdcard_is_inserted();
+
 }  // namespace ray2::driver

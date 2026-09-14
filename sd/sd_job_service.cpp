@@ -14,6 +14,7 @@
 #include "gzip_file_reader.hpp"
 #include "sdcard_driver.hpp"
 #include "stepper_driver.hpp"
+#include "service.hpp"
 
 namespace ray2::sd {
 namespace {
@@ -28,6 +29,7 @@ std::atomic<JobFault> s_job_fault = JobFault::None;
 std::atomic<command::Error> s_job_command_error = command::Error::Ok;
 std::atomic<std::uint32_t> s_job_current_line = 0;
 std::atomic<bool> s_abort_requested = false;
+std::atomic<bool> s_input_end_requested = false;
 char s_job_path[kJobPathCapacity] = {};
 
 // The gzip dictionary is 32 KiB. Keep reader storage outside the 4 KiB job
@@ -87,6 +89,14 @@ void finish_job(JobState state,
     s_job_fault.store(fault);
     s_job_command_error.store(command_error);
     s_job_state.store(state);
+    if (state == JobState::Completed) {
+        ray2::service::service_post_event(ray2::service::EventType::Completed);
+    } else if (fault == JobFault::Aborted) {
+        ray2::service::service_input_aborted(ray2::service::InputSource::SdCard);
+    } else if (state == JobState::Faulted) {
+        ray2::service::service_input_faulted(ray2::service::InputSource::SdCard,
+                                              ray2::service::FaultReason::General);
+    }
     s_job_task = nullptr;
     vTaskDelete(nullptr);
 }
@@ -108,6 +118,7 @@ void sd_job_task(void*) {
     }
 
     s_job_state.store(JobState::Running);
+    ray2::service::service_input_data_available(ray2::service::InputSource::SdCard);
     log_position("running");
     char line[kGcodeLineCapacity] = {};
     bool program_ended = false;
@@ -116,6 +127,11 @@ void sd_job_task(void*) {
             reader->close();
             finish_job(JobState::Faulted, JobFault::Aborted);
             return;
+        }
+        if (s_input_end_requested.load(std::memory_order_acquire) ||
+            !ray2::driver::sdcard_is_inserted()) {
+            reader->close();
+            break;
         }
         if (reader->read_line(line, sizeof(line))) {
             s_job_current_line.fetch_add(1);
@@ -128,6 +144,12 @@ void sd_job_task(void*) {
                     reader->close();
                     finish_job(JobState::Faulted, JobFault::Aborted);
                     return;
+                }
+                if (s_input_end_requested.load(std::memory_order_acquire) ||
+                    !ray2::driver::sdcard_is_inserted()) {
+                    reader->close();
+                    program_ended = true;
+                    break;
                 }
                 const command::Error result =
                     ray2::protocol::command_dispatch_external(line, std::strlen(line));
@@ -167,6 +189,7 @@ void sd_job_task(void*) {
     }
 
     reader->close();
+    ray2::service::service_input_ended(ray2::service::InputSource::SdCard);
     s_job_state.store(JobState::Draining);
     log_position("draining");
     while (ray2::planner::planner_free_blocks() != ray2::planner::kPlannerQueueLength) {
@@ -205,6 +228,11 @@ esp_err_t sd_job_start(const char* path) {
     s_job_command_error.store(command::Error::Ok);
     s_job_current_line.store(0);
     s_abort_requested.store(false, std::memory_order_release);
+    s_input_end_requested.store(false, std::memory_order_release);
+
+    if (!ray2::service::service_input_started(ray2::service::InputSource::SdCard)) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     if (xTaskCreatePinnedToCore(sd_job_task, "sd_job", 4096, nullptr, 5, &s_job_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
@@ -217,6 +245,12 @@ esp_err_t sd_job_start(const char* path) {
 void sd_job_request_abort() {
     if (sd_job_is_active()) {
         s_abort_requested.store(true, std::memory_order_release);
+    }
+}
+
+void sd_job_request_input_end() {
+    if (sd_job_is_active()) {
+        s_input_end_requested.store(true, std::memory_order_release);
     }
 }
 

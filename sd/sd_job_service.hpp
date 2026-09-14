@@ -27,6 +27,9 @@ enum class JobFault {
 
 esp_err_t sd_job_start(const char* path);
 void sd_job_request_abort();
+// Stops reading new commands because the input medium ended or disappeared.
+// Existing planner/segment work is drained normally.
+void sd_job_request_input_end();
 JobState sd_job_state();
 bool sd_job_is_active();
 const char* sd_job_state_text(JobState state);
