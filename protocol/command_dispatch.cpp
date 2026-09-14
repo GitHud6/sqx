@@ -15,6 +15,7 @@
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
+#include "service.hpp"
 #include "planner.hpp"
 #include "protocol_tx.hpp"
 #include "segment_ring.hpp"
@@ -363,12 +364,14 @@ bool report_position_status() {
     const double planned_y = s_parser_state.planned_machine_position_mm[1];
     xSemaphoreGive(s_parser_mutex);
 
-    char response[256] = {};
+    char response[320] = {};
     const int length = std::snprintf(
         response, sizeof(response),
-        "[POS:state=%s|reason=%s|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)]\r\nok\r\n",
+        "[POS:state=%s|reason=%s|service=(state=%s,fault=%s)|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
+        ray2::service::service_state_text(ray2::service::service_state()),
+        ray2::service::service_fault_reason_text(ray2::service::service_fault_reason()),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
@@ -506,14 +509,13 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
     if (ray2::sd::parse_system_command(line, length, sd_command)) {
         switch (sd_command.type) {
             case ray2::sd::SystemCommandType::Status:
-                if (!ray2::driver::sdcard_is_mounted()) {
-                    return write_text("error:sd-not-mounted\r\n");
-                }
                 {
                     char response[192] = {};
                     const int response_length = std::snprintf(
                         response, sizeof(response),
-                        "[SD:mounted path=/sd|job=%s|line=%u|fault=%s|error=%s]\r\nok\r\n",
+                        "[SD:inserted=%u|mounted=%u|path=/sd|job=%s|line=%u|fault=%s|error=%s]\r\nok\r\n",
+                        ray2::driver::sdcard_is_inserted() ? 1U : 0U,
+                        ray2::driver::sdcard_is_mounted() ? 1U : 0U,
                         ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
                         static_cast<unsigned>(ray2::sd::sd_job_current_line()),
                         ray2::sd::sd_job_fault_text(ray2::sd::sd_job_fault()),
