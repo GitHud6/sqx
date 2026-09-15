@@ -20,6 +20,7 @@
 #include "protocol_tx.hpp"
 #include "segment_ring.hpp"
 #include "stepper_driver.hpp"
+#include "wifi_service.hpp"
 #include "wifi_settings.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -121,6 +122,14 @@ bool is_wifi_setting_command(const char* line, const std::size_t length) {
            starts_with_ignore_case(line, length, "$RADIO/MODE");
 }
 
+bool is_wifi_begin_command(const char* line, const std::size_t length) {
+    return equals_ignore_case(line, length, "$WIFI/BEGIN");
+}
+
+bool is_wifi_begin_path(const char* line, const std::size_t length) {
+    return starts_with_ignore_case(line, length, "$WIFI/BEGIN");
+}
+
 bool parse_wifi_setting_command(const char* line, const std::size_t length,
                                 WifiSettingCommand& command) {
     return parse_wifi_setting_path(line, length, "$STA/SSID", WifiSettingCommandType::StaSsid,
@@ -212,6 +221,20 @@ bool execute_wifi_setting_command(const WifiSettingCommand& command) {
             return write_text("error:wifi-invalid-mode\r\n");
     }
     return write_text("error:wifi-invalid-command\r\n");
+}
+
+bool execute_wifi_begin_command() {
+    wifi::WifiSettings settings = {};
+    if (wifi::wifi_settings_load(settings) != ESP_OK) return report_wifi_settings_unavailable();
+
+    const esp_err_t result = wifi::wifi_restart();
+    if (result != ESP_OK) return write_text("error:wifi-begin-failed\r\n");
+
+    char response[64] = {};
+    const int length = std::snprintf(response, sizeof(response), "[WIFI:BEGIN=%s]\r\nok\r\n",
+                                     wifi::wifi_radio_mode_text(settings.radio_mode));
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
 }
 
 bool snapshot_parser_state(command::ParserState& state) {
@@ -642,6 +665,12 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
         return execute_wifi_setting_command(wifi_command);
     }
     if (is_wifi_setting_command(line, length)) {
+        return write_text("error:wifi-invalid-command\r\n");
+    }
+    if (is_wifi_begin_command(line, length)) {
+        return execute_wifi_begin_command();
+    }
+    if (is_wifi_begin_path(line, length)) {
         return write_text("error:wifi-invalid-command\r\n");
     }
     ray2::sd::SystemCommand sd_command = {};
