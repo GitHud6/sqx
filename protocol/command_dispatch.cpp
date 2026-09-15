@@ -282,11 +282,56 @@ const char* spindle_mode_text(const command::SpindleMode mode) {
 }
 
 bool report_build_info() {
+    const auto& x_axis = machine::raycube_axis(machine::Axis::X);
+    const auto& y_axis = machine::raycube_axis(machine::Axis::Y);
     static constexpr char kBuildInfo[] =
-        "[VER:1.1f.20260826:RayCube-IDF]\r\n"
+        "[VER:1.0.0:RayCube-IDF]\r\n"
         "[OPT:V,32,256]\r\n"
-        "ok\r\n";
-    return write_text(kBuildInfo);
+        "[Board:Longer Laser Ray2 V1.0]\r\n"
+        "[Machine:Ray2]\r\n"
+        "[Software:1.0.0]\r\n"
+        "[Wavelength:450nm]\r\n"
+        "[Power:7.5W]\r\n";
+    if (!write_text(kBuildInfo)) return false;
+
+    char response[192] = {};
+    int length = std::snprintf(response, sizeof(response),
+                               "[Working Size:XSIZE=%.3f:YSIZE=%.3f]\r\n",
+                               static_cast<double>(x_axis.max_travel_mm),
+                               static_cast<double>(y_axis.max_travel_mm));
+    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
+        !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
+        return false;
+    }
+
+    wifi::RuntimeInfo wifi_info = {};
+    if (!wifi::wifi_get_runtime_info(wifi_info) || !wifi_info.started) {
+        return write_text("[MSG:Mode=OFF]\r\nok\r\n");
+    }
+    if (wifi_info.sta_enabled) {
+        const char* const status = wifi_info.sta_connected ? "Connected" : "Connecting";
+        length = std::snprintf(response, sizeof(response),
+                               "[MSG:Mode=STA:SSID=%s:Status=%s:IP=%s:MAC=%s]\r\n",
+                               wifi_info.sta_ssid[0] == '\0' ? "<unset>" : wifi_info.sta_ssid,
+                               status, wifi_info.sta_ip[0] == '\0' ? "0.0.0.0" : wifi_info.sta_ip,
+                               wifi_info.sta_mac[0] == '\0' ? "<unavailable>" : wifi_info.sta_mac);
+        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
+            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
+            return false;
+        }
+    }
+    if (wifi_info.ap_enabled) {
+        length = std::snprintf(response, sizeof(response),
+                               "[MSG:Mode=AP:SSDI=%s:IP=%s:MAC=%s]\r\n",
+                               wifi_info.ap_ssid[0] == '\0' ? "<unset>" : wifi_info.ap_ssid,
+                               wifi_info.ap_ip[0] == '\0' ? "0.0.0.0" : wifi_info.ap_ip,
+                               wifi_info.ap_mac[0] == '\0' ? "<unavailable>" : wifi_info.ap_mac);
+        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
+            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
+            return false;
+        }
+    }
+    return write_text("ok\r\n");
 }
 
 bool report_gcode_modes() {
