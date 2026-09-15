@@ -360,6 +360,20 @@ bool service_request_hard_reset() {
     return service_post_event(EventType::HardResetRequested, FaultReason::HardReset);
 }
 
+bool service_request_alarm_unlock() {
+    if (s_event_queue == nullptr || s_task == nullptr || ray2::homing::homing_is_active() ||
+        !ray2::planner::planner_is_idle() || ray2::stepper::timer_stepper_executor_is_busy()) {
+        return false;
+    }
+
+    const State state = s_state.load(std::memory_order_acquire);
+    if (state == State::Idle) return true;
+    if (state != State::Aborted && state != State::Faulted && state != State::Completed) {
+        return false;
+    }
+    return service_post_event(EventType::ResetToIdle);
+}
+
 bool service_request_safety_abort(const FaultReason reason) {
     if (reason != FaultReason::HardLimit && reason != FaultReason::MotionAlarm) return false;
     if (s_event_queue == nullptr || s_task == nullptr) return false;

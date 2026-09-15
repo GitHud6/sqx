@@ -77,6 +77,9 @@ bool service_input_faulted(InputSource source, FaultReason reason = FaultReason:
 // output and stops pulse generation, then queues the remaining reset cleanup
 // for the service task. It never runs in a hardware ISR.
 bool service_request_hard_reset();
+// Clears a completed abort/fault lifecycle gate without changing the machine
+// coordinate trust state or re-enabling laser motion output.
+bool service_request_alarm_unlock();
 // Task-context safety stop for confirmed hard limits and motion alarms. It
 // makes output safe immediately, then serializes destructive cleanup through
 // the service task. It must not be called from a hardware ISR.

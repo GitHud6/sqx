@@ -248,9 +248,15 @@ bool snapshot_parser_state(command::ParserState& state) {
     return true;
 }
 
-const char* realtime_state_text(const stepper::MachinePosition& position) {
+const char* realtime_state_text() {
     if (homing::homing_is_active()) return "Home";
-    if (position.state != stepper::PositionState::Known) return "Alarm";
+    const service::State service_state = service::service_state();
+    if (service_state == service::State::Aborted || service_state == service::State::Faulted) {
+        return "Alarm";
+    }
+    if (service_state == service::State::HoldRequested || service_state == service::State::Held) {
+        return "Hold";
+    }
     return planner::planner_is_idle() ? "Idle" : "Run";
 }
 
@@ -639,7 +645,7 @@ bool command_report_realtime_status() {
     static char response[160] = {};
     const int length = std::snprintf(
         response, sizeof(response), "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f>\r\n",
-        realtime_state_text(position), position.millimeters[0], position.millimeters[1], feed_rate,
+        realtime_state_text(), position.millimeters[0], position.millimeters[1], feed_rate,
         parser_state.spindle_speed);
     return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
            protocol_tx_publish_realtime_status(
@@ -668,9 +674,9 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
         return report_grbl_settings();
     }
     if (equals_ignore_case(line, length, "$X")) {
-        // ray2-old returns ok outside Alarm as a no-op. RayCube currently has
-        // no separate Alarm lock, so this must not promote an unknown position.
-        return homing::homing_is_active() ? write_text("error:homing-busy\r\n") : write_text("ok\r\n");
+        if (homing::homing_is_active()) return write_text("error:homing-busy\r\n");
+        return service::service_request_alarm_unlock() ? write_text("ok\r\n")
+                                                       : write_text("error:unlock-busy\r\n");
     }
     const char* jog_payload = nullptr;
     std::size_t jog_payload_length = 0;
