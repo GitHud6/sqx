@@ -20,6 +20,7 @@
 #include "protocol_tx.hpp"
 #include "segment_ring.hpp"
 #include "stepper_driver.hpp"
+#include "wifi_settings.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -80,6 +81,137 @@ bool equals_ignore_case(const char* text, std::size_t length, const char* expect
         }
     }
     return true;
+}
+
+bool starts_with_ignore_case(const char* text, const std::size_t length, const char* prefix) {
+    const std::size_t prefix_length = std::strlen(prefix);
+    return length >= prefix_length && equals_ignore_case(text, prefix_length, prefix);
+}
+
+enum class WifiSettingCommandType {
+    StaSsid,
+    StaPassword,
+    RadioMode,
+};
+
+struct WifiSettingCommand {
+    WifiSettingCommandType type = WifiSettingCommandType::StaSsid;
+    const char* value = nullptr;
+    std::size_t value_length = 0;
+    bool has_value = false;
+};
+
+bool parse_wifi_setting_path(const char* line, const std::size_t length, const char* path,
+                             WifiSettingCommandType type, WifiSettingCommand& command) {
+    const std::size_t path_length = std::strlen(path);
+    if (!starts_with_ignore_case(line, length, path)) return false;
+    if (length == path_length) {
+        command = {type, nullptr, 0, false};
+        return true;
+    }
+    if (line[path_length] != '=') return false;
+
+    command = {type, line + path_length + 1, length - path_length - 1, true};
+    return true;
+}
+
+bool is_wifi_setting_command(const char* line, const std::size_t length) {
+    return starts_with_ignore_case(line, length, "$STA/SSID") ||
+           starts_with_ignore_case(line, length, "$STA/PASSWORD") ||
+           starts_with_ignore_case(line, length, "$RADIO/MODE");
+}
+
+bool parse_wifi_setting_command(const char* line, const std::size_t length,
+                                WifiSettingCommand& command) {
+    return parse_wifi_setting_path(line, length, "$STA/SSID", WifiSettingCommandType::StaSsid,
+                                   command) ||
+           parse_wifi_setting_path(line, length, "$STA/PASSWORD",
+                                   WifiSettingCommandType::StaPassword, command) ||
+           parse_wifi_setting_path(line, length, "$RADIO/MODE", WifiSettingCommandType::RadioMode,
+                                   command);
+}
+
+bool report_wifi_settings_unavailable() {
+    return write_text("error:wifi-settings-unavailable\r\n");
+}
+
+bool report_wifi_setting(const WifiSettingCommandType type) {
+    wifi::WifiSettings settings = {};
+    if (wifi::wifi_settings_load(settings) != ESP_OK) return report_wifi_settings_unavailable();
+
+    char response[128] = {};
+    int length = 0;
+    switch (type) {
+        case WifiSettingCommandType::StaSsid:
+            length = std::snprintf(response, sizeof(response), "[STA:SSID=%s]\r\nok\r\n",
+                                   settings.ssid);
+            break;
+        case WifiSettingCommandType::StaPassword:
+            length = std::snprintf(response, sizeof(response),
+                                   "[STA:PASSWORD=set=%u|length=%u]\r\nok\r\n",
+                                   settings.password[0] == '\0' ? 0U : 1U,
+                                   static_cast<unsigned>(std::strlen(settings.password)));
+            break;
+        case WifiSettingCommandType::RadioMode:
+            length = std::snprintf(response, sizeof(response), "[RADIO:MODE=%s]\r\nok\r\n",
+                                   wifi::wifi_radio_mode_text(settings.radio_mode));
+            break;
+    }
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
+bool copy_wifi_setting_value(const WifiSettingCommand& command, char* buffer,
+                             const std::size_t capacity) {
+    if (!command.has_value || buffer == nullptr || command.value_length >= capacity) return false;
+    std::memcpy(buffer, command.value, command.value_length);
+    buffer[command.value_length] = '\0';
+    return true;
+}
+
+bool execute_wifi_setting_command(const WifiSettingCommand& command) {
+    if (!command.has_value) return report_wifi_setting(command.type);
+
+    switch (command.type) {
+        case WifiSettingCommandType::StaSsid: {
+            char ssid[wifi::kStaSsidCapacity] = {};
+            if (!copy_wifi_setting_value(command, ssid, sizeof(ssid))) {
+                return write_text("error:wifi-invalid-value\r\n");
+            }
+            const esp_err_t result = wifi::wifi_settings_store_sta_ssid(ssid);
+            if (result == ESP_OK) return write_text("ok\r\n");
+            return result == ESP_ERR_INVALID_ARG ? write_text("error:wifi-invalid-value\r\n")
+                                               : report_wifi_settings_unavailable();
+        }
+        case WifiSettingCommandType::StaPassword: {
+            char password[wifi::kStaPasswordCapacity] = {};
+            if (!copy_wifi_setting_value(command, password, sizeof(password))) {
+                return write_text("error:wifi-invalid-value\r\n");
+            }
+            const esp_err_t result = wifi::wifi_settings_store_sta_password(password);
+            if (result == ESP_OK) return write_text("ok\r\n");
+            return result == ESP_ERR_INVALID_ARG ? write_text("error:wifi-invalid-value\r\n")
+                                               : report_wifi_settings_unavailable();
+        }
+        case WifiSettingCommandType::RadioMode:
+            if (equals_ignore_case(command.value, command.value_length, "AP")) {
+                return wifi::wifi_settings_store_radio_mode(wifi::RadioMode::Ap) == ESP_OK
+                           ? write_text("ok\r\n")
+                           : report_wifi_settings_unavailable();
+            }
+            if (equals_ignore_case(command.value, command.value_length, "STA")) {
+                return wifi::wifi_settings_store_radio_mode(wifi::RadioMode::Sta) == ESP_OK
+                           ? write_text("ok\r\n")
+                           : report_wifi_settings_unavailable();
+            }
+            if (equals_ignore_case(command.value, command.value_length, "AP_STA")) {
+                return wifi::wifi_settings_store_radio_mode(wifi::RadioMode::ApSta) == ESP_OK
+                           ? write_text("ok\r\n")
+                           : report_wifi_settings_unavailable();
+            }
+            return write_text("error:wifi-invalid-mode\r\n");
+    }
+    return write_text("error:wifi-invalid-command\r\n");
 }
 
 bool snapshot_parser_state(command::ParserState& state) {
@@ -505,6 +637,13 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
         return write_text("error:position-invalid-command\r\n");
     }
 
+    WifiSettingCommand wifi_command = {};
+    if (parse_wifi_setting_command(line, length, wifi_command)) {
+        return execute_wifi_setting_command(wifi_command);
+    }
+    if (is_wifi_setting_command(line, length)) {
+        return write_text("error:wifi-invalid-command\r\n");
+    }
     ray2::sd::SystemCommand sd_command = {};
     if (ray2::sd::parse_system_command(line, length, sd_command)) {
         switch (sd_command.type) {
