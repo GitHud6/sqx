@@ -26,27 +26,15 @@ constexpr std::size_t kIpCapacity = kWifiIpTextCapacity;
 
 std::atomic<State> s_state = State::Stopped;
 std::atomic<bool> s_started = false;
+std::atomic<bool> s_sta_has_ip = false;
 esp_netif_t* s_ap_netif = nullptr;
 esp_netif_t* s_sta_netif = nullptr;
 esp_event_handler_instance_t s_wifi_handler = nullptr;
 esp_event_handler_instance_t s_ip_handler = nullptr;
 char s_ap_ssid[kSsidCapacity] = {};
 
-bool mode_has_ap(const RadioMode mode) {
-    return mode == RadioMode::Ap || mode == RadioMode::ApSta;
-}
-
-bool mode_has_sta(const RadioMode mode) {
+bool mode_requests_sta(const RadioMode mode) {
     return mode == RadioMode::Sta || mode == RadioMode::ApSta;
-}
-
-wifi_mode_t esp_wifi_mode(const RadioMode mode) {
-    switch (mode) {
-        case RadioMode::Ap: return WIFI_MODE_AP;
-        case RadioMode::Sta: return WIFI_MODE_STA;
-        case RadioMode::ApSta: return WIFI_MODE_APSTA;
-    }
-    return WIFI_MODE_NULL;
 }
 
 bool esp_mode_has_ap(const wifi_mode_t mode) {
@@ -155,6 +143,7 @@ esp_err_t configure_sta(const WifiSettings& settings) {
 
 void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, void*) {
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        s_sta_has_ip.store(true, std::memory_order_release);
         s_state.store(State::StaConnected, std::memory_order_release);
         ESP_LOGI(kLogTag, "STA connected");
         return;
@@ -175,6 +164,7 @@ void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, vo
             ESP_LOGI(kLogTag, "STA connecting");
             break;
         case WIFI_EVENT_STA_DISCONNECTED:
+            s_sta_has_ip.store(false, std::memory_order_release);
             s_state.store(State::StaConnecting, std::memory_order_release);
             ESP_LOGW(kLogTag, "STA disconnected");
             break;
@@ -188,6 +178,7 @@ void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, vo
 esp_err_t wifi_start() {
     if (s_started.load(std::memory_order_acquire)) return ESP_OK;
     s_state.store(State::Starting, std::memory_order_release);
+    s_sta_has_ip.store(false, std::memory_order_release);
 
     WifiSettings saved_settings = {};
     esp_err_t result = wifi_settings_load(saved_settings);
@@ -198,10 +189,6 @@ esp_err_t wifi_start() {
     ESP_LOGI(kLogTag, "starting saved mode=%s sta_ssid=%s",
              wifi_radio_mode_text(saved_settings.radio_mode),
              saved_settings.ssid[0] == '\0' ? "<unset>" : "<set>");
-    if (saved_settings.radio_mode == RadioMode::Sta && saved_settings.ssid[0] == '\0') {
-        s_state.store(State::Error, std::memory_order_release);
-        return ESP_ERR_INVALID_STATE;
-    }
 
     result = esp_netif_init();
     if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
@@ -214,14 +201,14 @@ esp_err_t wifi_start() {
         return result;
     }
 
-    if (mode_has_ap(saved_settings.radio_mode) && s_ap_netif == nullptr) {
+    if (s_ap_netif == nullptr) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
         if (s_ap_netif == nullptr) {
             s_state.store(State::Error, std::memory_order_release);
             return ESP_ERR_NO_MEM;
         }
     }
-    if (mode_has_sta(saved_settings.radio_mode) && s_sta_netif == nullptr) {
+    if (s_sta_netif == nullptr) {
         s_sta_netif = esp_netif_create_default_wifi_sta();
         if (s_sta_netif == nullptr) {
             s_state.store(State::Error, std::memory_order_release);
@@ -253,9 +240,12 @@ esp_err_t wifi_start() {
         }
     }
 
-    result = esp_wifi_set_mode(esp_wifi_mode(saved_settings.radio_mode));
-    if (result == ESP_OK && mode_has_ap(saved_settings.radio_mode)) result = configure_ap();
-    if (result == ESP_OK && mode_has_sta(saved_settings.radio_mode) && saved_settings.ssid[0] != '\0') {
+    // The physical radio mode is deliberately fixed. The persisted mode only
+    // controls whether the STA interface should associate with an AP.
+    result = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (result == ESP_OK) result = configure_ap();
+    if (result == ESP_OK && mode_requests_sta(saved_settings.radio_mode) &&
+        saved_settings.ssid[0] != '\0') {
         result = configure_sta(saved_settings);
     }
     if (result == ESP_OK) result = esp_wifi_start();
@@ -268,30 +258,21 @@ esp_err_t wifi_start() {
     }
 
     s_started.store(true, std::memory_order_release);
-    if (mode_has_ap(saved_settings.radio_mode)) set_ap_static_ip();
+    set_ap_static_ip();
 
-    if (mode_has_sta(saved_settings.radio_mode)) {
+    if (mode_requests_sta(saved_settings.radio_mode)) {
         if (saved_settings.ssid[0] == '\0') {
-            if (saved_settings.radio_mode == RadioMode::Sta) {
-                (void)wifi_stop();
-                return ESP_ERR_INVALID_STATE;
-            }
-            ESP_LOGW(kLogTag, "AP+STA started without STA SSID; AP remains available");
+            ESP_LOGW(kLogTag, "APSTA started without STA SSID; AP remains available");
         } else {
             result = esp_wifi_connect();
             if (result != ESP_OK) {
-                if (saved_settings.radio_mode == RadioMode::Sta) {
-                    (void)wifi_stop();
-                    return result;
-                }
-                ESP_LOGW(kLogTag, "AP+STA STA connect request failed: %s", esp_err_to_name(result));
+                ESP_LOGW(kLogTag, "APSTA STA connect request failed: %s", esp_err_to_name(result));
             }
         }
     }
 
-    ESP_LOGI(kLogTag, "started mode=%s%s%s", wifi_radio_mode_text(saved_settings.radio_mode),
-             mode_has_ap(saved_settings.radio_mode) ? " ap_ssid=" : "",
-             mode_has_ap(saved_settings.radio_mode) ? s_ap_ssid : "");
+    ESP_LOGI(kLogTag, "started physical_mode=apsta policy=%s ap_ssid=%s",
+             wifi_radio_mode_text(saved_settings.radio_mode), s_ap_ssid);
     return ESP_OK;
 }
 
@@ -300,6 +281,7 @@ esp_err_t wifi_stop() {
     const esp_err_t result = esp_wifi_stop();
     if (result == ESP_OK || result == ESP_ERR_WIFI_NOT_INIT || result == ESP_ERR_WIFI_NOT_STARTED) {
         s_started.store(false, std::memory_order_release);
+        s_sta_has_ip.store(false, std::memory_order_release);
         s_state.store(State::Stopped, std::memory_order_release);
     }
     return result;
@@ -353,6 +335,10 @@ bool wifi_get_runtime_info(RuntimeInfo& info) {
 
     info.ap_enabled = esp_mode_has_ap(mode);
     info.sta_enabled = esp_mode_has_sta(mode);
+    WifiSettings settings = {};
+    if (wifi_settings_load(settings) == ESP_OK) {
+        info.sta_connection_enabled = mode_requests_sta(settings.radio_mode);
+    }
     if (info.ap_enabled) {
         (void)std::snprintf(info.ap_ssid, sizeof(info.ap_ssid), "%s", s_ap_ssid);
         format_ip(s_ap_netif, info.ap_ip, sizeof(info.ap_ip));
@@ -364,9 +350,11 @@ bool wifi_get_runtime_info(RuntimeInfo& info) {
             copy_wifi_text(config.sta.ssid, sizeof(config.sta.ssid), info.sta_ssid,
                            sizeof(info.sta_ssid));
         }
-        format_ip(s_sta_netif, info.sta_ip, sizeof(info.sta_ip));
+        const bool has_ip = s_sta_has_ip.load(std::memory_order_acquire);
+        if (has_ip) format_ip(s_sta_netif, info.sta_ip, sizeof(info.sta_ip));
         format_mac(WIFI_IF_STA, info.sta_mac, sizeof(info.sta_mac));
-        info.sta_connected = info.sta_ip[0] != '\0' && std::strcmp(info.sta_ip, "0.0.0.0") != 0;
+        info.sta_connected = has_ip && info.sta_ip[0] != '\0' &&
+                             std::strcmp(info.sta_ip, "0.0.0.0") != 0;
     }
     return true;
 }

@@ -314,7 +314,7 @@ bool report_build_info() {
     if (!wifi::wifi_get_runtime_info(wifi_info) || !wifi_info.started) {
         return write_text("[MSG:Mode=OFF]\r\nok\r\n");
     }
-    if (wifi_info.sta_enabled) {
+    if (wifi_info.sta_enabled && wifi_info.sta_connection_enabled) {
         const char* const status = wifi_info.sta_connected ? "Connected" : "Connecting";
         length = std::snprintf(response, sizeof(response),
                                "[MSG:Mode=STA:SSID=%s:Status=%s:IP=%s:MAC=%s]\r\n",

@@ -26,6 +26,7 @@ struct RuntimeInfo {
     char ap_ip[kWifiIpTextCapacity] = {};
     char ap_mac[kWifiMacTextCapacity] = {};
     bool sta_enabled = false;
+    bool sta_connection_enabled = false;
     bool sta_connected = false;
     char sta_ssid[kWifiSsidCapacity] = {};
     char sta_ip[kWifiIpTextCapacity] = {};
