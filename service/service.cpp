@@ -12,6 +12,7 @@
 #include "homing_service.hpp"
 #include "laser_driver.hpp"
 #include "limit_switch_driver.hpp"
+#include "network_command_adapter.hpp"
 #include "planner.hpp"
 #include "runtime_affinity.hpp"
 #include "sdcard_driver.hpp"
@@ -352,6 +353,7 @@ bool service_request_hard_reset() {
     ray2::homing::homing_request_abort();
     ray2::stepper::timer_stepper_executor_stop();
     ray2::driver::uart0_discard_pending_normal_input();
+    ray2::network::network_command_adapter_abort_pending();
     s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
     s_state.store(State::Aborted, std::memory_order_release);
     // Hard reset supersedes every previously queued lifecycle event. This
@@ -386,6 +388,7 @@ bool service_request_safety_abort(const FaultReason reason) {
     ray2::homing::homing_request_abort();
     ray2::stepper::timer_stepper_executor_stop();
     ray2::driver::uart0_discard_pending_normal_input();
+    ray2::network::network_command_adapter_abort_pending();
     s_fault_reason.store(reason, std::memory_order_release);
     s_state.store(State::Faulted, std::memory_order_release);
     xQueueReset(s_event_queue);

@@ -5,6 +5,7 @@
 #include "laser_planner_adapter.hpp"
 #include "limit_switch_driver.hpp"
 #include "lis2dh12_driver.hpp"
+#include "network_command_adapter.hpp"
 #include "accelerometer.hpp"
 #include "homing_service.hpp"
 #include "httpd_service.hpp"
@@ -65,4 +66,5 @@ extern "C" void app_main(void) {
         }
     }
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());
+    ESP_ERROR_CHECK(ray2::network::network_command_adapter_start());
 }

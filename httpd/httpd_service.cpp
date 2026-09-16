@@ -1,18 +1,15 @@
 #include "httpd_service.hpp"
 
-#include <cctype>
 #include <cstdio>
 #include <cstring>
 
 #include "esp_http_server.h"
 #include "esp_log.h"
 
-#include "command_dispatch.hpp"
+#include "network_command_adapter.hpp"
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
-#include "service.hpp"
-#include "websocket_service.hpp"
 #include "wifi_service.hpp"
 
 namespace ray2::httpd {
@@ -20,7 +17,6 @@ namespace {
 
 constexpr char kLogTag[] = "httpd";
 constexpr std::size_t kCommandBodyCapacity = 1024;
-constexpr std::size_t kCommandResponseCapacity = 2048;
 
 httpd_handle_t s_server = nullptr;
 
@@ -46,135 +42,48 @@ esp_err_t send_json_error(httpd_req_t* const request, const char* const status,
     return send_text(request, body, "application/json", status);
 }
 
-struct ResponseCapture {
-    char text[kCommandResponseCapacity] = {};
-    std::size_t length = 0;
-    bool overflowed = false;
-};
-
-bool capture_command_response(const std::uint8_t* const data, const std::size_t length,
-                              void* const user_data) {
-    auto* const capture = static_cast<ResponseCapture*>(user_data);
-    if (capture == nullptr || data == nullptr || length == 0 ||
-        length > sizeof(capture->text) - 1 - capture->length) {
-        if (capture != nullptr) capture->overflowed = true;
-        return false;
-    }
-    std::memcpy(capture->text + capture->length, data, length);
-    capture->length += length;
-    capture->text[capture->length] = '\0';
-    return true;
-}
-
-void trim_ascii(const char*& text, std::size_t& length) {
-    while (length != 0 && std::isspace(static_cast<unsigned char>(*text)) != 0) {
-        ++text;
-        --length;
-    }
-    while (length != 0 && std::isspace(static_cast<unsigned char>(text[length - 1])) != 0) {
-        --length;
-    }
-}
-
-bool equals_ignore_case(const char* const text, const std::size_t length, const char* const expected) {
-    const std::size_t expected_length = std::strlen(expected);
-    if (length != expected_length) return false;
-    for (std::size_t index = 0; index < length; ++index) {
-        if (std::toupper(static_cast<unsigned char>(text[index])) !=
-            std::toupper(static_cast<unsigned char>(expected[index]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 esp_err_t root_get_handler(httpd_req_t* const request) {
     return send_text(request, "", "text/plain");
 }
 
-bool append_realtime_response(const char* const command, const std::size_t length,
-                              ResponseCapture& capture) {
-    if (length == 1 && command[0] == '?') {
-        char status[160] = {};
-        std::size_t status_length = 0;
-        return protocol::command_format_realtime_status(status, sizeof(status), status_length) &&
-               capture_command_response(reinterpret_cast<const std::uint8_t*>(status), status_length,
-                                        &capture);
-    }
-
-    const bool reset_text = equals_ignore_case(command, length, "18") ||
-                            equals_ignore_case(command, length, "0x18") ||
-                            equals_ignore_case(command, length, "%18");
-    const bool reset_byte = length == 1 && static_cast<std::uint8_t>(command[0]) == 0x18;
-    const bool hold = length == 1 && command[0] == '!';
-    const bool resume = length == 1 && command[0] == '~';
-    const bool accepted = (reset_text || reset_byte) ? service::service_request_hard_reset()
-                          : hold                  ? service::service_request_feed_hold()
-                          : resume                ? service::service_request_cycle_start()
-                                                  : false;
-    return accepted && capture_command_response(reinterpret_cast<const std::uint8_t*>("ok\r\n"), 4,
-                                                 &capture);
+int hex_value(const char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
 }
 
-enum class CommandRequestResult {
-    Ok,
-    Busy,
-    Invalid,
-    ResponseOverflow,
-    DispatchFailed,
-};
-
-CommandRequestResult dispatch_command_text(char* const body, const std::size_t body_length,
-                                           ResponseCapture& capture) {
-    if (body == nullptr || body_length == 0 || std::memchr(body, '\0', body_length) != nullptr) {
-        return CommandRequestResult::Invalid;
-    }
-
-    bool dispatched_any = false;
-    std::size_t line_start = 0;
-    while (line_start < body_length) {
-        std::size_t line_end = line_start;
-        while (line_end < body_length && body[line_end] != '\n') {
-            ++line_end;
+bool url_decode_in_place(char* const text, std::size_t& length) {
+    if (text == nullptr) return false;
+    std::size_t read = 0;
+    std::size_t write = 0;
+    while (read < length) {
+        const char value = text[read++];
+        if (value == '+') {
+            text[write++] = ' ';
+            continue;
         }
-
-        const char* line = body + line_start;
-        std::size_t line_length = line_end - line_start;
-        trim_ascii(line, line_length);
-        if (line_length != 0) {
-            dispatched_any = true;
-            const bool realtime = (line_length == 1 &&
-                                   (line[0] == '?' || line[0] == '!' || line[0] == '~' ||
-                                    static_cast<std::uint8_t>(line[0]) == 0x18)) ||
-                                  equals_ignore_case(line, line_length, "18") ||
-                                  equals_ignore_case(line, line_length, "0x18") ||
-                                  equals_ignore_case(line, line_length, "%18");
-            if (realtime) {
-                if (!append_realtime_response(line, line_length, capture)) {
-                    return capture.overflowed ? CommandRequestResult::ResponseOverflow
-                                              : CommandRequestResult::DispatchFailed;
-                }
-            } else {
-                bool capacity_blocked = false;
-                if (!protocol::command_dispatch_with_response(
-                        line, line_length, capacity_blocked, capture_command_response, &capture)) {
-                    return capture.overflowed ? CommandRequestResult::ResponseOverflow
-                                              : CommandRequestResult::DispatchFailed;
-                }
-                if (capacity_blocked) return CommandRequestResult::Busy;
-            }
+        if (value != '%') {
+            text[write++] = value;
+            continue;
         }
-
-        line_start = line_end + 1;
+        if (read + 1 >= length) return false;
+        const int high = hex_value(text[read++]);
+        const int low = hex_value(text[read++]);
+        if (high < 0 || low < 0) return false;
+        const char decoded = static_cast<char>((high << 4) | low);
+        if (decoded == '\0') return false;
+        text[write++] = decoded;
     }
-
-    if (!dispatched_any) return CommandRequestResult::Invalid;
-
-    return CommandRequestResult::Ok;
+    text[write] = '\0';
+    length = write;
+    return write != 0;
 }
 
-bool receive_command_body(httpd_req_t* const request, char* const body, std::size_t& body_length) {
+bool receive_command_body(httpd_req_t* const request, char* const body, std::size_t& body_length,
+                          bool& command_text) {
     body_length = 0;
+    command_text = false;
     if (request == nullptr || body == nullptr) return false;
     if (request->content_len > 0) {
         if (request->content_len >= static_cast<int>(kCommandBodyCapacity)) return false;
@@ -186,43 +95,42 @@ bool receive_command_body(httpd_req_t* const request, char* const body, std::siz
             body_length += static_cast<std::size_t>(received);
         }
         body[body_length] = '\0';
-        return true;
+        command_text = true;
+        return body_length != 0;
     }
 
     const std::size_t query_length = httpd_req_get_url_query_len(request);
     if (query_length == 0 || query_length >= kCommandBodyCapacity) return false;
     char query[kCommandBodyCapacity] = {};
     if (httpd_req_get_url_query_str(request, query, sizeof(query)) != ESP_OK) return false;
-    if (httpd_query_key_value(query, "commandText", body, kCommandBodyCapacity) != ESP_OK &&
-        httpd_query_key_value(query, "plain", body, kCommandBodyCapacity) != ESP_OK) {
+    if (httpd_query_key_value(query, "commandText", body, kCommandBodyCapacity) == ESP_OK) {
+        command_text = true;
+    } else if (httpd_query_key_value(query, "plain", body, kCommandBodyCapacity) == ESP_OK) {
+        command_text = false;
+    } else {
         return false;
     }
     body_length = std::strlen(body);
-    return body_length != 0;
+    return body_length != 0 && url_decode_in_place(body, body_length);
 }
 
 esp_err_t command_get_handler(httpd_req_t* const request) {
     char body[kCommandBodyCapacity] = {};
     std::size_t body_length = 0;
-    if (!receive_command_body(request, body, body_length)) {
+    bool command_text = false;
+    if (!receive_command_body(request, body, body_length, command_text)) {
         return send_json_error(request, "400 Bad Request", "invalid-command-body");
     }
 
-    ResponseCapture capture = {};
-    switch (dispatch_command_text(body, body_length, capture)) {
-        case CommandRequestResult::Ok:
-            if (capture.length != 0) {
-                (void)websocket::websocket_service_publish_text(capture.text, capture.length);
-            }
-            return send_text(request, capture.text, "text/plain");
-        case CommandRequestResult::Busy:
-            return send_json_error(request, "409 Conflict", "motion-busy");
-        case CommandRequestResult::Invalid:
+    switch (network::network_command_adapter_submit(body, body_length, command_text)) {
+        case network::SubmitResult::Accepted:
+            return send_text(request, "", "text/plain");
+        case network::SubmitResult::Busy:
+            return send_json_error(request, "409 Conflict", "network-input-busy");
+        case network::SubmitResult::Invalid:
             return send_json_error(request, "400 Bad Request", "invalid-command");
-        case CommandRequestResult::ResponseOverflow:
-            return send_json_error(request, "507 Insufficient Storage", "response-too-large");
-        case CommandRequestResult::DispatchFailed:
-            return send_json_error(request, "500 Internal Server Error", "command-dispatch-failed");
+        case network::SubmitResult::Unavailable:
+            return send_json_error(request, "503 Service Unavailable", "network-input-unavailable");
     }
     return ESP_FAIL;
 }
