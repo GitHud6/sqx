@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "esp_err.h"
 
@@ -17,8 +18,21 @@ esp_err_t command_dispatch_start();
 // after planner capacity becomes available; no response was emitted.
 bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked);
 
+// Sends the normal command response to a caller-owned sink instead of UART.
+// The command still executes through the protocol-owned parser and service
+// path, so alternate transports cannot bypass motion or safety semantics.
+using CommandResponseWriter = bool (*)(const std::uint8_t* data, std::size_t length,
+                                       void* user_data);
+bool command_dispatch_with_response(const char* line, std::size_t length,
+                                    bool& capacity_blocked, CommandResponseWriter response_writer,
+                                    void* response_user_data);
+
 // Emits one standard Grbl-style realtime status line without an `ok` response.
 bool command_report_realtime_status();
+
+// Formats the standard realtime status payload for an alternate transport.
+bool command_format_realtime_status(char* response, std::size_t capacity,
+                                    std::size_t& response_length);
 
 // Executes a G-code line with the protocol-owned ParserState without emitting a UART response.
 command::Error command_dispatch_external(const char* line, std::size_t length);

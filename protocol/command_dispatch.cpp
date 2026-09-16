@@ -25,13 +25,36 @@
 #include "wifi_settings.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 namespace ray2::protocol {
 
 namespace {
 
+struct ResponseTarget {
+    TaskHandle_t owner = nullptr;
+    CommandResponseWriter writer = nullptr;
+    void* user_data = nullptr;
+};
+
+portMUX_TYPE s_response_target_lock = portMUX_INITIALIZER_UNLOCKED;
+ResponseTarget s_response_target = {};
+SemaphoreHandle_t s_response_mutex = nullptr;
+
 bool write_all(const std::uint8_t* data, std::size_t length) {
     if (data == nullptr || length == 0) return false;
+
+    ResponseTarget response_target = {};
+    portENTER_CRITICAL(&s_response_target_lock);
+    if (s_response_target.owner == xTaskGetCurrentTaskHandle()) {
+        response_target = s_response_target;
+    }
+    portEXIT_CRITICAL(&s_response_target_lock);
+
+    if (response_target.writer != nullptr) {
+        return response_target.writer(data, length, response_target.user_data);
+    }
+
     // The TX pool deliberately uses small fixed packets. Split verbose
     // engineering responses here instead of growing every queued packet.
     while (length != 0) {
@@ -629,34 +652,50 @@ bool write_sd_list_entry(const char* path, std::uintmax_t size, bool is_director
 }  // namespace
 
 esp_err_t command_dispatch_start() {
-    if (s_parser_mutex != nullptr) {
-        return ESP_OK;
+    if (s_parser_mutex == nullptr) {
+        s_parser_mutex = xSemaphoreCreateMutex();
+        if (s_parser_mutex == nullptr) return ESP_ERR_NO_MEM;
     }
-
-    s_parser_mutex = xSemaphoreCreateMutex();
-    return s_parser_mutex == nullptr ? ESP_ERR_NO_MEM : ESP_OK;
+    if (s_response_mutex == nullptr) {
+        s_response_mutex = xSemaphoreCreateMutex();
+        if (s_response_mutex == nullptr) return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
 
-bool command_report_realtime_status() {
+bool command_format_realtime_status(char* const response, const std::size_t capacity,
+                                    std::size_t& response_length) {
+    response_length = 0;
+    if (response == nullptr || capacity == 0) return false;
+
     command::ParserState parser_state = {};
-    if (!snapshot_parser_state(parser_state)) return write_text("error:protocol-no-mem\r\n");
+    if (!snapshot_parser_state(parser_state)) return false;
 
     const stepper::MachinePosition position = stepper::machine_position();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const double feed_rate = segment.active
                                  ? static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0
                                  : 0.0;
-    static char response[160] = {};
     const int length = std::snprintf(
-        response, sizeof(response), "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f>\r\n",
+        response, capacity, "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f>\r\n",
         realtime_state_text(), position.millimeters[0], position.millimeters[1], feed_rate,
         parser_state.spindle_speed);
-    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
-           protocol_tx_publish_realtime_status(
-               reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+    if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
+    response_length = static_cast<std::size_t>(length);
+    return true;
 }
 
-bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked) {
+bool command_report_realtime_status() {
+    char response[160] = {};
+    std::size_t response_length = 0;
+    if (!command_format_realtime_status(response, sizeof(response), response_length)) {
+        return write_text("error:protocol-no-mem\r\n");
+    }
+    return protocol_tx_publish_realtime_status(reinterpret_cast<const std::uint8_t*>(response),
+                                               response_length);
+}
+
+bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_blocked) {
     capacity_blocked = false;
     if (s_parser_mutex == nullptr) {
         s_parser_mutex = xSemaphoreCreateMutex();
@@ -792,6 +831,32 @@ bool command_dispatch(const char* line, std::size_t length, bool& capacity_block
         return true;
     }
     return report_status(result);
+}
+
+bool command_dispatch(const char* const line, const std::size_t length, bool& capacity_blocked) {
+    return command_dispatch_impl(line, length, capacity_blocked);
+}
+
+bool command_dispatch_with_response(const char* const line, const std::size_t length,
+                                    bool& capacity_blocked,
+                                    const CommandResponseWriter response_writer,
+                                    void* const response_user_data) {
+    capacity_blocked = false;
+    if (line == nullptr || response_writer == nullptr) return false;
+    if (command_dispatch_start() != ESP_OK) return false;
+    if (xSemaphoreTake(s_response_mutex, portMAX_DELAY) != pdTRUE) return false;
+
+    portENTER_CRITICAL(&s_response_target_lock);
+    s_response_target = {xTaskGetCurrentTaskHandle(), response_writer, response_user_data};
+    portEXIT_CRITICAL(&s_response_target_lock);
+
+    const bool result = command_dispatch_impl(line, length, capacity_blocked);
+
+    portENTER_CRITICAL(&s_response_target_lock);
+    s_response_target = {};
+    portEXIT_CRITICAL(&s_response_target_lock);
+    xSemaphoreGive(s_response_mutex);
+    return result;
 }
 
 command::Error command_dispatch_external(const char* line, std::size_t length) {
