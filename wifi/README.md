@@ -7,18 +7,22 @@
 - 使用 ESP-IDF 5.5.1 的 `esp_netif`、`esp_event` 和 `esp_wifi`。
 - `app_main` 会在 Wi-Fi 前初始化默认 NVS 分区；只有 NVS 空页耗尽或版本不兼容时才擦除并重建。
 - 使用 NVS 命名空间 `ray2_wifi` 保存三类配网数据：`sta_ssid`、`sta_password` 和 `radio_mode`。
-- `radio_mode` 表示用户保存的目标模式（`AP` / `STA` / `AP_STA`），不记录瞬时连接结果；实际 AP/STA 链路状态由 `wifi_service` 在运行时维护。
-- 含 AP 的模式会启动独立 SoftAP，SSID 为 `LongerLaser_XXXX`，后缀取 AP MAC 的最后两个字节。
+- `radio_mode` 表示用户保存的 STA 连接策略（`AP` / `STA` / `AP_STA`），不记录瞬时连接结果；实际 AP/STA 链路状态由 `wifi_service` 在运行时维护。
+- 物理无线模式固定为 `WIFI_MODE_APSTA`。SoftAP 始终启动，SSID 为 `LongerLaser_XXXX`，后缀取 AP MAC 的最后两个字节。
+- 当 `radio_mode=AP` 时不调用 STA 连接；当 `radio_mode=STA` 或 `AP_STA` 时，使用 NVS 中的 SSID/密码发起 STA 连接。
 - SoftAP 密码为 `12345678`，地址固定为 `192.168.0.1/24`，最多 2 个客户端。
 - 事件回调只更新 Wi-Fi 状态并输出必要日志，不执行文件操作或运动控制。
-- 当前已实现 AP、STA 和 AP+STA 的基础无线承载；Telnet、HTTP/WebSocket 和网络输入源将在后续阶段接入。
+- 当前已实现 AP、STA 和 AP+STA 的基础无线承载，以及独立 `httpd` 模块提供的只读
+  `GET /` 和 `GET /health`。Telnet、WebSocket 和网络 G-code 输入将在后续阶段接入。
 
 ## 与现有架构的关系
 
 ```text
 wifi（网络承载和连接状态）
+        ↓
+httpd（当前仅只读健康检查）
         ↓ 后续由网络服务转换为输入源
-Telnet / HTTP / WebSocket
+Telnet / HTTP 写接口 / WebSocket
         ↓
 protocol → service → planner → stepper
 ```
@@ -27,7 +31,7 @@ Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 
 
 ## 后续验收
 
-1. AP 或 AP+STA 模式上电日志出现 SoftAP SSID 和 `192.168.0.1`。
+1. 任意有效配置上电日志都出现 SoftAP SSID 和 `192.168.0.1`。
 2. 手机或电脑能连接该 SSID，并获得 `192.168.0.x` 地址。
 3. 网络栈启动失败时，UART/SD 雕刻仍能独立工作。
 4. 后续接入 Telnet 后，网络 G-code 与 UART 共用 protocol/service 控制和安全语义。
@@ -41,7 +45,7 @@ Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 
 - `$RADIO/MODE` 查询目标模式；`$RADIO/MODE=AP|STA|AP_STA` 保存目标模式。
 - `$WIFI/BEGIN` 不接受参数。它先停止当前 Wi-Fi，再读取 NVS 并按已保存模式重启无线模块。
 
-设置命令只更新 NVS，不会停止或重启当前 Wi-Fi；仅 `$WIFI/BEGIN` 应用已保存的模式。`STA` 未配置 SSID 时启动失败；`AP_STA` 未配置 SSID 时仍保留 AP 并输出警告。`$RADIO/STATE`、蓝牙、Telnet、HTTP、WebSocket 和 MQTT 均不属于本阶段。
+设置命令只更新 NVS，不会停止或重启当前 Wi-Fi；仅 `$WIFI/BEGIN` 应用已保存的连接策略，并确认已启动 HTTP 服务。实际射频始终是 APSTA；`AP` 只关闭 STA 关联动作，`STA` 和 `AP_STA` 都会尝试连接外部路由器。STA 未配置 SSID 时仍保留 AP 并输出警告。`$RADIO/STATE`、蓝牙、Telnet、HTTP 写接口、WebSocket 和 MQTT 均不属于本阶段。
 
 ## `$I` 设备信息
 
@@ -50,7 +54,7 @@ Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 
 - STA：`[MSG:Mode=STA:SSID=...:Status=Connected|Connecting:IP=...:MAC=...]`
 - AP：`[MSG:Mode=AP:SSDI=LongerLaser_XXXX:IP=...:MAC=...]`。`SSDI` 是为兼容量产协议保留的历史字段拼写；`XXXX` 为 AP MAC 的最后两字节。
 
-在 `AP_STA` 模式会同时输出两行。IP 与 MAC 来自实际 ESP-IDF 接口；Wi-Fi 未启动时输出 `[MSG:Mode=OFF]`。
+实际射频始终是 APSTA；当连接策略为 `STA` 或 `AP_STA` 时，若 STA 已启用则同时输出 STA 行和 AP 行。连接策略为 `AP` 时只输出 AP 行。STA 仅在收到 DHCP 地址后报告 `Connected`；在关联中、断链或尚未获得地址时报告 `Connecting`，且 IP 固定输出 `0.0.0.0`。IP 与 MAC 来自实际 ESP-IDF 接口；Wi-Fi 未启动时输出 `[MSG:Mode=OFF]`。
 
 ## 本阶段验收
 

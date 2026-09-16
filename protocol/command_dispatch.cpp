@@ -21,6 +21,7 @@
 #include "segment_ring.hpp"
 #include "stepper_driver.hpp"
 #include "wifi_service.hpp"
+#include "httpd_service.hpp"
 #include "wifi_settings.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -229,6 +230,9 @@ bool execute_wifi_begin_command() {
 
     const esp_err_t result = wifi::wifi_restart();
     if (result != ESP_OK) return write_text("error:wifi-begin-failed\r\n");
+
+    const esp_err_t httpd_result = httpd::httpd_service_start();
+    if (httpd_result != ESP_OK) return write_text("error:httpd-start-failed\r\n");
 
     char response[64] = {};
     const int length = std::snprintf(response, sizeof(response), "[WIFI:BEGIN=%s]\r\nok\r\n",

@@ -24,6 +24,7 @@ idf_component_register(SRCS "app_main.cpp"
                             "../sd/sd_file_service.cpp"
                             "../sd/sd_job_service.cpp"
                             "../service/service.cpp"
+                            "../httpd/httpd_service.cpp"
                             "../wifi/wifi_service.cpp"
                             "../wifi/wifi_settings.cpp"
                             "../stepper/stepper_driver.cpp"
@@ -46,6 +47,7 @@ idf_component_register(SRCS "app_main.cpp"
                                     "../protocol"
                                     "../sd"
                                     "../service"
+                                    "../httpd"
                                     "../wifi"
                                     "../stepper"
                        REQUIRES esp_driver_gpio
@@ -60,5 +62,6 @@ idf_component_register(SRCS "app_main.cpp"
                                 esp_wifi
                                 esp_event
                                 esp_netif
+                                esp_http_server
                                 nvs_flash
                                 lwip)

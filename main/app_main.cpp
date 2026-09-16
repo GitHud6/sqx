@@ -7,6 +7,7 @@
 #include "lis2dh12_driver.hpp"
 #include "accelerometer.hpp"
 #include "homing_service.hpp"
+#include "httpd_service.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
@@ -50,6 +51,11 @@ extern "C" void app_main(void) {
         const esp_err_t wifi_result = ray2::wifi::wifi_start();
         if (wifi_result != ESP_OK) {
             ESP_LOGW(tag, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_result));
+        } else {
+            const esp_err_t httpd_result = ray2::httpd::httpd_service_start();
+            if (httpd_result != ESP_OK) {
+                ESP_LOGW(tag, "HTTP unavailable: %s", esp_err_to_name(httpd_result));
+            }
         }
     }
     ESP_ERROR_CHECK(ray2::protocol::protocol_start());
