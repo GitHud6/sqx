@@ -10,21 +10,19 @@
 - `radio_mode` 表示用户保存的 STA 连接策略（`AP` / `STA` / `AP_STA`），不记录瞬时连接结果；实际 AP/STA 链路状态由 `wifi_service` 在运行时维护。
 - 物理无线模式固定为 `WIFI_MODE_APSTA`。SoftAP 始终启动，SSID 为 `LongerLaser_XXXX`，后缀取 AP MAC 的最后两个字节。
 - 当 `radio_mode=AP` 时不调用 STA 连接；当 `radio_mode=STA` 或 `AP_STA` 时，使用 NVS 中的 SSID/密码发起 STA 连接。
-- SoftAP 密码为 `12345678`，地址固定为 `192.168.0.1/24`，最多 2 个客户端。
+- SoftAP 密码为 `12345678`，地址固定为 `192.168.0.1/24`，最多 3 个客户端。
 - 事件回调只更新 Wi-Fi 状态并输出必要日志，不执行文件操作或运动控制。
-- 当前已实现 AP、STA 和 AP+STA 的基础无线承载，以及独立 `httpd` 模块提供的只读
-  `GET /` 和 `GET /health`。Telnet、WebSocket 和网络 G-code 输入将在后续阶段接入。
+- 当前已实现 AP、STA 和 AP+STA 的基础无线承载，以及 `httpd` 的 HTTP 命令入口和
+  独立 `websocket` 的命令结果观察通道。Telnet、WebSocket 命令输入和 MQTT 仍未接入。
 
 ## 与现有架构的关系
 
 ```text
 wifi（网络承载和连接状态）
         ↓
-httpd（当前仅只读健康检查）
-        ↓ 后续由网络服务转换为输入源
-Telnet / HTTP 写接口 / WebSocket
+httpd:8848（HTTP 命令输入） → protocol → service → planner → stepper
         ↓
-protocol → service → planner → stepper
+websocket:8849（命令结果广播，仅观察）
 ```
 
 Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 Timer/RMT 实时运动路径争用 CPU。Wi-Fi 连接丢失只影响网络客户端，不应直接改变已提交的运动；网络输入生命周期由 `service` 统一处理。
@@ -45,7 +43,7 @@ Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 
 - `$RADIO/MODE` 查询目标模式；`$RADIO/MODE=AP|STA|AP_STA` 保存目标模式。
 - `$WIFI/BEGIN` 不接受参数。它先停止当前 Wi-Fi，再读取 NVS 并按已保存模式重启无线模块。
 
-设置命令只更新 NVS，不会停止或重启当前 Wi-Fi；仅 `$WIFI/BEGIN` 应用已保存的连接策略，并确认已启动 HTTP 服务。实际射频始终是 APSTA；`AP` 只关闭 STA 关联动作，`STA` 和 `AP_STA` 都会尝试连接外部路由器。STA 未配置 SSID 时仍保留 AP 并输出警告。`$RADIO/STATE`、蓝牙、Telnet、HTTP 写接口、WebSocket 和 MQTT 均不属于本阶段。
+设置命令只更新 NVS，不会停止或重启当前 Wi-Fi；仅 `$WIFI/BEGIN` 应用已保存的连接策略，并确认 HTTP 与 WebSocket 服务已经启动。实际射频始终是 APSTA；`AP` 只关闭 STA 关联动作，`STA` 和 `AP_STA` 都会尝试连接外部路由器。STA 未配置 SSID 时仍保留 AP 并输出警告。`$RADIO/STATE`、蓝牙、Telnet、WebSocket 命令输入和 MQTT 均不属于本阶段。
 
 ## `$I` 设备信息
 

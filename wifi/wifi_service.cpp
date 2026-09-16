@@ -124,7 +124,7 @@ esp_err_t configure_ap() {
     ap_config.ap.ssid_len = static_cast<uint8_t>(std::strlen(s_ap_ssid));
     std::memcpy(ap_config.ap.password, kApPassword, sizeof(kApPassword));
     ap_config.ap.channel = 11;
-    ap_config.ap.max_connection = 2;
+    ap_config.ap.max_connection = 3;
     ap_config.ap.beacon_interval = 100;
     ap_config.ap.dtim_period = 1;
     ap_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;

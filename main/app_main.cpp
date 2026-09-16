@@ -14,6 +14,7 @@
 #include "service.hpp"
 #include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
+#include "websocket_service.hpp"
 #include "wifi_service.hpp"
 
 extern "C" void app_main(void) {
@@ -55,6 +56,11 @@ extern "C" void app_main(void) {
             const esp_err_t httpd_result = ray2::httpd::httpd_service_start();
             if (httpd_result != ESP_OK) {
                 ESP_LOGW(tag, "HTTP unavailable: %s", esp_err_to_name(httpd_result));
+            } else {
+                const esp_err_t websocket_result = ray2::websocket::websocket_service_start();
+                if (websocket_result != ESP_OK) {
+                    ESP_LOGW(tag, "WebSocket unavailable: %s", esp_err_to_name(websocket_result));
+                }
             }
         }
     }

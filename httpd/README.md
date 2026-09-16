@@ -22,6 +22,9 @@
 接口端口固定为 `8848`，以兼容 branch-net 的网络入口。`/favicon.ico` 与 `/healthz`
 刻意不注册：前者只是浏览器兼容噪声，后者只服务于 branch-net 专属 HTTP 看门狗。
 
+命令的异步观察由独立的 `websocket` 模块承接：它监听 `8849` 并向最多三个已连接的
+客户端广播 `/command` 的原始响应。HTTP 仍然是唯一的网络命令入口。
+
 ## 后续扩展边界
 
 branch-net 的业务路由包含 `/command`、`/files`、`/upload` 和 `/updatefw`。本项目

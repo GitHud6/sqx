@@ -12,6 +12,7 @@
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
 #include "service.hpp"
+#include "websocket_service.hpp"
 #include "wifi_service.hpp"
 
 namespace ray2::httpd {
@@ -210,6 +211,9 @@ esp_err_t command_get_handler(httpd_req_t* const request) {
     ResponseCapture capture = {};
     switch (dispatch_command_text(body, body_length, capture)) {
         case CommandRequestResult::Ok:
+            if (capture.length != 0) {
+                (void)websocket::websocket_service_publish_text(capture.text, capture.length);
+            }
             return send_text(request, capture.text, "text/plain");
         case CommandRequestResult::Busy:
             return send_json_error(request, "409 Conflict", "motion-busy");
