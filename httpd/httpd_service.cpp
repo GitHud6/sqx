@@ -5,6 +5,7 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "lwip/sockets.h"
 
 #include "network_command_adapter.hpp"
 #include "sd_file_service.hpp"
@@ -17,6 +18,7 @@ namespace {
 
 constexpr char kLogTag[] = "httpd";
 constexpr std::size_t kCommandBodyCapacity = 1024;
+constexpr std::size_t kMaximumHttpSessions = 3;
 
 httpd_handle_t s_server = nullptr;
 
@@ -32,6 +34,32 @@ esp_err_t send_text(httpd_req_t* const request, const char* const body, const ch
     result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     if (result != ESP_OK) return result;
     return httpd_resp_sendstr(request, body);
+}
+
+esp_err_t send_empty_accepted(httpd_req_t* const request) {
+    if (request == nullptr) return ESP_ERR_INVALID_ARG;
+
+    // ESP-IDF emits each HTTP response header fragment through a separate
+    // send(). Disabling Nagle for this short response prevents the final CRLF
+    // from waiting on an ACK from the preceding tiny packet.
+    const int fd = httpd_req_to_sockfd(request);
+    int no_delay = 1;
+    const bool no_delay_set =
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) == 0;
+    if (!no_delay_set) {
+        ESP_LOGW(kLogTag, "TCP_NODELAY unavailable fd=%d", fd);
+    }
+
+    esp_err_t result = httpd_resp_set_type(request, "text/plain");
+    if (result == ESP_OK) result = httpd_resp_send(request, nullptr, 0);
+
+    if (no_delay_set) {
+        no_delay = 0;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) != 0) {
+            ESP_LOGW(kLogTag, "TCP_NODELAY restore failed fd=%d", fd);
+        }
+    }
+    return result;
 }
 
 esp_err_t send_json_error(httpd_req_t* const request, const char* const status,
@@ -124,7 +152,7 @@ esp_err_t command_get_handler(httpd_req_t* const request) {
 
     switch (network::network_command_adapter_submit(body, body_length, command_text)) {
         case network::SubmitResult::Accepted:
-            return send_text(request, "", "text/plain");
+            return send_empty_accepted(request);
         case network::SubmitResult::Busy:
             return send_json_error(request, "409 Conflict", "network-input-busy");
         case network::SubmitResult::Invalid:
@@ -238,6 +266,9 @@ esp_err_t httpd_service_start() {
     config.stack_size = 8192;
     config.task_priority = 4;
     config.server_port = 8848;
+    // Keep the HTTP session budget bounded because the dedicated WS server
+    // owns its own three-client socket pool on port 8849.
+    config.max_open_sockets = kMaximumHttpSessions;
 
     httpd_handle_t server = nullptr;
     esp_err_t result = ::httpd_start(&server, &config);

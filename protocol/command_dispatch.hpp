@@ -34,6 +34,11 @@ bool command_report_realtime_status();
 bool command_format_realtime_status(char* response, std::size_t capacity,
                                     std::size_t& response_length);
 
+// Formats the compatibility build-information response, including its final
+// `ok` marker, for alternate transports.
+bool command_format_build_info(char* response, std::size_t capacity,
+                               std::size_t& response_length);
+
 // Executes a G-code line with the protocol-owned ParserState without emitting a UART response.
 command::Error command_dispatch_external(const char* line, std::size_t length);
 

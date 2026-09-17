@@ -26,6 +26,7 @@ constexpr char kLogTag[] = "network";
 constexpr std::size_t kIngressQueueLength = 32;
 constexpr std::size_t kMaximumBatchLines = kIngressQueueLength - 2;
 constexpr std::uint32_t kTaskStackBytes = 4096;
+constexpr std::size_t kResponseCapacity = 1600;
 
 enum class MessageType : std::uint8_t {
     BatchStart,
@@ -41,18 +42,26 @@ struct Message {
     char text[protocol::kLineBufferSize] = {};
 };
 
+struct ResponseCollector {
+    std::size_t length = 0;
+    std::uint8_t data[kResponseCapacity] = {};
+};
+
 QueueHandle_t s_ingress_queue = nullptr;
 SemaphoreHandle_t s_submit_mutex = nullptr;
 TaskHandle_t s_task = nullptr;
 std::atomic<std::uint32_t> s_generation = 1;
 std::atomic<bool> s_batch_reserved = false;
+ResponseCollector s_response_collector = {};
 
-bool response_writer(const std::uint8_t* const data, const std::size_t length, void*) {
-    if (data == nullptr || length == 0) return false;
-
-    // Phase one keeps replies off UART. The current WS service marshals this
-    // notification out of the protocol task; phase two changes its framing.
-    (void)websocket::websocket_service_publish_text(reinterpret_cast<const char*>(data), length);
+bool response_writer(const std::uint8_t* const data, const std::size_t length, void* const user_data) {
+    auto* const collector = static_cast<ResponseCollector*>(user_data);
+    if (data == nullptr || length == 0 || collector == nullptr ||
+        length > kResponseCapacity - collector->length) {
+        return false;
+    }
+    std::memcpy(collector->data + collector->length, data, length);
+    collector->length += length;
     return true;
 }
 
@@ -79,7 +88,8 @@ bool is_realtime_text(const char* const text, const std::size_t length) {
 
 void publish_text(const char* const text) {
     if (text == nullptr) return;
-    (void)websocket::websocket_service_publish_text(text, std::strlen(text));
+    (void)websocket::websocket_service_publish_binary(
+        reinterpret_cast<const std::uint8_t*>(text), std::strlen(text));
 }
 
 void process_realtime(const Message& message) {
@@ -87,7 +97,8 @@ void process_realtime(const Message& message) {
         char status[160] = {};
         std::size_t status_length = 0;
         if (protocol::command_format_realtime_status(status, sizeof(status), status_length)) {
-            (void)websocket::websocket_service_publish_text(status, status_length);
+            (void)websocket::websocket_service_publish_realtime_status(
+                reinterpret_cast<const std::uint8_t*>(status), status_length);
         } else {
             publish_text("error:protocol-no-mem\r\n");
         }
@@ -111,12 +122,19 @@ void process_realtime(const Message& message) {
 bool process_line(const Message& message) {
     while (message.generation == s_generation.load(std::memory_order_acquire)) {
         bool capacity_blocked = false;
+        s_response_collector.length = 0;
         if (!protocol::command_dispatch_with_response(message.text, message.length, capacity_blocked,
-                                                      response_writer, nullptr)) {
+                                                      response_writer, &s_response_collector)) {
             publish_text("error:network-dispatch-failed\r\n");
             return false;
         }
-        if (!capacity_blocked) return true;
+        if (!capacity_blocked) {
+            if (s_response_collector.length != 0) {
+                (void)websocket::websocket_service_publish_binary(s_response_collector.data,
+                                                                   s_response_collector.length);
+            }
+            return true;
+        }
         planner::planner_wait_for_free_block();
     }
     return false;

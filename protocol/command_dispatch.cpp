@@ -41,6 +41,12 @@ struct ResponseTarget {
 portMUX_TYPE s_response_target_lock = portMUX_INITIALIZER_UNLOCKED;
 ResponseTarget s_response_target = {};
 SemaphoreHandle_t s_response_mutex = nullptr;
+SemaphoreHandle_t s_build_info_mutex = nullptr;
+
+// `$I` runs from both the UART protocol task and the bounded network task.
+// Keep its compatibility payload out of either task's stack while preserving
+// a single complete response for alternate transports.
+char s_build_info_response[512] = {};
 
 bool write_all(const std::uint8_t* data, std::size_t length) {
     if (data == nullptr || length == 0) return false;
@@ -318,7 +324,11 @@ const char* spindle_mode_text(const command::SpindleMode mode) {
     return "M5";
 }
 
-bool report_build_info() {
+bool format_build_info(char* const response, const std::size_t capacity,
+                       std::size_t& response_length) {
+    response_length = 0;
+    if (response == nullptr || capacity == 0) return false;
+
     const auto& x_axis = machine::raycube_axis(machine::Axis::X);
     const auto& y_axis = machine::raycube_axis(machine::Axis::Y);
     static constexpr char kBuildInfo[] =
@@ -329,46 +339,47 @@ bool report_build_info() {
         "[Software:1.0.0]\r\n"
         "[Wavelength:450nm]\r\n"
         "[Power:7.5W]\r\n";
-    if (!write_text(kBuildInfo)) return false;
-
-    char response[192] = {};
-    int length = std::snprintf(response, sizeof(response),
-                               "[Working Size:XSIZE=%.3f:YSIZE=%.3f]\r\n",
-                               static_cast<double>(x_axis.max_travel_mm),
-                               static_cast<double>(y_axis.max_travel_mm));
-    if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
-        !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
-        return false;
-    }
 
     wifi::RuntimeInfo wifi_info = {};
+    char sta_message[192] = {};
+    char ap_message[128] = {};
     if (!wifi::wifi_get_runtime_info(wifi_info) || !wifi_info.started) {
-        return write_text("[MSG:Mode=OFF]\r\nok\r\n");
-    }
-    if (wifi_info.sta_enabled && wifi_info.sta_connection_enabled) {
+        std::snprintf(sta_message, sizeof(sta_message), "[MSG:Mode=OFF]\r\n");
+    } else if (wifi_info.sta_enabled && wifi_info.sta_connection_enabled) {
         const char* const status = wifi_info.sta_connected ? "Connected" : "Connecting";
-        length = std::snprintf(response, sizeof(response),
-                               "[MSG:Mode=STA:SSID=%s:Status=%s:IP=%s:MAC=%s]\r\n",
-                               wifi_info.sta_ssid[0] == '\0' ? "<unset>" : wifi_info.sta_ssid,
-                               status, wifi_info.sta_ip[0] == '\0' ? "0.0.0.0" : wifi_info.sta_ip,
-                               wifi_info.sta_mac[0] == '\0' ? "<unavailable>" : wifi_info.sta_mac);
-        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
-            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
-            return false;
-        }
+        std::snprintf(sta_message, sizeof(sta_message),
+                      "[MSG:Mode=STA:SSID=%s:Status=%s:IP=%s:MAC=%s]\r\n",
+                      wifi_info.sta_ssid[0] == '\0' ? "<unset>" : wifi_info.sta_ssid, status,
+                      wifi_info.sta_ip[0] == '\0' ? "0.0.0.0" : wifi_info.sta_ip,
+                      wifi_info.sta_mac[0] == '\0' ? "<unavailable>" : wifi_info.sta_mac);
     }
     if (wifi_info.ap_enabled) {
-        length = std::snprintf(response, sizeof(response),
-                               "[MSG:Mode=AP:SSDI=%s:IP=%s:MAC=%s]\r\n",
-                               wifi_info.ap_ssid[0] == '\0' ? "<unset>" : wifi_info.ap_ssid,
-                               wifi_info.ap_ip[0] == '\0' ? "0.0.0.0" : wifi_info.ap_ip,
-                               wifi_info.ap_mac[0] == '\0' ? "<unavailable>" : wifi_info.ap_mac);
-        if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(response) ||
-            !write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length))) {
-            return false;
-        }
+        std::snprintf(ap_message, sizeof(ap_message), "[MSG:Mode=AP:SSDI=%s:IP=%s:MAC=%s]\r\n",
+                      wifi_info.ap_ssid[0] == '\0' ? "<unset>" : wifi_info.ap_ssid,
+                      wifi_info.ap_ip[0] == '\0' ? "0.0.0.0" : wifi_info.ap_ip,
+                      wifi_info.ap_mac[0] == '\0' ? "<unavailable>" : wifi_info.ap_mac);
     }
-    return write_text("ok\r\n");
+    const int length = std::snprintf(
+        response, capacity, "%s[Working Size:XSIZE=%.3f:YSIZE=%.3f]\r\n%s%sok\r\n", kBuildInfo,
+        static_cast<double>(x_axis.max_travel_mm), static_cast<double>(y_axis.max_travel_mm),
+        sta_message, ap_message);
+    if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
+    response_length = static_cast<std::size_t>(length);
+    return true;
+}
+
+bool report_build_info() {
+    if (s_build_info_mutex == nullptr ||
+        xSemaphoreTake(s_build_info_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    std::size_t response_length = 0;
+    const bool result = format_build_info(s_build_info_response, sizeof(s_build_info_response),
+                                          response_length) &&
+                        write_all(reinterpret_cast<const std::uint8_t*>(s_build_info_response),
+                                  response_length);
+    xSemaphoreGive(s_build_info_mutex);
+    return result;
 }
 
 bool report_gcode_modes() {
@@ -664,6 +675,10 @@ esp_err_t command_dispatch_start() {
         s_response_mutex = xSemaphoreCreateMutex();
         if (s_response_mutex == nullptr) return ESP_ERR_NO_MEM;
     }
+    if (s_build_info_mutex == nullptr) {
+        s_build_info_mutex = xSemaphoreCreateMutex();
+        if (s_build_info_mutex == nullptr) return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }
 
@@ -687,6 +702,17 @@ bool command_format_realtime_status(char* const response, const std::size_t capa
     if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
     response_length = static_cast<std::size_t>(length);
     return true;
+}
+
+bool command_format_build_info(char* const response, const std::size_t capacity,
+                               std::size_t& response_length) {
+    if (s_build_info_mutex == nullptr ||
+        xSemaphoreTake(s_build_info_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    const bool result = format_build_info(response, capacity, response_length);
+    xSemaphoreGive(s_build_info_mutex);
+    return result;
 }
 
 bool command_report_realtime_status() {
