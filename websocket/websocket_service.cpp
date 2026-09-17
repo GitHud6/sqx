@@ -25,7 +25,9 @@ namespace {
 constexpr char kLogTag[] = "websocket";
 constexpr std::uint16_t kServerPort = 8849;
 constexpr std::uint16_t kControlPort = 32769;
-constexpr std::size_t kMaximumClients = 3;
+// The embedded portal is the sole WebSocket consumer. A newly loaded page
+// supersedes its previous connection rather than consuming another slot.
+constexpr std::size_t kMaximumClients = 1;
 constexpr std::size_t kMaximumInboundFrameBytes = 1024;
 constexpr std::size_t kMaximumOutboundMessageBytes = 1600;
 constexpr std::size_t kOutboundQueueLength = 32;
@@ -50,7 +52,7 @@ struct PendingStatus {
 };
 
 httpd_handle_t s_server = nullptr;
-std::array<int, kMaximumClients> s_client_fds = {-1, -1, -1};
+std::array<int, kMaximumClients> s_client_fds = {-1};
 int s_active_client_fd = -1;
 QueueHandle_t s_free_messages = nullptr;
 QueueHandle_t s_ready_messages = nullptr;
@@ -96,7 +98,16 @@ bool add_client(const int fd) {
             return true;
         }
     }
-    return false;
+
+    // A page refresh can establish its replacement socket before the browser
+    // has finished closing the old one. Keep the portal usable by handing the
+    // sole slot to the new connection.
+    const int replaced_fd = s_client_fds.front();
+    if (replaced_fd >= 0) (void)httpd_sess_trigger_close(s_server, replaced_fd);
+    s_client_fds.front() = fd;
+    s_active_client_fd = fd;
+    ESP_LOGI(kLogTag, "replaced connection old_fd=%d new_fd=%d", replaced_fd, fd);
+    return true;
 }
 
 void send_message_work(void* const user_data) {
@@ -346,12 +357,7 @@ esp_err_t websocket_handler(httpd_req_t* const request) {
     if (request == nullptr) return ESP_ERR_INVALID_ARG;
     const int client_fd = httpd_req_to_sockfd(request);
     if (request->method == HTTP_GET) {
-        if (!add_client(client_fd)) {
-            ESP_LOGW(kLogTag, "connection rejected fd=%d clients=%u", client_fd,
-                     static_cast<unsigned>(kMaximumClients));
-            (void)httpd_sess_trigger_close(s_server, client_fd);
-            return ESP_OK;
-        }
+        if (!add_client(client_fd)) return ESP_FAIL;
         send_client_bootstrap(client_fd);
         ESP_LOGI(kLogTag, "connected fd=%d", client_fd);
         return ESP_OK;
