@@ -44,12 +44,25 @@ bool GzipFileReader::open(const char* path) {
         return false;
     }
     file_ = std::fopen(full_path, "rb");
-    if (file_ == nullptr || !read_header()) {
+    if (file_ == nullptr) {
+        error_ = true;
+        return false;
+    }
+    if (std::fseek(file_, -4, SEEK_END) != 0) {
+        close();
+        error_ = true;
+        return false;
+    }
+    unsigned char uncompressed_size[4] = {};
+    if (!read_exact(file_, uncompressed_size, sizeof(uncompressed_size)) ||
+        std::fseek(file_, 0, SEEK_SET) != 0 || !read_header()) {
         close();
         error_ = true;
         return false;
     }
 
+    bytes_consumed_ = 0;
+    total_bytes_ = little_u32(uncompressed_size);
     tinfl_init(&inflater_);
     initialized_ = true;
     stream_finished_ = false;
@@ -166,6 +179,7 @@ bool GzipFileReader::read_byte(unsigned char& value) {
         if (!fill_output()) return false;
     }
     value = dictionary_[output_offset_++];
+    ++bytes_consumed_;
     return true;
 }
 
@@ -196,6 +210,9 @@ bool GzipFileReader::finish_stream() {
 bool GzipFileReader::eof() const { return eof_; }
 bool GzipFileReader::has_error() const { return error_; }
 
+std::uint64_t GzipFileReader::bytes_consumed() const { return bytes_consumed_; }
+std::uint64_t GzipFileReader::total_bytes() const { return total_bytes_; }
+
 void GzipFileReader::close() {
     if (file_ != nullptr) std::fclose(file_);
     file_ = nullptr;
@@ -207,6 +224,8 @@ void GzipFileReader::close() {
     output_end_ = 0;
     crc_ = MZ_CRC32_INIT;
     output_size_ = 0;
+    bytes_consumed_ = 0;
+    total_bytes_ = 0;
     initialized_ = false;
     stream_finished_ = false;
     eof_ = false;

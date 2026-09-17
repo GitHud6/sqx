@@ -714,12 +714,16 @@ bool command_format_realtime_status(char* const response, const std::size_t capa
     const stepper::MachinePosition position = stepper::machine_position();
     const stepper::SegmentExecutionDiagnostics segment = stepper::stepper_segment_diagnostics();
     const double feed_rate = segment.active
-                                 ? static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0
-                                 : 0.0;
+                                  ? static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0
+                                  : 0.0;
+    const std::uint32_t sd_progress_tenths = ray2::sd::sd_job_progress_tenths_percent();
     const int length = std::snprintf(
-        response, capacity, "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f>\r\n",
+        response, capacity, "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f|SD:%s,%u.%u,%u>\r\n",
         realtime_state_text(), position.millimeters[0], position.millimeters[1], feed_rate,
-        parser_state.spindle_speed);
+        parser_state.spindle_speed, ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
+        static_cast<unsigned>(sd_progress_tenths / 10U),
+        static_cast<unsigned>(sd_progress_tenths % 10U),
+        static_cast<unsigned>(ray2::sd::sd_job_current_line()));
     if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
     response_length = static_cast<std::size_t>(length);
     return true;
@@ -826,13 +830,16 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
         switch (sd_command.type) {
             case ray2::sd::SystemCommandType::Status:
                 {
-                    char response[192] = {};
+                    char response[256] = {};
+                    const std::uint32_t progress_tenths = ray2::sd::sd_job_progress_tenths_percent();
                     const int response_length = std::snprintf(
                         response, sizeof(response),
-                        "[SD:inserted=%u|mounted=%u|path=/sd|job=%s|line=%u|fault=%s|error=%s]\r\nok\r\n",
+                        "[SD:inserted=%u|mounted=%u|path=/sd|job=%s|progress=%u.%u|line=%u|fault=%s|error=%s]\r\nok\r\n",
                         ray2::driver::sdcard_is_inserted() ? 1U : 0U,
                         ray2::driver::sdcard_is_mounted() ? 1U : 0U,
                         ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
+                        static_cast<unsigned>(progress_tenths / 10U),
+                        static_cast<unsigned>(progress_tenths % 10U),
                         static_cast<unsigned>(ray2::sd::sd_job_current_line()),
                         ray2::sd::sd_job_fault_text(ray2::sd::sd_job_fault()),
                         command::error_text(ray2::sd::sd_job_command_error()));

@@ -14,6 +14,8 @@ public:
     bool read_line(char* buffer, std::size_t capacity) override;
     bool eof() const override;
     bool has_error() const override;
+    std::uint64_t bytes_consumed() const override;
+    std::uint64_t total_bytes() const override;
     void close() override;
 
 private:
@@ -34,6 +36,8 @@ private:
     std::size_t output_end_ = 0;
     mz_ulong crc_ = MZ_CRC32_INIT;
     std::uint32_t output_size_ = 0;
+    std::uint64_t bytes_consumed_ = 0;
+    std::uint64_t total_bytes_ = 0;
     bool initialized_ = false;
     bool stream_finished_ = false;
     bool eof_ = false;

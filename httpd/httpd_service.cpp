@@ -36,6 +36,7 @@ constexpr std::size_t kUploadListingMaximumCapacity = 16U * 1024U;
 // App upload metadata consists of path, size and file headers. Keep this
 // bounded so an HTTP handler cannot exhaust the server task's 8 KiB stack.
 constexpr std::size_t kMultipartHeaderCapacity = 2048;
+constexpr std::size_t kMaximumHttpUriHandlers = 12;
 
 httpd_handle_t s_server = nullptr;
 
@@ -53,7 +54,6 @@ esp_err_t send_text(httpd_req_t* const request, const char* const body, const ch
     return httpd_resp_sendstr(request, body);
 }
 
-esp_err_t send_empty_accepted(httpd_req_t* const request) {
 esp_err_t send_gzip(httpd_req_t* const request, const std::uint8_t* const body,
                     const std::size_t body_size, const char* const content_type) {
     if (request == nullptr || body == nullptr || body_size == 0 || content_type == nullptr) {
@@ -68,6 +68,7 @@ esp_err_t send_gzip(httpd_req_t* const request, const std::uint8_t* const body,
     return httpd_resp_send(request, reinterpret_cast<const char*>(body), body_size);
 }
 
+esp_err_t send_empty_accepted(httpd_req_t* const request) {
     if (request == nullptr) return ESP_ERR_INVALID_ARG;
 
     // ESP-IDF emits each HTTP response header fragment through a separate
@@ -742,6 +743,32 @@ esp_err_t files_put_handler(httpd_req_t* const request) {
     return send_text(request, "{\"result\":\"ok\"}\n", "application/json");
 }
 
+// First-party portal storage API. The portal uses only these routes; the
+// older /files and /upload routes remain available for existing clients.
+esp_err_t storage_list_handler(httpd_req_t* const request) {
+    return files_get_handler(request);
+}
+
+esp_err_t storage_file_get_handler(httpd_req_t* const request) {
+    return files_get_handler(request);
+}
+
+esp_err_t storage_file_put_handler(httpd_req_t* const request) {
+    if (request == nullptr || request->content_len < 0 ||
+        static_cast<std::size_t>(request->content_len) > kMaximumUploadBytes) {
+        return send_json_error(request, "413 Payload Too Large", "invalid-upload-length");
+    }
+    return upload_raw_post_handler(request);
+}
+
+esp_err_t storage_file_delete_handler(httpd_req_t* const request) {
+    return files_delete_handler(request);
+}
+
+esp_err_t storage_directory_put_handler(httpd_req_t* const request) {
+    return files_put_handler(request);
+}
+
 const httpd_uri_t kRootUri = {
     .uri = "/",
     .method = HTTP_GET,
@@ -791,6 +818,41 @@ const httpd_uri_t kUploadGetUri = {
     .user_ctx = nullptr,
 };
 
+const httpd_uri_t kStorageListUri = {
+    .uri = "/api/v1/storage/list",
+    .method = HTTP_GET,
+    .handler = storage_list_handler,
+    .user_ctx = nullptr,
+};
+
+const httpd_uri_t kStorageFileGetUri = {
+    .uri = "/api/v1/storage/file",
+    .method = HTTP_GET,
+    .handler = storage_file_get_handler,
+    .user_ctx = nullptr,
+};
+
+const httpd_uri_t kStorageFilePutUri = {
+    .uri = "/api/v1/storage/file",
+    .method = HTTP_PUT,
+    .handler = storage_file_put_handler,
+    .user_ctx = nullptr,
+};
+
+const httpd_uri_t kStorageFileDeleteUri = {
+    .uri = "/api/v1/storage/file",
+    .method = HTTP_DELETE,
+    .handler = storage_file_delete_handler,
+    .user_ctx = nullptr,
+};
+
+const httpd_uri_t kStorageDirectoryPutUri = {
+    .uri = "/api/v1/storage/directory",
+    .method = HTTP_PUT,
+    .handler = storage_directory_put_handler,
+    .user_ctx = nullptr,
+};
+
 }  // namespace
 
 esp_err_t httpd_service_start() {
@@ -801,6 +863,7 @@ esp_err_t httpd_service_start() {
     config.stack_size = 8192;
     config.task_priority = 4;
     config.server_port = 8848;
+    config.max_uri_handlers = kMaximumHttpUriHandlers;
     // The WebSocket service has an independent three-client pool on port
     // 8849. HTTP still needs sufficient room for the App's concurrent setup
     // requests on port 8848.
@@ -826,6 +889,11 @@ esp_err_t httpd_service_start() {
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kFilesPutUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kUploadUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kUploadGetUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageListUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFileGetUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFilePutUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFileDeleteUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageDirectoryPutUri);
     if (result != ESP_OK) {
         ESP_LOGE(kLogTag, "route registration failed: %s", esp_err_to_name(result));
         (void)::httpd_stop(server);
@@ -833,7 +901,7 @@ esp_err_t httpd_service_start() {
     }
 
     s_server = server;
-    ESP_LOGI(kLogTag, "started port=%u routes=/,/command,/files,/upload",
+    ESP_LOGI(kLogTag, "started port=%u routes=/,/command,/files,/upload,/api/v1/storage",
              static_cast<unsigned>(config.server_port));
     return ESP_OK;
 }

@@ -34,6 +34,7 @@ JobState sd_job_state();
 bool sd_job_is_active();
 const char* sd_job_state_text(JobState state);
 std::uint32_t sd_job_current_line();
+std::uint32_t sd_job_progress_tenths_percent();
 JobFault sd_job_fault();
 const char* sd_job_fault_text(JobFault fault);
 command::Error sd_job_command_error();

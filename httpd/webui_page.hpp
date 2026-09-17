@@ -22,6 +22,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     .badge { border: 1px solid #566577; border-radius: 999px; padding: 5px 10px; font-size: .82rem; }
     .badge.online { border-color: #48c78e; color: #48c78e; }
     .badge.offline { border-color: #e57373; color: #ff9c9c; }
+    .connection-group { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; }
     section { border: 1px solid #283443; border-radius: 10px; background: #151d28; margin: 14px 0; padding: 16px; }
     h2 { font-size: 1rem; margin: 0 0 10px; }
     code, pre, input, button { font-family: ui-monospace, Consolas, monospace; }
@@ -38,8 +39,12 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     .file-actions { display: flex; gap: 6px; }
     .file-actions button { padding: 5px 8px; font-size: .8rem; }
     .file-actions .danger { border-color: #8d4e58; background: #6c2833; }
+    .file-actions .engrave { border-color: #4b8b72; background: #176044; }
     .notice { min-height: 1.3em; margin: 10px 0 0; color: #9cacbd; font-size: .9rem; }
     .notice.error { color: #ff9c9c; }
+    .job-progress { margin: 12px 0 4px; }
+    .job-progress-head { display: flex; justify-content: space-between; gap: 12px; color: #9cacbd; font-size: .9rem; }
+    .job-progress progress { width: 100%; height: 12px; margin-top: 6px; accent-color: #48b58a; }
     .upload { align-items: center; flex-wrap: wrap; }
     .upload input[type=file] { min-width: 220px; }
     .api { display: grid; grid-template-columns: max-content 1fr; gap: 8px 14px; margin: 0; }
@@ -50,8 +55,19 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
 <body>
   <header>
     <div><h1>RayCube 控制台</h1><div class="subtle">本地设备入口 · 初始界面</div></div>
-    <div id="connection" class="badge offline">WebSocket 连接中</div>
+    <div class="connection-group">
+      <div id="position" class="badge offline">位置待确认</div>
+      <div id="connection" class="badge offline">WebSocket 连接中</div>
+    </div>
   </header>
+
+  <section>
+    <div class="toolbar">
+      <h2>机器准备</h2>
+      <button id="home" type="button">回零（$H）</button>
+    </div>
+    <div id="home-notice" class="notice">连接后将读取位置状态；未知位置时必须先回零。</div>
+  </section>
 
   <section>
     <h2>命令</h2>
@@ -73,6 +89,10 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       <button id="refresh-files" type="button">刷新</button>
     </div>
     <form id="upload-form" class="upload">
+      <div class="job-progress" aria-live="polite">
+        <div class="job-progress-head"><span>SD 作业进度（文件供料）</span><span id="job-progress-text">空闲</span></div>
+        <progress id="job-progress" max="1000" value="0">0%</progress>
+      </div>
       <input id="upload-file" type="file" required aria-label="选择要上传的文件">
       <button id="upload" type="submit">上传到根目录</button>
     </form>
@@ -83,15 +103,16 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
   <section>
     <h2>当前接口</h2>
     <dl class="api">
-      <dt>HTTP</dt><dd><code>GET /</code>、<code>GET /upload</code>、<code>/command</code></dd>
+      <dt>HTTP</dt><dd><code>GET /</code>、<code>/api/v1/storage/*</code>、<code>/command</code></dd>
       <dt>WebSocket</dt><dd><code>ws://&lt;设备地址&gt;:8849/</code></dd>
-      <dt>文件服务</dt><dd><code>/files</code> 与 <code>/upload</code></dd>
+      <dt>文件服务</dt><dd><code>GET /api/v1/storage/list</code>、<code>PUT /api/v1/storage/file</code></dd>
     </dl>
   </section>
 
   <script>
     (() => {
       const status = document.getElementById('connection');
+      const position = document.getElementById('position');
       const output = document.getElementById('messages');
       const form = document.getElementById('command-form');
       const input = document.getElementById('command');
@@ -102,7 +123,17 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       const uploadButton = document.getElementById('upload');
       const fileNotice = document.getElementById('file-notice');
       const fileList = document.getElementById('file-list');
+      const homeButton = document.getElementById('home');
+      const homeNotice = document.getElementById('home-notice');
+      const jobProgress = document.getElementById('job-progress');
+      const jobProgressText = document.getElementById('job-progress-text');
       let socket;
+      let homeReady = false;
+      let homingRequested = false;
+      let homeDeadline = 0;
+      let homePollTimer = 0;
+      let progressPollTimer = 0;
+      let sdJobActive = false;
 
       function append(message) {
         output.textContent += `${output.textContent ? '\n' : ''}${message}`;
@@ -113,6 +144,108 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         status.className = `badge ${online ? 'online' : 'offline'}`;
         status.textContent = online ? 'WebSocket 已连接' : 'WebSocket 未连接';
         submit.disabled = !online;
+        updateHomeButton();
+        updateEngraveButtons();
+      }
+
+      function updateHomeButton() {
+        homeButton.disabled = !socket || socket.readyState !== WebSocket.OPEN || homingRequested;
+      }
+
+      function updateEngraveButtons() {
+        const available = homeReady && !sdJobActive && socket && socket.readyState === WebSocket.OPEN;
+        document.querySelectorAll('[data-engrave]').forEach((button) => { button.disabled = !available; });
+      }
+
+      function stopProgressPolling() {
+        window.clearInterval(progressPollTimer);
+        progressPollTimer = 0;
+      }
+
+      function startProgressPolling() {
+        if (progressPollTimer) return;
+        sendCommand('?', false);
+        progressPollTimer = window.setInterval(() => sendCommand('?', false), 500);
+      }
+
+      function updateJobProgress(state, tenths, line) {
+        const active = state === 'starting' || state === 'running' || state === 'draining';
+        sdJobActive = active;
+        jobProgress.value = Math.max(0, Math.min(1000, tenths));
+        jobProgressText.textContent = `${state} · ${(tenths / 10).toFixed(1)}% · 第 ${line} 行`;
+        if (active) startProgressPolling(); else stopProgressPolling();
+        updateEngraveButtons();
+      }
+
+      function setHomeReady(ready, message) {
+        homeReady = ready;
+        position.className = `badge ${ready ? 'online' : 'offline'}`;
+        position.textContent = ready ? '位置已回零确认' : '位置待确认';
+        homeNotice.textContent = message;
+        homeNotice.className = 'notice';
+        updateHomeButton();
+        updateEngraveButtons();
+      }
+
+      function failHoming(message) {
+        homingRequested = false;
+        window.clearTimeout(homePollTimer);
+        setHomeReady(false, message);
+        homeNotice.classList.add('error');
+      }
+
+      function sendCommand(command, show = true) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+        socket.send(command);
+        if (show) append(`> ${command}`);
+        return true;
+      }
+
+      function requestPositionStatus() {
+        sendCommand('$POS/STATUS', false);
+      }
+
+      function pollHoming() {
+        window.clearTimeout(homePollTimer);
+        if (!homingRequested) return;
+        if (Date.now() > homeDeadline) {
+          failHoming('回零超时；请检查限位开关与机器状态后重试。');
+          return;
+        }
+        sendCommand('$H/STATUS', false);
+        requestPositionStatus();
+        homePollTimer = window.setTimeout(pollHoming, 750);
+      }
+
+      function startHoming() {
+        if (!window.confirm('确认执行回零（$H）？机器将向限位方向运动。')) return;
+        if (!sendCommand('$H')) return;
+        homeReady = false;
+        homingRequested = true;
+        homeDeadline = Date.now() + 120000;
+        setHomeReady(false, '正在回零，完成前不能开始雕刻。');
+        pollHoming();
+      }
+
+      function handleMachineMessage(message) {
+        const progressMatch = message.match(/\|SD:([a-z-]+),(\d+)\.(\d),(\d+)>/);
+        if (progressMatch) {
+          updateJobProgress(progressMatch[1], Number(progressMatch[2]) * 10 + Number(progressMatch[3]),
+                            Number(progressMatch[4]));
+        }
+        if (message.includes('[POS:')) {
+          if (message.includes('state=known')) {
+            homingRequested = false;
+            window.clearTimeout(homePollTimer);
+            setHomeReady(true, '位置已确认，可以开始雕刻。');
+          } else if (!homingRequested) {
+            setHomeReady(false, '位置未知或已失效；请先执行回零（$H）。');
+          }
+        }
+        if (message.includes('[HOMING:state=faulted')) {
+          failHoming('回零失败；请检查限位开关与机器状态后重试。');
+        }
+        if (message.includes('[HOMING:state=completed')) requestPositionStatus();
       }
 
       function setFileNotice(text, error = false) {
@@ -150,10 +283,18 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
           actions.className = 'file-actions';
           if (!entry.directory) {
             const download = document.createElement('a');
-            download.href = `/files?path=${encodeURIComponent(entry.path)}`;
+            download.href = `/api/v1/storage/file?path=${encodeURIComponent(entry.path)}`;
             download.textContent = '下载';
             download.className = 'subtle';
             actions.append(download);
+            const engrave = document.createElement('button');
+            engrave.type = 'button';
+            engrave.className = 'engrave';
+            engrave.dataset.engrave = '1';
+            engrave.textContent = '雕刻';
+            engrave.disabled = !homeReady || !socket || socket.readyState !== WebSocket.OPEN;
+            engrave.addEventListener('click', () => startEngraving(entry.path));
+            actions.append(engrave);
             const remove = document.createElement('button');
             remove.type = 'button';
             remove.className = 'danger';
@@ -170,7 +311,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         refreshFilesButton.disabled = true;
         setFileNotice('正在读取 SD 卡…');
         try {
-          const response = await fetch('/files?path=%2F', { cache: 'no-store' });
+          const response = await fetch('/api/v1/storage/list?path=%2F', { cache: 'no-store' });
           if (!response.ok) await responseError(response);
           const entries = await response.json();
           renderFiles(entries);
@@ -187,7 +328,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         if (!window.confirm(`确认删除 ${path}？`)) return;
         setFileNotice(`正在删除 ${path}…`);
         try {
-          const response = await fetch(`/files?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+          const response = await fetch(`/api/v1/storage/file?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
           if (!response.ok) await responseError(response);
           await refreshFiles();
         } catch (error) {
@@ -195,18 +336,33 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         }
       }
 
+      function startEngraving(path) {
+        if (!homeReady) {
+          setFileNotice('开始雕刻前必须先完成回零（$H）。', true);
+          return;
+        }
+        if (!window.confirm(`确认开始雕刻 ${path}？`)) return;
+        if (!sendCommand(`$SD/RUN=${path}`)) {
+          setFileNotice('WebSocket 未连接，无法开始雕刻。', true);
+          return;
+        }
+        updateJobProgress('starting', 0, 0);
+        setFileNotice(`已请求开始雕刻：${path}`);
+      }
+
       uploadForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const file = uploadFile.files[0];
         if (!file) return;
-        const formData = new FormData();
-        formData.append('path', '/');
-        formData.append('size', String(file.size));
-        formData.append('file', file, file.name);
+        const targetPath = `/${file.name}`;
         uploadButton.disabled = true;
         setFileNotice(`正在上传 ${file.name}…`);
         try {
-          const response = await fetch('/upload', { method: 'POST', body: formData });
+          const response = await fetch(`/api/v1/storage/file?path=${encodeURIComponent(targetPath)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'application/octet-stream' },
+            body: file,
+          });
           if (!response.ok) await responseError(response);
           uploadFile.value = '';
           await refreshFiles();
@@ -221,13 +377,26 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
         socket = new WebSocket(`${scheme}://${location.hostname}:8849/`);
         socket.binaryType = 'arraybuffer';
-        socket.onopen = () => { setConnection(true); append('[WebSocket connected]'); };
+        socket.onopen = () => {
+          homingRequested = false;
+          setConnection(true);
+          setHomeReady(false, '正在读取位置状态；未知位置时必须先回零。');
+          append('[WebSocket connected]');
+          requestPositionStatus();
+          sendCommand('?', false);
+        };
         socket.onmessage = (event) => {
           const message = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
-          append(message);
+          handleMachineMessage(message);
+          if (!message.startsWith('<')) append(message);
         };
         socket.onerror = () => append('[WebSocket error]');
         socket.onclose = () => {
+          homingRequested = false;
+          window.clearTimeout(homePollTimer);
+          stopProgressPolling();
+          sdJobActive = false;
+          setHomeReady(false, '连接中断；重连后会重新读取位置状态。');
           setConnection(false);
           append('[WebSocket disconnected; retrying]');
           window.setTimeout(connect, 2000);
@@ -237,11 +406,11 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       form.addEventListener('submit', (event) => {
         event.preventDefault();
         const command = input.value.trim();
-        if (!command || !socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(command);
-        append(`> ${command}`);
+        if (!command || !sendCommand(command)) return;
         input.value = '';
       });
+
+      homeButton.addEventListener('click', startHoming);
 
       connect();
       refreshFiles();

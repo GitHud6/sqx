@@ -35,6 +35,20 @@ bool PlainFileReader::open(const char* path) {
         error_ = true;
         return false;
     }
+    auto* file = static_cast<std::FILE*>(file_);
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        close();
+        error_ = true;
+        return false;
+    }
+    const long file_size = std::ftell(file);
+    if (file_size < 0 || std::fseek(file, 0, SEEK_SET) != 0) {
+        close();
+        error_ = true;
+        return false;
+    }
+    bytes_consumed_ = 0;
+    total_bytes_ = static_cast<std::uint64_t>(file_size);
     eof_ = false;
     error_ = false;
     return true;
@@ -63,6 +77,7 @@ bool PlainFileReader::read_line(char* buffer, std::size_t capacity) {
             buffer[0] = '\0';
             return false;
         }
+        ++bytes_consumed_;
         if (value == '\n') {
             buffer[length] = '\0';
             return true;
@@ -73,6 +88,7 @@ bool PlainFileReader::read_line(char* buffer, std::size_t capacity) {
         if (length + 1 >= capacity) {
             do {
                 const int discarded = std::fgetc(file);
+                if (discarded != EOF) ++bytes_consumed_;
                 if (discarded == '\n' || discarded == EOF) {
                     if (discarded == EOF && std::feof(file) != 0) {
                         eof_ = true;
@@ -96,11 +112,21 @@ bool PlainFileReader::has_error() const {
     return error_;
 }
 
+std::uint64_t PlainFileReader::bytes_consumed() const {
+    return bytes_consumed_;
+}
+
+std::uint64_t PlainFileReader::total_bytes() const {
+    return total_bytes_;
+}
+
 void PlainFileReader::close() {
     if (file_ != nullptr) {
         std::fclose(static_cast<std::FILE*>(file_));
         file_ = nullptr;
     }
+    bytes_consumed_ = 0;
+    total_bytes_ = 0;
     eof_ = false;
     error_ = false;
 }

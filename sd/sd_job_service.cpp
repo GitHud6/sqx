@@ -29,6 +29,7 @@ std::atomic<JobState> s_job_state = JobState::Idle;
 std::atomic<JobFault> s_job_fault = JobFault::None;
 std::atomic<command::Error> s_job_command_error = command::Error::Ok;
 std::atomic<std::uint32_t> s_job_current_line = 0;
+std::atomic<std::uint32_t> s_job_progress_tenths_percent = 0;
 std::atomic<bool> s_abort_requested = false;
 std::atomic<bool> s_input_end_requested = false;
 std::atomic<bool> s_job_file_access_claimed = false;
@@ -90,6 +91,9 @@ void finish_job(JobState state,
     log_position(state == JobState::Completed ? "completed" : "faulted");
     s_job_fault.store(fault);
     s_job_command_error.store(command_error);
+    if (state == JobState::Completed) {
+        s_job_progress_tenths_percent.store(1000);
+    }
     s_job_state.store(state);
     if (state == JobState::Completed) {
         ray2::service::service_post_event(ray2::service::EventType::Completed);
@@ -104,6 +108,14 @@ void finish_job(JobState state,
     }
     s_job_task = nullptr;
     vTaskDelete(nullptr);
+}
+
+void update_progress(const FileReader& reader) {
+    const std::uint64_t consumed = reader.bytes_consumed();
+    const std::uint64_t total = reader.total_bytes();
+    const std::uint64_t tenths = total == 0 ? 0 : (consumed * 1000U) / total;
+    s_job_progress_tenths_percent.store(
+        static_cast<std::uint32_t>(tenths > 1000U ? 1000U : tenths), std::memory_order_release);
 }
 
 void sd_job_task(void*) {
@@ -121,6 +133,7 @@ void sd_job_task(void*) {
         finish_job(JobState::Faulted, JobFault::OpenFailed);
         return;
     }
+    update_progress(*reader);
 
     s_job_state.store(JobState::Running);
     ray2::service::service_input_data_available(ray2::service::InputSource::SdCard);
@@ -140,6 +153,7 @@ void sd_job_task(void*) {
         }
         if (reader->read_line(line, sizeof(line))) {
             s_job_current_line.fetch_add(1);
+            update_progress(*reader);
             if (line[0] == '\0') {
                 continue;
             }
@@ -238,6 +252,7 @@ esp_err_t sd_job_start(const char* path) {
     s_job_fault.store(JobFault::None);
     s_job_command_error.store(command::Error::Ok);
     s_job_current_line.store(0);
+    s_job_progress_tenths_percent.store(0);
     s_abort_requested.store(false, std::memory_order_release);
     s_input_end_requested.store(false, std::memory_order_release);
 
@@ -292,6 +307,10 @@ const char* sd_job_state_text(JobState state) {
 
 std::uint32_t sd_job_current_line() {
     return s_job_current_line.load();
+}
+
+std::uint32_t sd_job_progress_tenths_percent() {
+    return s_job_progress_tenths_percent.load(std::memory_order_acquire);
 }
 
 JobFault sd_job_fault() {
