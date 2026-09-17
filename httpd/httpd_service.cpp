@@ -1,5 +1,5 @@
 #include "httpd_service.hpp"
-#include "webui_page.hpp"
+#include "webui_page_gzip.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -22,9 +22,10 @@ namespace {
 
 constexpr char kLogTag[] = "httpd";
 constexpr std::size_t kCommandBodyCapacity = 1024;
-// LongerStudio opens several short-lived HTTP requests while the persistent
-// command connection is still active. Match the product-side server budget.
-constexpr std::size_t kMaximumHttpSessions = 8;
+// The local portal needs two concurrent requests during page startup: the
+// document and the storage listing. Keeping a small session budget prevents
+// slow peers from monopolising the single HTTPD worker and stalling refreshes.
+constexpr std::size_t kMaximumHttpSessions = 4;
 constexpr std::size_t kFileTransferBufferCapacity = 1024;
 constexpr std::size_t kMaximumUploadBytes = 16U * 1024U * 1024U;
 // Start small: this handler runs beside the WebSocket and several App setup
@@ -53,6 +54,20 @@ esp_err_t send_text(httpd_req_t* const request, const char* const body, const ch
 }
 
 esp_err_t send_empty_accepted(httpd_req_t* const request) {
+esp_err_t send_gzip(httpd_req_t* const request, const std::uint8_t* const body,
+                    const std::size_t body_size, const char* const content_type) {
+    if (request == nullptr || body == nullptr || body_size == 0 || content_type == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t result = httpd_resp_set_type(request, content_type);
+    if (result != ESP_OK) return result;
+    result = httpd_resp_set_hdr(request, "Content-Encoding", "gzip");
+    if (result != ESP_OK) return result;
+    result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (result != ESP_OK) return result;
+    return httpd_resp_send(request, reinterpret_cast<const char*>(body), body_size);
+}
+
     if (request == nullptr) return ESP_ERR_INVALID_ARG;
 
     // ESP-IDF emits each HTTP response header fragment through a separate
@@ -108,7 +123,13 @@ esp_err_t send_file_error(httpd_req_t* const request, const sd::FileResult resul
 }
 
 esp_err_t root_get_handler(httpd_req_t* const request) {
-    return send_text(request, kWebUiPage, "text/html; charset=utf-8");
+    const esp_err_t result =
+        send_gzip(request, kWebUiPageGzip, kWebUiPageGzipSize, "text/html; charset=utf-8");
+    if (result != ESP_OK) {
+        ESP_LOGW(kLogTag, "root page send failed fd=%d result=%s", httpd_req_to_sockfd(request),
+                 esp_err_to_name(result));
+    }
+    return result;
 }
 
 int hex_value(const char value) {
@@ -784,14 +805,13 @@ esp_err_t httpd_service_start() {
     // 8849. HTTP still needs sufficient room for the App's concurrent setup
     // requests on port 8848.
     config.max_open_sockets = kMaximumHttpSessions;
-    // App startup issues several concurrent requests.  On an AP/STA radio a
-    // TCP transmit window may be temporarily unavailable; retain the socket
-    // long enough for lwIP to make it writable instead of failing a complete
-    // JSON response with EAGAIN.
+    // Reject stalled peers quickly. The static page fits in one TCP send
+    // window after gzip compression, so a healthy local request needs no long
+    // send timeout.
     config.backlog_conn = kMaximumHttpSessions;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 10;
+    config.send_wait_timeout = 2;
 
     httpd_handle_t server = nullptr;
     esp_err_t result = ::httpd_start(&server, &config);
