@@ -1,4 +1,5 @@
 #include "httpd_service.hpp"
+#include "webui_page.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -107,7 +108,7 @@ esp_err_t send_file_error(httpd_req_t* const request, const sd::FileResult resul
 }
 
 esp_err_t root_get_handler(httpd_req_t* const request) {
-    return send_text(request, "", "text/plain");
+    return send_text(request, kWebUiPage, "text/html; charset=utf-8");
 }
 
 int hex_value(const char value) {

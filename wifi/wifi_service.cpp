@@ -37,6 +37,19 @@ bool mode_requests_sta(const RadioMode mode) {
     return mode == RadioMode::Sta || mode == RadioMode::ApSta;
 }
 
+bool mode_requests_ap(const RadioMode mode) {
+    return mode == RadioMode::Ap || mode == RadioMode::ApSta;
+}
+
+wifi_mode_t esp_mode_from_radio_mode(const RadioMode mode) {
+    switch (mode) {
+        case RadioMode::Ap: return WIFI_MODE_AP;
+        case RadioMode::Sta: return WIFI_MODE_STA;
+        case RadioMode::ApSta: return WIFI_MODE_APSTA;
+    }
+    return WIFI_MODE_NULL;
+}
+
 bool esp_mode_has_ap(const wifi_mode_t mode) {
     return mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
 }
@@ -201,14 +214,14 @@ esp_err_t wifi_start() {
         return result;
     }
 
-    if (s_ap_netif == nullptr) {
+    if (mode_requests_ap(saved_settings.radio_mode) && s_ap_netif == nullptr) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
         if (s_ap_netif == nullptr) {
             s_state.store(State::Error, std::memory_order_release);
             return ESP_ERR_NO_MEM;
         }
     }
-    if (s_sta_netif == nullptr) {
+    if (mode_requests_sta(saved_settings.radio_mode) && s_sta_netif == nullptr) {
         s_sta_netif = esp_netif_create_default_wifi_sta();
         if (s_sta_netif == nullptr) {
             s_state.store(State::Error, std::memory_order_release);
@@ -240,10 +253,11 @@ esp_err_t wifi_start() {
         }
     }
 
-    // The physical radio mode is deliberately fixed. The persisted mode only
-    // controls whether the STA interface should associate with an AP.
-    result = esp_wifi_set_mode(WIFI_MODE_APSTA);
-    if (result == ESP_OK) result = configure_ap();
+    result = esp_wifi_set_mode(esp_mode_from_radio_mode(saved_settings.radio_mode));
+    if (result == ESP_OK && mode_requests_ap(saved_settings.radio_mode)) {
+        set_ap_static_ip();
+        result = configure_ap();
+    }
     if (result == ESP_OK && mode_requests_sta(saved_settings.radio_mode) &&
         saved_settings.ssid[0] != '\0') {
         result = configure_sta(saved_settings);
@@ -258,21 +272,21 @@ esp_err_t wifi_start() {
     }
 
     s_started.store(true, std::memory_order_release);
-    set_ap_static_ip();
 
     if (mode_requests_sta(saved_settings.radio_mode)) {
         if (saved_settings.ssid[0] == '\0') {
-            ESP_LOGW(kLogTag, "APSTA started without STA SSID; AP remains available");
+            ESP_LOGW(kLogTag, "%s started without STA SSID", wifi_radio_mode_text(saved_settings.radio_mode));
         } else {
             result = esp_wifi_connect();
             if (result != ESP_OK) {
-                ESP_LOGW(kLogTag, "APSTA STA connect request failed: %s", esp_err_to_name(result));
+                ESP_LOGW(kLogTag, "%s STA connect request failed: %s",
+                         wifi_radio_mode_text(saved_settings.radio_mode), esp_err_to_name(result));
             }
         }
     }
 
-    ESP_LOGI(kLogTag, "started physical_mode=apsta policy=%s ap_ssid=%s",
-             wifi_radio_mode_text(saved_settings.radio_mode), s_ap_ssid);
+    ESP_LOGI(kLogTag, "started mode=%s ap_ssid=%s", wifi_radio_mode_text(saved_settings.radio_mode),
+             mode_requests_ap(saved_settings.radio_mode) ? s_ap_ssid : "<disabled>");
     return ESP_OK;
 }
 
