@@ -10,3 +10,5 @@
 # Python cache
 __pycache__/
 *.py[cod]
+
+/doc/*PLAN*.md

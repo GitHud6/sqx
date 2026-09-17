@@ -15,6 +15,7 @@ ESP-IDF 5.5.1 上的 RayCube ESP32-S3 固件实现。当前可通过 UART 和 SD
 
 | 模块 | 文档 | 当前职责 |
 | --- | --- | --- |
+| `wifi` | `wifi/README.md` | ESP-IDF Wi-Fi SoftAP network service |
 | `command` | `command/README.md` | G-code 解析、模态状态与圆弧离散 |
 | `motion` | `motion/README.md` | 请求校验与 planner 提交 |
 | `planner` | `planner/README.md` | 前瞻、速度边界、block 生命周期与供料 |
