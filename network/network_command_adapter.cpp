@@ -79,11 +79,8 @@ bool equals_ignore_case(const char* const text, const std::size_t length,
 }
 
 bool is_realtime_text(const char* const text, const std::size_t length) {
-    return (length == 1 && (text[0] == '?' || text[0] == '!' || text[0] == '~' ||
-                            static_cast<std::uint8_t>(text[0]) == 0x18U)) ||
-           equals_ignore_case(text, length, "18") ||
-           equals_ignore_case(text, length, "0x18") ||
-           equals_ignore_case(text, length, "%18");
+    return length == 1 && (text[0] == '?' || text[0] == '!' || text[0] == '~' ||
+                           static_cast<std::uint8_t>(text[0]) == 0x18U);
 }
 
 void publish_text(const char* const text) {
@@ -105,11 +102,8 @@ void process_realtime(const Message& message) {
         return;
     }
 
-    const bool hard_reset = (message.length == 1 &&
-                             static_cast<std::uint8_t>(message.text[0]) == 0x18U) ||
-                            equals_ignore_case(message.text, message.length, "18") ||
-                            equals_ignore_case(message.text, message.length, "0x18") ||
-                            equals_ignore_case(message.text, message.length, "%18");
+    const bool hard_reset = message.length == 1 &&
+                            static_cast<std::uint8_t>(message.text[0]) == 0x18U;
     const bool accepted = hard_reset ? service::service_request_hard_reset()
                           : message.length == 1 && message.text[0] == '!'
                               ? service::service_request_feed_hold()

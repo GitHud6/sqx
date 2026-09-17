@@ -15,6 +15,7 @@
 #include "network_command_adapter.hpp"
 #include "planner.hpp"
 #include "runtime_affinity.hpp"
+#include "sd_file_service.hpp"
 #include "sdcard_driver.hpp"
 #include "sd_job_service.hpp"
 #include "stepper_driver.hpp"
@@ -253,7 +254,8 @@ void service_task(void*) {
                     if (ray2::sd::sd_job_is_active()) {
                         ESP_LOGI(kLogTag, "sd card removed: input-ended, draining motion");
                         ray2::sd::sd_job_request_input_end();
-                    } else if (ray2::driver::sdcard_is_mounted()) {
+                    } else if (ray2::driver::sdcard_is_mounted() &&
+                               !ray2::sd::file_service_is_busy()) {
                         ray2::driver::sdcard_stop();
                     }
                 } else if (!ray2::driver::sdcard_is_mounted()) {

@@ -161,6 +161,27 @@ bool is_wifi_begin_path(const char* line, const std::size_t length) {
     return starts_with_ignore_case(line, length, "$WIFI/BEGIN");
 }
 
+bool is_work_command_path(const char* line, const std::size_t length) {
+    static constexpr char kWorkPath[] = "$WORK";
+    return starts_with_ignore_case(line, length, kWorkPath) &&
+           (length == sizeof(kWorkPath) - 1 || line[sizeof(kWorkPath) - 1] == '/');
+}
+
+bool execute_work_command(const char* const line, const std::size_t length) {
+    if (equals_ignore_case(line, length, "$WORK") ||
+        equals_ignore_case(line, length, "$WORK/MODE")) {
+        return write_text("[MSG:work/mode=1]\r\nok\r\n");
+    }
+
+    // This machine currently has only the planar XY configuration. Mode 1
+    // is deliberately a no-op, so the App may send it during connection
+    // setup even after a Ctrl-X without changing motion configuration.
+    if (equals_ignore_case(line, length, "$WORK/MODE=1")) {
+        return write_text("[MSG:Switch to carving mode]\r\n[MSG:ok]\r\nok\r\n");
+    }
+    return write_text("error:work-mode-unsupported\r\n");
+}
+
 bool parse_wifi_setting_command(const char* line, const std::size_t length,
                                 WifiSettingCommand& command) {
     return parse_wifi_setting_path(line, length, "$STA/SSID", WifiSettingCommandType::StaSsid,
@@ -796,6 +817,9 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
     }
     if (is_wifi_begin_path(line, length)) {
         return write_text("error:wifi-invalid-command\r\n");
+    }
+    if (is_work_command_path(line, length)) {
+        return execute_work_command(line, length);
     }
     ray2::sd::SystemCommand sd_command = {};
     if (ray2::sd::parse_system_command(line, length, sd_command)) {

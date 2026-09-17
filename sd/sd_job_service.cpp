@@ -12,6 +12,7 @@
 #include "planner.hpp"
 #include "plain_file_reader.hpp"
 #include "gzip_file_reader.hpp"
+#include "sd_file_service.hpp"
 #include "sdcard_driver.hpp"
 #include "stepper_driver.hpp"
 #include "service.hpp"
@@ -30,6 +31,7 @@ std::atomic<command::Error> s_job_command_error = command::Error::Ok;
 std::atomic<std::uint32_t> s_job_current_line = 0;
 std::atomic<bool> s_abort_requested = false;
 std::atomic<bool> s_input_end_requested = false;
+std::atomic<bool> s_job_file_access_claimed = false;
 char s_job_path[kJobPathCapacity] = {};
 
 // The gzip dictionary is 32 KiB. Keep reader storage outside the 4 KiB job
@@ -96,6 +98,9 @@ void finish_job(JobState state,
     } else if (state == JobState::Faulted) {
         ray2::service::service_input_faulted(ray2::service::InputSource::SdCard,
                                               ray2::service::FaultReason::General);
+    }
+    if (s_job_file_access_claimed.exchange(false, std::memory_order_acq_rel)) {
+        ray2::sd::file_service_release_job_access();
     }
     s_job_task = nullptr;
     vTaskDelete(nullptr);
@@ -214,9 +219,15 @@ esp_err_t sd_job_start(const char* path) {
     if (sd_job_is_active()) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (!ray2::sd::file_service_acquire_job_access()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_job_file_access_claimed.store(true, std::memory_order_release);
 
     char normalized_path[kJobPathCapacity] = {};
     if (!copy_path(normalized_path, path)) {
+        s_job_file_access_claimed.store(false, std::memory_order_release);
+        ray2::sd::file_service_release_job_access();
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -231,12 +242,16 @@ esp_err_t sd_job_start(const char* path) {
     s_input_end_requested.store(false, std::memory_order_release);
 
     if (!ray2::service::service_input_started(ray2::service::InputSource::SdCard)) {
+        s_job_file_access_claimed.store(false, std::memory_order_release);
+        ray2::sd::file_service_release_job_access();
         return ESP_ERR_INVALID_STATE;
     }
 
     if (xTaskCreatePinnedToCore(sd_job_task, "sd_job", 4096, nullptr, 5, &s_job_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
         s_job_state.store(JobState::Faulted);
+        s_job_file_access_claimed.store(false, std::memory_order_release);
+        ray2::sd::file_service_release_job_access();
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

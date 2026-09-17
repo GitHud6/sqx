@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,12 +31,15 @@ constexpr std::size_t kMaximumOutboundMessageBytes = 1600;
 constexpr std::size_t kOutboundQueueLength = 32;
 constexpr std::size_t kStatusMessageCapacity = 256;
 constexpr std::size_t kNormalMessagesPerStatus = 4;
+constexpr std::uint8_t kMaximumSendRetries = 4;
+constexpr TickType_t kSendRetryDelay = pdMS_TO_TICKS(20);
 constexpr int kBroadcastTarget = -1;
 
 struct OutboundMessage {
     int target_fd = kBroadcastTarget;
     httpd_ws_type_t type = HTTPD_WS_TYPE_BINARY;
     std::size_t length = 0;
+    std::uint8_t retry_count = 0;
     std::uint8_t data[kMaximumOutboundMessageBytes] = {};
 };
 
@@ -99,6 +103,7 @@ void send_message_work(void* const user_data) {
     auto* const message = static_cast<OutboundMessage*>(user_data);
     if (message == nullptr) return;
 
+    bool retry_target_message = false;
     if (s_server != nullptr) {
         prune_disconnected_clients();
         httpd_ws_frame_t frame = {};
@@ -106,22 +111,42 @@ void send_message_work(void* const user_data) {
         frame.payload = message->data;
         frame.len = message->length;
         if (message->target_fd >= 0) {
-            if (httpd_ws_get_fd_info(s_server, message->target_fd) == HTTPD_WS_CLIENT_WEBSOCKET &&
-                httpd_ws_send_frame_async(s_server, message->target_fd, &frame) != ESP_OK) {
-                ESP_LOGW(kLogTag, "send failed fd=%d", message->target_fd);
-                remove_client(message->target_fd);
+            if (httpd_ws_get_fd_info(s_server, message->target_fd) == HTTPD_WS_CLIENT_WEBSOCKET) {
+                errno = 0;
+                if (httpd_ws_send_frame_async(s_server, message->target_fd, &frame) != ESP_OK) {
+                    if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+                        message->retry_count < kMaximumSendRetries) {
+                        retry_target_message = true;
+                    } else {
+                        ESP_LOGW(kLogTag, "send failed fd=%d errno=%d", message->target_fd, errno);
+                        remove_client(message->target_fd);
+                    }
+                }
             }
         } else {
             for (const int client_fd : s_client_fds) {
                 if (client_fd < 0) continue;
+                errno = 0;
                 if (httpd_ws_send_frame_async(s_server, client_fd, &frame) != ESP_OK) {
-                    ESP_LOGW(kLogTag, "send failed fd=%d", client_fd);
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Broadcast traffic has no per-client replay state. A slow
+                        // client loses this one notification but remains connected.
+                        continue;
+                    }
+                    ESP_LOGW(kLogTag, "send failed fd=%d errno=%d", client_fd, errno);
                     remove_client(client_fd);
                 }
             }
         }
     }
 
+    if (retry_target_message && s_ready_messages != nullptr) {
+        ++message->retry_count;
+        if (xQueueSendToFront(s_ready_messages, &message, 0) == pdTRUE) {
+            if (s_tx_task != nullptr) xTaskNotifyGive(s_tx_task);
+            return;
+        }
+    }
     if (s_free_messages != nullptr) (void)xQueueSend(s_free_messages, &message, 0);
     if (s_tx_task != nullptr) xTaskNotifyGive(s_tx_task);
 }
@@ -137,6 +162,7 @@ bool queue_message(const int target_fd, const httpd_ws_type_t type, const std::u
     message->target_fd = target_fd;
     message->type = type;
     message->length = length;
+    message->retry_count = 0;
     std::memcpy(message->data, data, length);
     if (xQueueSend(s_ready_messages, &message, 0) != pdTRUE) {
         (void)xQueueSend(s_free_messages, &message, 0);
@@ -186,6 +212,7 @@ void websocket_tx_task(void*) {
             for (std::size_t index = 0; index < kNormalMessagesPerStatus; ++index) {
                 OutboundMessage* message = nullptr;
                 if (xQueueReceive(s_ready_messages, &message, 0) != pdTRUE) break;
+                if (message->retry_count != 0) vTaskDelay(kSendRetryDelay);
                 if (!queue_work(message)) {
                     (void)xQueueSendToFront(s_ready_messages, &message, 0);
                     vTaskDelay(1);
