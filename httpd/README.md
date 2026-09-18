@@ -5,7 +5,10 @@
 
 ## 当前接口
 
-- `GET /` 返回空的兼容响应。
+- `GET /` 返回小型 HTML 入口页；入口页随后按顺序加载 `/app.css` 与 `/app.js`，避免一次
+  HTTP 响应承载完整门户页面。
+- `GET /app.css` 与 `GET /app.js` 返回内嵌的 gzip 静态资源。两者不依赖 SD 卡、FFat 或
+  外部文件系统。
 - `GET /command?commandText=<url-encoded-command>` 或
   `GET /command?plain=<url-encoded-command>` 接受单条或多条换行分隔命令，返回原始
   Grbl 风格响应。

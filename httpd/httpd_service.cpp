@@ -1,7 +1,8 @@
 #include "httpd_service.hpp"
-#include "webui_page_gzip.hpp"
+#include "webui_assets_gzip.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -33,10 +34,11 @@ constexpr std::size_t kMaximumUploadBytes = 16U * 1024U * 1024U;
 // fragile. The response expands only when the actual directory requires it.
 constexpr std::size_t kUploadListingInitialCapacity = 1024;
 constexpr std::size_t kUploadListingMaximumCapacity = 16U * 1024U;
+
 // App upload metadata consists of path, size and file headers. Keep this
 // bounded so an HTTP handler cannot exhaust the server task's 8 KiB stack.
 constexpr std::size_t kMultipartHeaderCapacity = 2048;
-constexpr std::size_t kMaximumHttpUriHandlers = 12;
+constexpr std::size_t kMaximumHttpUriHandlers = 14;
 
 httpd_handle_t s_server = nullptr;
 
@@ -65,7 +67,13 @@ esp_err_t send_gzip(httpd_req_t* const request, const std::uint8_t* const body,
     if (result != ESP_OK) return result;
     result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     if (result != ESP_OK) return result;
-    return httpd_resp_send(request, reinterpret_cast<const char*>(body), body_size);
+    errno = 0;
+    result = httpd_resp_send(request, reinterpret_cast<const char*>(body), body_size);
+    if (result != ESP_OK) {
+        ESP_LOGW(kLogTag, "gzip send failed fd=%d bytes=%u result=%s errno=%d", httpd_req_to_sockfd(request),
+                 static_cast<unsigned>(body_size), esp_err_to_name(result), errno);
+    }
+    return result;
 }
 
 esp_err_t send_empty_accepted(httpd_req_t* const request) {
@@ -125,12 +133,21 @@ esp_err_t send_file_error(httpd_req_t* const request, const sd::FileResult resul
 
 esp_err_t root_get_handler(httpd_req_t* const request) {
     const esp_err_t result =
-        send_gzip(request, kWebUiPageGzip, kWebUiPageGzipSize, "text/html; charset=utf-8");
+        send_gzip(request, kWebUiIndexGzip, kWebUiIndexGzipSize, "text/html; charset=utf-8");
     if (result != ESP_OK) {
         ESP_LOGW(kLogTag, "root page send failed fd=%d result=%s", httpd_req_to_sockfd(request),
                  esp_err_to_name(result));
     }
     return result;
+}
+
+esp_err_t style_get_handler(httpd_req_t* const request) {
+    return send_gzip(request, kWebUiStyleGzip, kWebUiStyleGzipSize, "text/css; charset=utf-8");
+}
+
+esp_err_t script_get_handler(httpd_req_t* const request) {
+    return send_gzip(request, kWebUiScriptGzip, kWebUiScriptGzipSize,
+                     "application/javascript; charset=utf-8");
 }
 
 int hex_value(const char value) {
@@ -818,6 +835,20 @@ const httpd_uri_t kUploadGetUri = {
     .user_ctx = nullptr,
 };
 
+const httpd_uri_t kStyleUri = {
+    .uri = "/app.css",
+    .method = HTTP_GET,
+    .handler = style_get_handler,
+    .user_ctx = nullptr,
+};
+
+const httpd_uri_t kScriptUri = {
+    .uri = "/app.js",
+    .method = HTTP_GET,
+    .handler = script_get_handler,
+    .user_ctx = nullptr,
+};
+
 const httpd_uri_t kStorageListUri = {
     .uri = "/api/v1/storage/list",
     .method = HTTP_GET,
@@ -868,13 +899,11 @@ esp_err_t httpd_service_start() {
     // 8849. HTTP still needs sufficient room for the App's concurrent setup
     // requests on port 8848.
     config.max_open_sockets = kMaximumHttpSessions;
-    // The first-party portal is served only to an interactive local client.
-    // Allow a transient Wi-Fi backlog to drain instead of truncating the
-    // embedded page after the short default send timeout.
+    // Keep the backlog finite so an abandoned local peer cannot monopolise HTTPD.
     config.backlog_conn = kMaximumHttpSessions;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 30;
+    config.send_wait_timeout = 10;
 
     httpd_handle_t server = nullptr;
     esp_err_t result = ::httpd_start(&server, &config);
@@ -883,6 +912,8 @@ esp_err_t httpd_service_start() {
         return result;
     }
     result = httpd_register_uri_handler(server, &kRootUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStyleUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kScriptUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kCommandUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kFilesUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kFilesDeleteUri);
@@ -901,7 +932,7 @@ esp_err_t httpd_service_start() {
     }
 
     s_server = server;
-    ESP_LOGI(kLogTag, "started port=%u routes=/,/command,/files,/upload,/api/v1/storage",
+    ESP_LOGI(kLogTag, "started port=%u routes=/,/app.css,/app.js,/command,/files,/upload,/api/v1/storage",
              static_cast<unsigned>(config.server_port));
     return ESP_OK;
 }
