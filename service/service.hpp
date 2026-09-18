@@ -73,6 +73,12 @@ bool service_input_ended(InputSource source);
 bool service_input_aborted(InputSource source);
 bool service_input_faulted(InputSource source, FaultReason reason = FaultReason::General);
 
+// Normal command gate shared by every protocol adapter. Once an input producer
+// claims a job, only that producer may submit G-code; all system/configuration
+// commands are blocked until the job drains or is aborted. Realtime bytes use
+// their dedicated ingress paths and intentionally bypass this gate.
+bool service_normal_input_allowed(InputSource source, bool motion_line);
+
 // Called from the UART realtime ingress task. It immediately disables laser
 // output and stops pulse generation, then queues the remaining reset cleanup
 // for the service task. It never runs in a hardware ISR.

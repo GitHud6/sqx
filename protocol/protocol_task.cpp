@@ -41,7 +41,7 @@ bool protocol_handle_ready_line(LineAssembler& assembler) {
         // planner_reset() wakes the capacity waiter.
         bool capacity_blocked = false;
         const bool dispatched = command_dispatch(
-            assembler.line(), assembler.length(), capacity_blocked);
+            assembler.line(), assembler.length(), capacity_blocked, service::InputSource::Uart);
         if (!capacity_blocked) {
             assembler.reset_line();
             return dispatched;

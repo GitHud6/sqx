@@ -748,13 +748,21 @@ bool command_report_realtime_status() {
                                                response_length);
 }
 
-bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_blocked) {
+bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_blocked,
+                           const service::InputSource source) {
     capacity_blocked = false;
+    if (line == nullptr || length == 0) {
+        return false;
+    }
     if (s_parser_mutex == nullptr) {
         s_parser_mutex = xSemaphoreCreateMutex();
         if (s_parser_mutex == nullptr) {
             return write_text("error:protocol-no-mem\r\n");
         }
+    }
+    const bool motion_line = line[0] != '$' && line[0] != '[';
+    if (!service::service_normal_input_allowed(source, motion_line)) {
+        return write_text("error:input-locked\r\n");
     }
 
     if (equals_ignore_case(line, length, "$I")) {
@@ -892,14 +900,16 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
     return report_status(result);
 }
 
-bool command_dispatch(const char* const line, const std::size_t length, bool& capacity_blocked) {
-    return command_dispatch_impl(line, length, capacity_blocked);
+bool command_dispatch(const char* const line, const std::size_t length, bool& capacity_blocked,
+                      const service::InputSource source) {
+    return command_dispatch_impl(line, length, capacity_blocked, source);
 }
 
 bool command_dispatch_with_response(const char* const line, const std::size_t length,
                                     bool& capacity_blocked,
                                     const CommandResponseWriter response_writer,
-                                    void* const response_user_data) {
+                                    void* const response_user_data,
+                                    const service::InputSource source) {
     capacity_blocked = false;
     if (line == nullptr || response_writer == nullptr) return false;
     if (command_dispatch_start() != ESP_OK) return false;
@@ -909,7 +919,7 @@ bool command_dispatch_with_response(const char* const line, const std::size_t le
     s_response_target = {xTaskGetCurrentTaskHandle(), response_writer, response_user_data};
     portEXIT_CRITICAL(&s_response_target_lock);
 
-    const bool result = command_dispatch_impl(line, length, capacity_blocked);
+    const bool result = command_dispatch_impl(line, length, capacity_blocked, source);
 
     portENTER_CRITICAL(&s_response_target_lock);
     s_response_target = {};
@@ -918,7 +928,15 @@ bool command_dispatch_with_response(const char* const line, const std::size_t le
     return result;
 }
 
-command::Error command_dispatch_external(const char* line, std::size_t length) {
+command::Error command_dispatch_external(const char* line, std::size_t length,
+                                         const service::InputSource source) {
+    if (line == nullptr || length == 0) {
+        return command::Error::MotionRejected;
+    }
+    const bool motion_line = line[0] != '$' && line[0] != '[';
+    if (!service::service_normal_input_allowed(source, motion_line)) {
+        return command::Error::MotionRejected;
+    }
     if (s_parser_mutex == nullptr) {
         s_parser_mutex = xSemaphoreCreateMutex();
         if (s_parser_mutex == nullptr) {

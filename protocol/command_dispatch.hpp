@@ -6,6 +6,7 @@
 #include "esp_err.h"
 
 #include "command_executor.hpp"
+#include "service.hpp"
 
 namespace ray2::protocol {
 
@@ -16,7 +17,8 @@ esp_err_t command_dispatch_start();
 // Returns false only when the UART response could not be written. When
 // capacity_blocked is set, the caller must retain and retry the same line
 // after planner capacity becomes available; no response was emitted.
-bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked);
+bool command_dispatch(const char* line, std::size_t length, bool& capacity_blocked,
+                      service::InputSource source = service::InputSource::Uart);
 
 // Sends the normal command response to a caller-owned sink instead of UART.
 // The command still executes through the protocol-owned parser and service
@@ -25,7 +27,8 @@ using CommandResponseWriter = bool (*)(const std::uint8_t* data, std::size_t len
                                        void* user_data);
 bool command_dispatch_with_response(const char* line, std::size_t length,
                                     bool& capacity_blocked, CommandResponseWriter response_writer,
-                                    void* response_user_data);
+                                    void* response_user_data,
+                                    service::InputSource source = service::InputSource::WebSocket);
 
 // Emits one standard Grbl-style realtime status line without an `ok` response.
 bool command_report_realtime_status();
@@ -40,7 +43,8 @@ bool command_format_build_info(char* response, std::size_t capacity,
                                std::size_t& response_length);
 
 // Executes a G-code line with the protocol-owned ParserState without emitting a UART response.
-command::Error command_dispatch_external(const char* line, std::size_t length);
+command::Error command_dispatch_external(const char* line, std::size_t length,
+                                         service::InputSource source = service::InputSource::SdCard);
 
 // Synchronizes the protocol-owned ParserState after a system motion establishes
 // a known machine coordinate. The protocol owns the mutex protecting this state.

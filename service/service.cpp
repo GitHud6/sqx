@@ -43,6 +43,13 @@ QueueHandle_t s_event_queue = nullptr;
 std::atomic<State> s_state = State::Idle;
 std::atomic<FaultReason> s_fault_reason = FaultReason::None;
 std::atomic<bool> s_input_ended = false;
+std::atomic<InputSource> s_input_source = InputSource::Unknown;
+
+bool active_state(const State state) {
+    return state == State::Starting || state == State::Running ||
+           state == State::HoldRequested || state == State::Held ||
+           state == State::Resuming;
+}
 
 bool event_allowed(const State state, const EventType type) {
     switch (type) {
@@ -107,6 +114,7 @@ void apply_hard_reset() {
     ray2::protocol::command_reset_after_hard_reset();
     ray2::laser::laser_set_motion_output_permitted(false);
     s_input_ended.store(false, std::memory_order_release);
+    s_input_source.store(InputSource::Unknown, std::memory_order_release);
     s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
     s_state.store(State::Aborted, std::memory_order_release);
     ESP_LOGW(kLogTag, "hard reset completed");
@@ -120,6 +128,7 @@ void apply_safety_abort(const FaultReason reason) {
     ray2::laser::laser_set_motion_output_permitted(false);
     ray2::stepper::stepper_invalidate_position(position_reason_for_safety_fault(reason));
     s_input_ended.store(false, std::memory_order_release);
+    s_input_source.store(InputSource::Unknown, std::memory_order_release);
     s_fault_reason.store(reason, std::memory_order_release);
     s_state.store(State::Faulted, std::memory_order_release);
     ESP_LOGE(kLogTag, "safety abort completed: reason=%s", service_fault_reason_text(reason));
@@ -149,6 +158,7 @@ void apply_event(const ServiceEvent& event) {
     }
 
     if (event.type == EventType::InputStarted) {
+        s_input_source.store(event.source, std::memory_order_release);
         s_fault_reason.store(FaultReason::None, std::memory_order_release);
         s_input_ended.store(false, std::memory_order_release);
         s_state.store(State::Starting, std::memory_order_release);
@@ -166,11 +176,13 @@ void apply_event(const ServiceEvent& event) {
     }
     if (event.type == EventType::InputAborted) {
         s_input_ended.store(false, std::memory_order_release);
+        s_input_source.store(InputSource::Unknown, std::memory_order_release);
         s_state.store(State::Aborted, std::memory_order_release);
         return;
     }
     if (event.type == EventType::InputFaulted) {
         s_input_ended.store(false, std::memory_order_release);
+        s_input_source.store(InputSource::Unknown, std::memory_order_release);
         s_fault_reason.store(event.reason == FaultReason::None ? FaultReason::General
                                                                  : event.reason,
                              std::memory_order_release);
@@ -196,9 +208,16 @@ void apply_event(const ServiceEvent& event) {
         case EventType::HoldReached: s_state.store(State::Held); break;
         case EventType::ResumeRequested: s_state.store(State::Resuming); break;
         case EventType::ResumeConfirmed: s_state.store(State::Running); break;
-        case EventType::Completed: s_state.store(State::Completed); break;
-        case EventType::Aborted: s_state.store(State::Aborted); break;
+        case EventType::Completed:
+            s_input_source.store(InputSource::Unknown, std::memory_order_release);
+            s_state.store(State::Completed);
+            break;
+        case EventType::Aborted:
+            s_input_source.store(InputSource::Unknown, std::memory_order_release);
+            s_state.store(State::Aborted);
+            break;
         case EventType::Faulted:
+            s_input_source.store(InputSource::Unknown, std::memory_order_release);
             s_fault_reason.store(event.reason == FaultReason::None ? FaultReason::General
                                                                      : event.reason,
                                  std::memory_order_release);
@@ -207,6 +226,7 @@ void apply_event(const ServiceEvent& event) {
         case EventType::ResetToIdle:
             s_fault_reason.store(FaultReason::None, std::memory_order_release);
             s_input_ended.store(false, std::memory_order_release);
+            s_input_source.store(InputSource::Unknown, std::memory_order_release);
             s_state.store(State::Idle);
             break;
         case EventType::HardResetRequested:
@@ -237,6 +257,7 @@ void complete_ended_input_when_drained() {
         if (s_state.compare_exchange_weak(expected, State::Completed,
                                           std::memory_order_acq_rel,
                                           std::memory_order_acquire)) {
+            s_input_source.store(InputSource::Unknown, std::memory_order_release);
             return;
         }
     }
@@ -309,6 +330,7 @@ esp_err_t service_start() {
     s_state.store(State::Idle, std::memory_order_release);
     s_fault_reason.store(FaultReason::None, std::memory_order_release);
     s_input_ended.store(false, std::memory_order_release);
+    s_input_source.store(InputSource::Unknown, std::memory_order_release);
     s_event_queue = xQueueCreate(kEventQueueLength, sizeof(ServiceEvent));
     if (s_event_queue == nullptr) return ESP_ERR_NO_MEM;
 
@@ -349,23 +371,51 @@ bool post_input_event(const EventType type, const InputSource source, const Faul
 }  // namespace
 
 bool service_input_started(const InputSource source) {
-    return post_input_event(EventType::InputStarted, source, FaultReason::None);
+    if (source == InputSource::Unknown || s_event_queue == nullptr || s_task == nullptr) return false;
+    const State state = s_state.load(std::memory_order_acquire);
+    if (active_state(state)) return false;
+    InputSource expected = InputSource::Unknown;
+    if (!s_input_source.compare_exchange_strong(expected, source,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+        return false;
+    }
+    if (!post_input_event(EventType::InputStarted, source, FaultReason::None)) {
+        s_input_source.store(InputSource::Unknown, std::memory_order_release);
+        return false;
+    }
+    return true;
 }
 
 bool service_input_data_available(const InputSource source) {
+    if (s_input_source.load(std::memory_order_acquire) != source) return false;
     return post_input_event(EventType::InputDataAvailable, source, FaultReason::None);
 }
 
 bool service_input_ended(const InputSource source) {
+    if (s_input_source.load(std::memory_order_acquire) != source) return false;
     return post_input_event(EventType::InputEnded, source, FaultReason::None);
 }
 
 bool service_input_aborted(const InputSource source) {
+    if (s_input_source.load(std::memory_order_acquire) != source) return false;
     return post_input_event(EventType::InputAborted, source, FaultReason::None);
 }
 
 bool service_input_faulted(const InputSource source, const FaultReason reason) {
+    if (s_input_source.load(std::memory_order_acquire) != source) return false;
     return post_input_event(EventType::InputFaulted, source, reason);
+}
+
+bool service_normal_input_allowed(const InputSource source, const bool motion_line) {
+    if (source == InputSource::Unknown) return false;
+    const InputSource owner = s_input_source.load(std::memory_order_acquire);
+    if (owner == InputSource::Unknown) return true;
+
+    // `service_input_started()` claims the owner before its queued lifecycle
+    // event is consumed, so this also closes the Idle-to-Starting race.
+    if (!motion_line) return false;
+    return source == owner;
 }
 
 bool service_request_hard_reset() {

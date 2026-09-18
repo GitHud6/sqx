@@ -169,7 +169,8 @@ void sd_job_task(void*) {
                     break;
                 }
                 const command::Error result =
-                    ray2::protocol::command_dispatch_external(line, std::strlen(line));
+                    ray2::protocol::command_dispatch_external(
+                        line, std::strlen(line), ray2::service::InputSource::SdCard);
                 if (result == command::Error::Ok) {
                     break;
                 }

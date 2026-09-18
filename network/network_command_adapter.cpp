@@ -118,7 +118,8 @@ bool process_line(const Message& message) {
         bool capacity_blocked = false;
         s_response_collector.length = 0;
         if (!protocol::command_dispatch_with_response(message.text, message.length, capacity_blocked,
-                                                      response_writer, &s_response_collector)) {
+                                                      response_writer, &s_response_collector,
+                                                      service::InputSource::WebSocket)) {
             publish_text("error:network-dispatch-failed\r\n");
             return false;
         }
