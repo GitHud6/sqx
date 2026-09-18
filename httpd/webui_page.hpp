@@ -168,13 +168,33 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         progressPollTimer = window.setInterval(() => sendCommand('?', false), 500);
       }
 
+      function beginJobProgressMonitoring() {
+        sdJobActive = true;
+        jobProgress.value = 0;
+        jobProgressText.textContent = 'starting · 0.0% · 第 0 行';
+        updateEngraveButtons();
+      }
+
       function updateJobProgress(state, tenths, line) {
         const active = state === 'starting' || state === 'running' || state === 'draining';
         sdJobActive = active;
         jobProgress.value = Math.max(0, Math.min(1000, tenths));
         jobProgressText.textContent = `${state} · ${(tenths / 10).toFixed(1)}% · 第 ${line} 行`;
-        if (active) startProgressPolling(); else stopProgressPolling();
         updateEngraveButtons();
+      }
+
+      function updateJobProgressFromStatus(message) {
+        // `SD` is a regular realtime field. Do not require it to remain the
+        // final field, so future status additions cannot silently disable the
+        // local portal progress display.
+        const field = message.match(/(?:^|\|)SD:([^|\r\n>]+)/);
+        if (!field) return;
+        const values = field[1].split(',');
+        if (values.length !== 3) return;
+        const percent = Number.parseFloat(values[1]);
+        const line = Number.parseInt(values[2], 10);
+        if (!Number.isFinite(percent) || !Number.isFinite(line)) return;
+        updateJobProgress(values[0], Math.round(percent * 10), line);
       }
 
       function setHomeReady(ready, message) {
@@ -228,11 +248,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       }
 
       function handleMachineMessage(message) {
-        const progressMatch = message.match(/\|SD:([a-z-]+),(\d+)\.(\d),(\d+)>/);
-        if (progressMatch) {
-          updateJobProgress(progressMatch[1], Number(progressMatch[2]) * 10 + Number(progressMatch[3]),
-                            Number(progressMatch[4]));
-        }
+        updateJobProgressFromStatus(message);
         if (message.includes('[POS:')) {
           if (message.includes('state=known')) {
             homingRequested = false;
@@ -346,7 +362,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
           setFileNotice('WebSocket 未连接，无法开始雕刻。', true);
           return;
         }
-        updateJobProgress('starting', 0, 0);
+        beginJobProgressMonitoring();
         setFileNotice(`已请求开始雕刻：${path}`);
       }
 
@@ -383,7 +399,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
           setHomeReady(false, '正在读取位置状态；未知位置时必须先回零。');
           append('[WebSocket connected]');
           requestPositionStatus();
-          sendCommand('?', false);
+          startProgressPolling();
         };
         socket.onmessage = (event) => {
           const message = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
