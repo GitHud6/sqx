@@ -45,6 +45,9 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     .job-progress { margin: 12px 0 4px; }
     .job-progress-head { display: flex; justify-content: space-between; gap: 12px; color: #9cacbd; font-size: .9rem; }
     .job-progress progress { width: 100%; height: 12px; margin-top: 6px; accent-color: #48b58a; }
+    .job-progress-actions { display: flex; gap: 6px; }
+    .job-progress-actions button { min-width: 32px; padding: 4px 8px; }
+    .job-progress-actions .reset { border-color: #8d4e58; background: #6c2833; }
     .upload { align-items: center; flex-wrap: wrap; }
     .upload input[type=file] { min-width: 220px; }
     .api { display: grid; grid-template-columns: max-content 1fr; gap: 8px 14px; margin: 0; }
@@ -90,8 +93,16 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     </div>
     <form id="upload-form" class="upload">
       <div class="job-progress" aria-live="polite">
-        <div class="job-progress-head"><span>SD 作业进度（文件供料）</span><span id="job-progress-text">空闲</span></div>
+        <div class="job-progress-head">
+          <span>SD 作业进度（文件供料）</span>
+          <span class="job-progress-actions">
+            <button id="job-hold" type="button" title="暂停雕刻" disabled>暂停</button>
+            <button id="job-resume" type="button" title="继续雕刻" disabled>继续</button>
+            <button id="job-reset" class="reset" type="button" title="终止作业并复位" disabled>复位</button>
+          </span>
+        </div>
         <progress id="job-progress" max="1000" value="0">0%</progress>
+        <div id="job-progress-text" class="notice">空闲</div>
       </div>
       <input id="upload-file" type="file" required aria-label="选择要上传的文件">
       <button id="upload" type="submit">上传到根目录</button>
@@ -127,6 +138,9 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       const homeNotice = document.getElementById('home-notice');
       const jobProgress = document.getElementById('job-progress');
       const jobProgressText = document.getElementById('job-progress-text');
+      const jobHoldButton = document.getElementById('job-hold');
+      const jobResumeButton = document.getElementById('job-resume');
+      const jobResetButton = document.getElementById('job-reset');
       let socket;
       let homeReady = false;
       let homingRequested = false;
@@ -134,6 +148,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       let homePollTimer = 0;
       let progressPollTimer = 0;
       let sdJobActive = false;
+      let realtimeMotionState = 'Idle';
 
       function append(message) {
         output.textContent += `${output.textContent ? '\n' : ''}${message}`;
@@ -155,6 +170,14 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       function updateEngraveButtons() {
         const available = homeReady && !sdJobActive && socket && socket.readyState === WebSocket.OPEN;
         document.querySelectorAll('[data-engrave]').forEach((button) => { button.disabled = !available; });
+        updateJobControls();
+      }
+
+      function updateJobControls() {
+        const connected = socket && socket.readyState === WebSocket.OPEN;
+        jobHoldButton.disabled = !connected || !sdJobActive || realtimeMotionState !== 'Run';
+        jobResumeButton.disabled = !connected || !sdJobActive || realtimeMotionState !== 'Hold';
+        jobResetButton.disabled = !connected || !sdJobActive;
       }
 
       function stopProgressPolling() {
@@ -195,6 +218,13 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         const line = Number.parseInt(values[2], 10);
         if (!Number.isFinite(percent) || !Number.isFinite(line)) return;
         updateJobProgress(values[0], Math.round(percent * 10), line);
+      }
+
+      function updateRealtimeMotionState(message) {
+        const status = message.match(/^<([^|>]+)/);
+        if (!status) return;
+        realtimeMotionState = status[1];
+        updateJobControls();
       }
 
       function setHomeReady(ready, message) {
@@ -248,6 +278,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       }
 
       function handleMachineMessage(message) {
+        updateRealtimeMotionState(message);
         updateJobProgressFromStatus(message);
         if (message.includes('[POS:')) {
           if (message.includes('state=known')) {
@@ -366,6 +397,24 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         setFileNotice(`已请求开始雕刻：${path}`);
       }
 
+      function holdEngraving() {
+        if (!sendCommand('!')) return;
+        jobHoldButton.disabled = true;
+      }
+
+      function resumeEngraving() {
+        if (!sendCommand('~')) return;
+        jobResumeButton.disabled = true;
+      }
+
+      function resetEngraving() {
+        if (!window.confirm('确认终止当前作业并复位？当前位置将失效，需要重新回零。')) return;
+        if (!sendCommand(String.fromCharCode(0x18))) return;
+        jobHoldButton.disabled = true;
+        jobResumeButton.disabled = true;
+        jobResetButton.disabled = true;
+      }
+
       uploadForm.addEventListener('submit', async (event) => {
         event.preventDefault();
         const file = uploadFile.files[0];
@@ -427,6 +476,9 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       });
 
       homeButton.addEventListener('click', startHoming);
+      jobHoldButton.addEventListener('click', holdEngraving);
+      jobResumeButton.addEventListener('click', resumeEngraving);
+      jobResetButton.addEventListener('click', resetEngraving);
 
       connect();
       refreshFiles();
