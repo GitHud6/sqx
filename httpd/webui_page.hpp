@@ -50,6 +50,9 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     .job-progress-actions .reset { border-color: #8d4e58; background: #6c2833; }
     .upload { align-items: center; flex-wrap: wrap; }
     .upload input[type=file] { min-width: 220px; }
+    .upload-progress { flex: 1 0 100%; margin: 2px 0 4px; }
+    .upload-progress[hidden] { display: none; }
+    .upload-progress progress { width: 100%; height: 12px; margin-top: 6px; accent-color: #5b9ee1; }
     .wifi-form { display: grid; grid-template-columns: minmax(110px, .35fr) 1fr; gap: 10px; align-items: center; }
     .wifi-form label { color: #9cacbd; font-size: .9rem; }
     .wifi-form select { padding: 10px; border: 1px solid #445468; border-radius: 6px; background: #0b1017; color: inherit; }
@@ -133,6 +136,10 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       </div>
       <input id="upload-file" type="file" required aria-label="选择要上传的文件">
       <button id="upload" type="submit">上传到根目录</button>
+      <div id="upload-progress-panel" class="upload-progress" hidden aria-live="polite">
+        <progress id="upload-progress" max="1000" value="0">0%</progress>
+        <div id="upload-progress-text" class="notice">等待上传。</div>
+      </div>
     </form>
     <div id="file-notice" class="notice">尚未加载文件列表。</div>
     <ul id="file-list" class="file-list"></ul>
@@ -166,6 +173,9 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       const uploadForm = document.getElementById('upload-form');
       const uploadFile = document.getElementById('upload-file');
       const uploadButton = document.getElementById('upload');
+      const uploadProgressPanel = document.getElementById('upload-progress-panel');
+      const uploadProgress = document.getElementById('upload-progress');
+      const uploadProgressText = document.getElementById('upload-progress-text');
       const fileNotice = document.getElementById('file-notice');
       const fileList = document.getElementById('file-list');
       const homeButton = document.getElementById('home');
@@ -392,6 +402,39 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         return `${value.toFixed(unit ? 2 : 0)} ${units[unit]}`;
       }
 
+      function setUploadProgress(loaded, total, text, error = false) {
+        const knownTotal = Number.isFinite(total) && total > 0;
+        const safeLoaded = Math.max(0, Number.isFinite(loaded) ? loaded : 0);
+        uploadProgressPanel.hidden = false;
+        uploadProgress.value = knownTotal ? Math.min(1000, Math.round(safeLoaded * 1000 / total)) : 0;
+        uploadProgressText.textContent = text || (knownTotal
+          ? `正在发送 ${formatSize(safeLoaded)} / ${formatSize(total)}（${(safeLoaded * 100 / total).toFixed(1)}%）。`
+          : `正在发送 ${formatSize(safeLoaded)}。`);
+        uploadProgressText.className = `notice${error ? ' error' : ''}`;
+      }
+
+      function uploadFileToDevice(file, targetPath) {
+        return new Promise((resolve, reject) => {
+          const request = new XMLHttpRequest();
+          request.open('PUT', `/api/v1/storage/file?path=${encodeURIComponent(targetPath)}`);
+          request.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+          request.upload.addEventListener('progress', (event) => {
+            setUploadProgress(event.loaded, event.lengthComputable ? event.total : file.size);
+          });
+          request.addEventListener('load', () => {
+            if (request.status >= 200 && request.status < 300) {
+              setUploadProgress(file.size, file.size, `设备已确认写入 ${formatSize(file.size)}。`);
+              resolve();
+              return;
+            }
+            reject(new Error(request.responseText || `${request.status} ${request.statusText}`));
+          });
+          request.addEventListener('error', () => reject(new Error('网络连接中断。')));
+          request.addEventListener('abort', () => reject(new Error('上传已取消。')));
+          request.send(file);
+        });
+      }
+
       async function responseError(response) {
         const text = await response.text();
         throw new Error(text || `${response.status} ${response.statusText}`);
@@ -502,22 +545,26 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         event.preventDefault();
         const file = uploadFile.files[0];
         if (!file) return;
+        if (file.size === 0) {
+          setFileNotice('不能上传空文件。', true);
+          return;
+        }
         const targetPath = `/${file.name}`;
         uploadButton.disabled = true;
+        uploadFile.disabled = true;
+        setUploadProgress(0, file.size);
         setFileNotice(`正在上传 ${file.name}…`);
         try {
-          const response = await fetch(`/api/v1/storage/file?path=${encodeURIComponent(targetPath)}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': file.type || 'application/octet-stream' },
-            body: file,
-          });
-          if (!response.ok) await responseError(response);
+          await uploadFileToDevice(file, targetPath);
           uploadFile.value = '';
           await refreshFiles();
+          setFileNotice(`上传完成：${file.name}（${formatSize(file.size)}）。`);
         } catch (error) {
+          setUploadProgress(0, file.size, `上传失败：${error.message}`, true);
           setFileNotice(`上传失败：${error.message}`, true);
         } finally {
           uploadButton.disabled = false;
+          uploadFile.disabled = false;
         }
       });
 
