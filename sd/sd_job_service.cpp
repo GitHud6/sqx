@@ -95,9 +95,7 @@ void finish_job(JobState state,
         s_job_progress_tenths_percent.store(1000);
     }
     s_job_state.store(state);
-    if (state == JobState::Completed) {
-        ray2::service::service_post_event(ray2::service::EventType::Completed);
-    } else if (fault == JobFault::Aborted) {
+    if (fault == JobFault::Aborted) {
         ray2::service::service_input_aborted(ray2::service::InputSource::SdCard);
     } else if (state == JobState::Faulted) {
         ray2::service::service_input_faulted(ray2::service::InputSource::SdCard,
@@ -211,7 +209,7 @@ void sd_job_task(void*) {
     ray2::service::service_input_ended(ray2::service::InputSource::SdCard);
     s_job_state.store(JobState::Draining);
     log_position("draining");
-    while (ray2::planner::planner_free_blocks() != ray2::planner::kPlannerQueueLength) {
+    while (!ray2::planner::planner_execution_is_drained()) {
         if (s_abort_requested.load(std::memory_order_acquire)) {
             finish_job(JobState::Faulted, JobFault::Aborted);
             return;

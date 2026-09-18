@@ -42,6 +42,7 @@ TaskHandle_t s_task = nullptr;
 QueueHandle_t s_event_queue = nullptr;
 std::atomic<State> s_state = State::Idle;
 std::atomic<FaultReason> s_fault_reason = FaultReason::None;
+std::atomic<bool> s_input_ended = false;
 
 bool event_allowed(const State state, const EventType type) {
     switch (type) {
@@ -105,6 +106,7 @@ void apply_hard_reset() {
     ray2::planner::planner_reset();
     ray2::protocol::command_reset_after_hard_reset();
     ray2::laser::laser_set_motion_output_permitted(false);
+    s_input_ended.store(false, std::memory_order_release);
     s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
     s_state.store(State::Aborted, std::memory_order_release);
     ESP_LOGW(kLogTag, "hard reset completed");
@@ -117,6 +119,7 @@ void apply_safety_abort(const FaultReason reason) {
     ray2::protocol::command_reset_after_hard_reset();
     ray2::laser::laser_set_motion_output_permitted(false);
     ray2::stepper::stepper_invalidate_position(position_reason_for_safety_fault(reason));
+    s_input_ended.store(false, std::memory_order_release);
     s_fault_reason.store(reason, std::memory_order_release);
     s_state.store(State::Faulted, std::memory_order_release);
     ESP_LOGE(kLogTag, "safety abort completed: reason=%s", service_fault_reason_text(reason));
@@ -147,6 +150,7 @@ void apply_event(const ServiceEvent& event) {
 
     if (event.type == EventType::InputStarted) {
         s_fault_reason.store(FaultReason::None, std::memory_order_release);
+        s_input_ended.store(false, std::memory_order_release);
         s_state.store(State::Starting, std::memory_order_release);
         return;
     }
@@ -155,16 +159,18 @@ void apply_event(const ServiceEvent& event) {
         return;
     }
     if (event.type == EventType::InputEnded) {
-        // InputEnded means that no more commands will arrive. Already
-        // submitted planner/segment work is intentionally left intact; the
-        // producer will publish Completed after the normal drain.
+        // InputEnded only closes the source. Completion remains service-owned
+        // and occurs after all frozen planner and executor work has drained.
+        s_input_ended.store(true, std::memory_order_release);
         return;
     }
     if (event.type == EventType::InputAborted) {
+        s_input_ended.store(false, std::memory_order_release);
         s_state.store(State::Aborted, std::memory_order_release);
         return;
     }
     if (event.type == EventType::InputFaulted) {
+        s_input_ended.store(false, std::memory_order_release);
         s_fault_reason.store(event.reason == FaultReason::None ? FaultReason::General
                                                                  : event.reason,
                              std::memory_order_release);
@@ -200,6 +206,7 @@ void apply_event(const ServiceEvent& event) {
             break;
         case EventType::ResetToIdle:
             s_fault_reason.store(FaultReason::None, std::memory_order_release);
+            s_input_ended.store(false, std::memory_order_release);
             s_state.store(State::Idle);
             break;
         case EventType::HardResetRequested:
@@ -219,6 +226,22 @@ void apply_event(const ServiceEvent& event) {
     }
 }
 
+void complete_ended_input_when_drained() {
+    if (!s_input_ended.load(std::memory_order_acquire) ||
+        !ray2::planner::planner_execution_is_drained()) {
+        return;
+    }
+
+    State expected = s_state.load(std::memory_order_acquire);
+    while (expected == State::Starting || expected == State::Running || expected == State::Resuming) {
+        if (s_state.compare_exchange_weak(expected, State::Completed,
+                                          std::memory_order_acq_rel,
+                                          std::memory_order_acquire)) {
+            return;
+        }
+    }
+}
+
 void service_task(void*) {
     ServiceEvent event = {};
     bool presence_initialized = false;
@@ -231,6 +254,7 @@ void service_task(void*) {
         if (xQueueReceive(s_event_queue, &event, kStoragePollTicks) == pdTRUE) {
             apply_event(event);
         }
+        complete_ended_input_when_drained();
 
         // Card detection is deliberately outside the pulse ISR. A removal
         // request only stops the SD feeder; it never resets planner motion.
@@ -284,6 +308,7 @@ esp_err_t service_start() {
 
     s_state.store(State::Idle, std::memory_order_release);
     s_fault_reason.store(FaultReason::None, std::memory_order_release);
+    s_input_ended.store(false, std::memory_order_release);
     s_event_queue = xQueueCreate(kEventQueueLength, sizeof(ServiceEvent));
     if (s_event_queue == nullptr) return ESP_ERR_NO_MEM;
 
@@ -398,7 +423,10 @@ bool service_request_safety_abort(const FaultReason reason) {
 }
 
 bool service_request_feed_hold() {
-    if (ray2::planner::planner_is_idle()) return false;
+    if (s_event_queue == nullptr || s_task == nullptr ||
+        ray2::planner::planner_execution_is_drained()) {
+        return false;
+    }
     State state = s_state.load(std::memory_order_acquire);
     const State previous_state = state;
     while (true) {

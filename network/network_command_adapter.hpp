@@ -18,8 +18,9 @@ enum class SubmitResult {
 esp_err_t network_command_adapter_start();
 bool network_command_adapter_is_started();
 
-// Submits decoded command text. command_text requests create one input
-// lifecycle batch; plain requests are restricted to one ordinary line.
+// Submits decoded command text. Multi-line G-code command_text requests create
+// one input lifecycle batch; standalone `$` requests remain control commands.
+// Plain requests are restricted to one ordinary line.
 SubmitResult network_command_adapter_submit(const char* text, std::size_t length,
                                             bool command_text);
 

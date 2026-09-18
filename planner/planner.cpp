@@ -987,6 +987,14 @@ bool planner_is_idle() {
     return queue_is_empty && !has_active_block;
 }
 
+bool planner_execution_is_drained() {
+    if (!planner_is_idle()) return false;
+    return !stepper::timer_stepper_executor_is_busy() &&
+           !stepper::timer_stepper_executor_is_held() &&
+           !stepper::segment_producer_has_pending_segments() &&
+           !stepper::stepper_prep_has_active_context();
+}
+
 std::size_t planner_free_blocks() {
     if (s_planner_task == nullptr) {
         return 0;

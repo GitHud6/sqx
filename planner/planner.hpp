@@ -93,6 +93,10 @@ SubmitResult planner_submit_dwell(std::uint32_t milliseconds);
 void planner_set_execution_callback(ExecutionCallback callback, void* user_data);
 void planner_reset();
 bool planner_is_idle();
+// Returns true only after the planner queue, preparation contexts, segment
+// ring, and timer executor have all drained. A boundary-held executor is not
+// drained because its preserved work remains resumable.
+bool planner_execution_is_drained();
 std::size_t planner_free_blocks();
 void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();

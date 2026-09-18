@@ -139,11 +139,8 @@ void finish_batch(const std::uint32_t generation) {
     (void)service::service_input_ended(service::InputSource::WebSocket);
 
     while (generation == s_generation.load(std::memory_order_acquire) &&
-           planner::planner_free_blocks() != planner::kPlannerQueueLength) {
+           !planner::planner_execution_is_drained()) {
         vTaskDelay(pdMS_TO_TICKS(2));
-    }
-    if (generation == s_generation.load(std::memory_order_acquire)) {
-        (void)service::service_post_event(service::EventType::Completed);
     }
 }
 
@@ -323,25 +320,32 @@ SubmitResult network_command_adapter_submit(const char* const text, const std::s
         process_realtime(realtime);
         return SubmitResult::Accepted;
     }
-    const std::size_t required_slots = line_count + (command_text ? 2U : 0U);
+    // A standalone `$` command is a control request, not an input producer.
+    // In particular, `$SD/RUN` starts its own SdCard lifecycle and must not
+    // inherit a short-lived WebSocket lifecycle that would end immediately.
+    const bool system_command = line_count == 1 && single_trimmed_line(text, length, single_line,
+                                                                         single_line_length) &&
+                                single_line[0] == '$';
+    const bool lifecycle_batch = command_text && !system_command;
+    const std::size_t required_slots = line_count + (lifecycle_batch ? 2U : 0U);
     if (required_slots > kIngressQueueLength) return SubmitResult::Invalid;
-    if (command_text && s_batch_reserved.exchange(true, std::memory_order_acq_rel)) {
+    if (lifecycle_batch && s_batch_reserved.exchange(true, std::memory_order_acq_rel)) {
         return SubmitResult::Busy;
     }
     if (xSemaphoreTake(s_submit_mutex, 0) != pdTRUE) {
-        if (command_text) s_batch_reserved.store(false, std::memory_order_release);
+        if (lifecycle_batch) s_batch_reserved.store(false, std::memory_order_release);
         return SubmitResult::Busy;
     }
     if (uxQueueSpacesAvailable(s_ingress_queue) < required_slots) {
         xSemaphoreGive(s_submit_mutex);
-        if (command_text) s_batch_reserved.store(false, std::memory_order_release);
+        if (lifecycle_batch) s_batch_reserved.store(false, std::memory_order_release);
         return SubmitResult::Busy;
     }
 
     const std::uint32_t generation = s_generation.load(std::memory_order_acquire);
-    bool queued = !command_text || enqueue_message(MessageType::BatchStart, nullptr, 0, generation);
+    bool queued = !lifecycle_batch || enqueue_message(MessageType::BatchStart, nullptr, 0, generation);
     if (queued) queued = enqueue_lines(text, length, generation);
-    if (queued && command_text) queued = enqueue_message(MessageType::BatchEnd, nullptr, 0, generation);
+    if (queued && lifecycle_batch) queued = enqueue_message(MessageType::BatchEnd, nullptr, 0, generation);
     xSemaphoreGive(s_submit_mutex);
 
     if (!queued) {
