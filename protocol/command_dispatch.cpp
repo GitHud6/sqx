@@ -208,10 +208,8 @@ bool report_wifi_setting(const WifiSettingCommandType type) {
                                    settings.ssid);
             break;
         case WifiSettingCommandType::StaPassword:
-            length = std::snprintf(response, sizeof(response),
-                                   "[STA:PASSWORD=set=%u|length=%u]\r\nok\r\n",
-                                   settings.password[0] == '\0' ? 0U : 1U,
-                                   static_cast<unsigned>(std::strlen(settings.password)));
+            length = std::snprintf(response, sizeof(response), "[STA:PASSWORD=%s]\r\nok\r\n",
+                                   settings.password);
             break;
         case WifiSettingCommandType::RadioMode:
             length = std::snprintf(response, sizeof(response), "[RADIO:MODE=%s]\r\nok\r\n",

@@ -39,7 +39,7 @@ Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 
 本阶段兼容 `ray2-main` 的三个持久化设置路径，命令和值均不区分大小写：
 
 - `$STA/SSID` 查询已保存 SSID；`$STA/SSID=<ssid>` 校验可打印 ASCII 字符和长度后保存 SSID。
-- `$STA/PASSWORD` 仅返回是否已设置及长度；`$STA/PASSWORD=<password>` 校验可打印 ASCII 字符和长度后保存密码，绝不回显密码明文。
+- `$STA/PASSWORD` 查询和设置保存的明文密码。该本地开源门户没有凭据保密目标；`$STA/PASSWORD=<password>` 校验可打印 ASCII 字符和长度后保存密码。
 - `$RADIO/MODE` 查询目标模式；`$RADIO/MODE=AP|STA|AP_STA` 保存目标模式。
 - `$WIFI/BEGIN` 不接受参数。它先停止当前 Wi-Fi，再读取 NVS 并按已保存模式重启无线模块。
 

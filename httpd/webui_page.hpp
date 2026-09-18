@@ -50,6 +50,10 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
     .job-progress-actions .reset { border-color: #8d4e58; background: #6c2833; }
     .upload { align-items: center; flex-wrap: wrap; }
     .upload input[type=file] { min-width: 220px; }
+    .wifi-form { display: grid; grid-template-columns: minmax(110px, .35fr) 1fr; gap: 10px; align-items: center; }
+    .wifi-form label { color: #9cacbd; font-size: .9rem; }
+    .wifi-form select { padding: 10px; border: 1px solid #445468; border-radius: 6px; background: #0b1017; color: inherit; }
+    .wifi-form .wifi-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: end; }
     .api { display: grid; grid-template-columns: max-content 1fr; gap: 8px 14px; margin: 0; }
     .api dt { color: #8ea6bd; }
     .api dd { margin: 0; }
@@ -84,6 +88,29 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
   <section>
     <h2>设备消息</h2>
     <pre id="messages" aria-live="polite">正在连接设备…</pre>
+  </section>
+
+  <section>
+    <div class="toolbar">
+      <h2>无线网络</h2>
+      <button id="wifi-read" type="button" disabled>读取配置</button>
+    </div>
+    <form id="wifi-form" class="wifi-form">
+      <label for="wifi-ssid">STA SSID</label>
+      <input id="wifi-ssid" type="text" autocomplete="off" spellcheck="false" aria-label="STA SSID">
+      <label for="wifi-password">STA 密码</label>
+      <input id="wifi-password" type="text" autocomplete="off" spellcheck="false" aria-label="STA 密码">
+      <label for="wifi-mode">连接策略</label>
+      <select id="wifi-mode" aria-label="无线连接策略">
+        <option value="AP">AP</option>
+        <option value="STA">STA</option>
+        <option value="AP_STA">AP_STA</option>
+      </select>
+      <div class="wifi-actions">
+        <button id="wifi-apply" type="submit" disabled>保存并切换网络</button>
+      </div>
+    </form>
+    <div id="wifi-notice" class="notice">读取后可修改保存的无线配置。</div>
   </section>
 
   <section>
@@ -128,6 +155,13 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       const form = document.getElementById('command-form');
       const input = document.getElementById('command');
       const submit = document.getElementById('send');
+      const wifiForm = document.getElementById('wifi-form');
+      const wifiReadButton = document.getElementById('wifi-read');
+      const wifiApplyButton = document.getElementById('wifi-apply');
+      const wifiSsid = document.getElementById('wifi-ssid');
+      const wifiPassword = document.getElementById('wifi-password');
+      const wifiMode = document.getElementById('wifi-mode');
+      const wifiNotice = document.getElementById('wifi-notice');
       const refreshFilesButton = document.getElementById('refresh-files');
       const uploadForm = document.getElementById('upload-form');
       const uploadFile = document.getElementById('upload-file');
@@ -149,6 +183,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       let progressPollTimer = 0;
       let sdJobActive = false;
       let realtimeMotionState = 'Idle';
+      let wifiRestartExpected = false;
 
       function append(message) {
         output.textContent += `${output.textContent ? '\n' : ''}${message}`;
@@ -159,6 +194,8 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         status.className = `badge ${online ? 'online' : 'offline'}`;
         status.textContent = online ? 'WebSocket 已连接' : 'WebSocket 未连接';
         submit.disabled = !online;
+        wifiReadButton.disabled = !online;
+        wifiApplyButton.disabled = !online;
         updateHomeButton();
         updateEngraveButtons();
       }
@@ -244,6 +281,46 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         homeNotice.classList.add('error');
       }
 
+      function setWifiNotice(message, error = false) {
+        wifiNotice.textContent = message;
+        wifiNotice.className = `notice${error ? ' error' : ''}`;
+      }
+
+      function requestWifiSettings() {
+        if (!sendCommand('$STA/SSID')) return;
+        sendCommand('$STA/PASSWORD');
+        sendCommand('$RADIO/MODE');
+        setWifiNotice('正在读取保存的无线配置。');
+      }
+
+      function wifiFieldIsValid(value, allowEmpty = false) {
+        return (allowEmpty || value.length !== 0) && /^[\x20-\x7e]*$/.test(value);
+      }
+
+      function applyWifiSettings() {
+        const ssid = wifiSsid.value;
+        const password = wifiPassword.value;
+        const mode = wifiMode.value;
+        if (!wifiFieldIsValid(ssid) || ssid.length > 32 || !wifiFieldIsValid(password, true) ||
+            password.length > 64) {
+          setWifiNotice('SSID 需为 1-32 字符，密码需为 0-64 字符，且只能使用可打印 ASCII 字符。', true);
+          return;
+        }
+        if (!window.confirm(`确认保存 ${mode} 配置并重启无线网络？\n\n当前页面和 WebSocket 会立即断开。\n请切换到设备重启后的网络，再用新的设备 IP 或设备 AP 地址重新打开本页。`)) {
+          return;
+        }
+        if (!sendCommand(`$STA/SSID=${ssid}`) || !sendCommand(`$STA/PASSWORD=${password}`) ||
+            !sendCommand(`$RADIO/MODE=${mode}`)) {
+          setWifiNotice('WebSocket 已断开，未能保存无线配置。', true);
+          return;
+        }
+        wifiRestartExpected = true;
+        wifiApplyButton.disabled = true;
+        wifiReadButton.disabled = true;
+        setWifiNotice('配置已保存，正在重启无线网络。页面即将断开；请按提示重新连接。');
+        sendCommand('$WIFI/BEGIN');
+      }
+
       function sendCommand(command, show = true) {
         if (!socket || socket.readyState !== WebSocket.OPEN) return false;
         socket.send(command);
@@ -280,6 +357,12 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
       function handleMachineMessage(message) {
         updateRealtimeMotionState(message);
         updateJobProgressFromStatus(message);
+        const ssid = message.match(/\[STA:SSID=([^\]]*)\]/);
+        if (ssid) wifiSsid.value = ssid[1];
+        const password = message.match(/\[STA:PASSWORD=([^\]]*)\]/);
+        if (password) wifiPassword.value = password[1];
+        const mode = message.match(/\[RADIO:MODE=(AP_STA|STA|AP)\]/);
+        if (mode) wifiMode.value = mode[1];
         if (message.includes('[POS:')) {
           if (message.includes('state=known')) {
             homingRequested = false;
@@ -438,6 +521,12 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
         }
       });
 
+      wifiReadButton.addEventListener('click', requestWifiSettings);
+      wifiForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        applyWifiSettings();
+      });
+
       function connect() {
         const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
         socket = new WebSocket(`${scheme}://${location.hostname}:8849/`);
@@ -449,6 +538,7 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
           append('[WebSocket connected]');
           requestPositionStatus();
           startProgressPolling();
+          requestWifiSettings();
         };
         socket.onmessage = (event) => {
           const message = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
@@ -463,6 +553,11 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
           sdJobActive = false;
           setHomeReady(false, '连接中断；重连后会重新读取位置状态。');
           setConnection(false);
+          if (wifiRestartExpected) {
+            setWifiNotice('无线网络正在切换。请连接目标网络后，以设备新的 IP 或 AP 地址重新打开本页。');
+            append('[Wi-Fi restarting; reconnect manually]');
+            return;
+          }
           append('[WebSocket disconnected; retrying]');
           window.setTimeout(connect, 2000);
         };
