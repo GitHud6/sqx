@@ -868,13 +868,13 @@ esp_err_t httpd_service_start() {
     // 8849. HTTP still needs sufficient room for the App's concurrent setup
     // requests on port 8848.
     config.max_open_sockets = kMaximumHttpSessions;
-    // Reject stalled peers quickly. The static page fits in one TCP send
-    // window after gzip compression, so a healthy local request needs no long
-    // send timeout.
+    // The first-party portal is served only to an interactive local client.
+    // Allow a transient Wi-Fi backlog to drain instead of truncating the
+    // embedded page after the short default send timeout.
     config.backlog_conn = kMaximumHttpSessions;
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
-    config.send_wait_timeout = 2;
+    config.send_wait_timeout = 30;
 
     httpd_handle_t server = nullptr;
     esp_err_t result = ::httpd_start(&server, &config);
