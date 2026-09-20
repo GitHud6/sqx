@@ -31,6 +31,8 @@ esp_netif_t* s_ap_netif = nullptr;
 esp_netif_t* s_sta_netif = nullptr;
 esp_event_handler_instance_t s_wifi_handler = nullptr;
 esp_event_handler_instance_t s_ip_handler = nullptr;
+std::atomic<LinkEventCallback> s_link_event_callback = nullptr;
+std::atomic<void*> s_link_event_user_data = nullptr;
 char s_ap_ssid[kSsidCapacity] = {};
 
 bool mode_requests_sta(const RadioMode mode) {
@@ -159,6 +161,20 @@ void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, vo
         s_sta_has_ip.store(true, std::memory_order_release);
         s_state.store(State::StaConnected, std::memory_order_release);
         ESP_LOGI(kLogTag, "STA connected");
+        const LinkEventCallback callback = s_link_event_callback.load(std::memory_order_acquire);
+        if (callback != nullptr) {
+            callback(LinkEvent::StaGotIp, s_link_event_user_data.load(std::memory_order_acquire));
+        }
+        return;
+    }
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_LOST_IP) {
+        s_sta_has_ip.store(false, std::memory_order_release);
+        s_state.store(State::StaConnecting, std::memory_order_release);
+        ESP_LOGW(kLogTag, "STA lost IP");
+        const LinkEventCallback callback = s_link_event_callback.load(std::memory_order_acquire);
+        if (callback != nullptr) {
+            callback(LinkEvent::StaDisconnected, s_link_event_user_data.load(std::memory_order_acquire));
+        }
         return;
     }
     if (event_base != WIFI_EVENT) return;
@@ -180,6 +196,13 @@ void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, vo
             s_sta_has_ip.store(false, std::memory_order_release);
             s_state.store(State::StaConnecting, std::memory_order_release);
             ESP_LOGW(kLogTag, "STA disconnected");
+            {
+                const LinkEventCallback callback = s_link_event_callback.load(std::memory_order_acquire);
+                if (callback != nullptr) {
+                    callback(LinkEvent::StaDisconnected,
+                             s_link_event_user_data.load(std::memory_order_acquire));
+                }
+            }
             break;
         default:
             break;
@@ -245,7 +268,7 @@ esp_err_t wifi_start() {
         }
     }
     if (s_ip_handler == nullptr) {
-        result = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+        result = esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID,
                                                      &wifi_event_handler, nullptr, &s_ip_handler);
         if (result != ESP_OK) {
             s_state.store(State::Error, std::memory_order_release);
@@ -305,6 +328,24 @@ esp_err_t wifi_restart() {
     const esp_err_t stop_result = wifi_stop();
     if (stop_result != ESP_OK) return stop_result;
     return wifi_start();
+}
+
+esp_err_t wifi_request_sta_connect() {
+    if (!s_started.load(std::memory_order_acquire)) return ESP_ERR_INVALID_STATE;
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (esp_wifi_get_mode(&mode) != ESP_OK || !esp_mode_has_sta(mode)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    wifi_config_t config = {};
+    if (esp_wifi_get_config(WIFI_IF_STA, &config) != ESP_OK || config.sta.ssid[0] == '\0') {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return esp_wifi_connect();
+}
+
+void wifi_set_link_event_callback(const LinkEventCallback callback, void* const user_data) {
+    s_link_event_user_data.store(user_data, std::memory_order_release);
+    s_link_event_callback.store(callback, std::memory_order_release);
 }
 
 bool wifi_is_started() {

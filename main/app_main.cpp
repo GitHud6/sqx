@@ -6,16 +6,15 @@
 #include "limit_switch_driver.hpp"
 #include "lis2dh12_driver.hpp"
 #include "network_command_adapter.hpp"
+#include "network_lifecycle.hpp"
 #include "accelerometer.hpp"
 #include "homing_service.hpp"
-#include "httpd_service.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
 #include "service.hpp"
 #include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
-#include "websocket_service.hpp"
 #include "wifi_service.hpp"
 
 extern "C" void app_main(void) {
@@ -54,14 +53,9 @@ extern "C" void app_main(void) {
         if (wifi_result != ESP_OK) {
             ESP_LOGW(tag, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_result));
         } else {
-            const esp_err_t httpd_result = ray2::httpd::httpd_service_start();
-            if (httpd_result != ESP_OK) {
-                ESP_LOGW(tag, "HTTP unavailable: %s", esp_err_to_name(httpd_result));
-            } else {
-                const esp_err_t websocket_result = ray2::websocket::websocket_service_start();
-                if (websocket_result != ESP_OK) {
-                    ESP_LOGW(tag, "WebSocket unavailable: %s", esp_err_to_name(websocket_result));
-                }
+            const esp_err_t lifecycle_result = ray2::network::network_lifecycle_start();
+            if (lifecycle_result != ESP_OK) {
+                ESP_LOGW(tag, "Network lifecycle unavailable: %s", esp_err_to_name(lifecycle_result));
             }
         }
     }
