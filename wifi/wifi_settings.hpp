@@ -24,7 +24,7 @@ struct WifiSettings {
     RadioMode radio_mode = RadioMode::Ap;
 };
 
-// Creates the `ray2_wifi` NVS namespace defaults on first use. The namespace
+// Creates the `laserctl_wifi` NVS namespace defaults on first use. The namespace
 // contains `sta_ssid`, `sta_password`, and `radio_mode`.
 esp_err_t wifi_settings_init();
 esp_err_t wifi_settings_load(WifiSettings& settings);

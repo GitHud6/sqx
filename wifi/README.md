@@ -6,7 +6,8 @@
 
 - 使用 ESP-IDF 5.5.1 的 `esp_netif`、`esp_event` 和 `esp_wifi`。
 - `app_main` 会在 Wi-Fi 前初始化默认 NVS 分区；只有 NVS 空页耗尽或版本不兼容时才擦除并重建。
-- 使用 NVS 命名空间 `ray2_wifi` 保存三类配网数据：`sta_ssid`、`sta_password` 和 `radio_mode`。
+- 使用 NVS 命名空间 `laserctl_wifi` 保存三类配网数据：`sta_ssid`、`sta_password` 和
+  `radio_mode`。旧命名空间不会迁移；升级后必须重新配置 STA 凭证。
 - `radio_mode` 表示用户保存的 STA 连接策略（`AP` / `STA` / `AP_STA`），不记录瞬时连接结果；实际 AP/STA 链路状态由 `wifi_service` 在运行时维护。
 - 物理无线模式固定为 `WIFI_MODE_APSTA`。SoftAP 始终启动，SSID 为 `LongerLaser_XXXX`，后缀取 AP MAC 的最后两个字节。
 - 当 `radio_mode=AP` 时不调用 STA 连接；当 `radio_mode=STA` 或 `AP_STA` 时，使用 NVS 中的 SSID/密码发起 STA 连接。

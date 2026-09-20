@@ -7,7 +7,7 @@
 namespace ray2::wifi {
 namespace {
 
-constexpr char kNvsNamespace[] = "ray2_wifi";
+constexpr char kNvsNamespace[] = "laserctl_wifi";
 constexpr char kNvsKeyStaSsid[] = "sta_ssid";
 constexpr char kNvsKeyStaPassword[] = "sta_password";
 constexpr char kNvsKeyRadioMode[] = "radio_mode";
