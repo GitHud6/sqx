@@ -3,7 +3,7 @@
 #include <cctype>
 #include <cstring>
 
-namespace ray2::sd {
+namespace laserctl::sd {
 namespace {
 
 bool equals_ignore_case(const char* left, const char* right, std::size_t length) {
@@ -88,4 +88,4 @@ bool parse_system_command(const char* line, std::size_t length, SystemCommand& c
     return true;
 }
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

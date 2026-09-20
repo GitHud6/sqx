@@ -19,7 +19,7 @@
 #include "service.hpp"
 #include "websocket_service.hpp"
 
-namespace ray2::network {
+namespace laserctl::network {
 namespace {
 
 constexpr char kLogTag[] = "network";
@@ -364,4 +364,4 @@ void network_command_adapter_abort_pending() {
     if (s_ingress_queue != nullptr) xQueueReset(s_ingress_queue);
 }
 
-}  // namespace ray2::network
+}  // namespace laserctl::network

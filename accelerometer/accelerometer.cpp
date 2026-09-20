@@ -13,7 +13,7 @@
 #include "runtime_affinity.hpp"
 #include "service.hpp"
 
-namespace ray2::accelerometer {
+namespace laserctl::accelerometer {
 namespace {
 
 constexpr char kLogTag[] = "accelerometer";
@@ -30,13 +30,13 @@ std::atomic<bool> s_initialized = false;
 
 void sample_task(void*) {
     TickType_t next_wake = xTaskGetTickCount();
-    ray2::driver::Lis2dh12RawSample latest = {};
+    laserctl::driver::Lis2dh12RawSample latest = {};
 
     while (true) {
         std::uint32_t abnormal_samples = 0;
-        if (!ray2::planner::planner_is_idle()) {
+        if (!laserctl::planner::planner_is_idle()) {
             for (std::uint32_t index = 0; index < kConfirmSamples; ++index) {
-                if (!ray2::driver::lis2dh12_read_raw(latest)) break;
+                if (!laserctl::driver::lis2dh12_read_raw(latest)) break;
 
                 const bool abnormal = std::abs(static_cast<int>(latest.raw_x)) > kAxisThreshold ||
                                       std::abs(static_cast<int>(latest.raw_y)) > kAxisThreshold;
@@ -47,8 +47,8 @@ void sample_task(void*) {
         }
 
         if (abnormal_samples == kConfirmSamples) {
-            ray2::service::service_request_safety_abort(
-                ray2::service::FaultReason::MotionAlarm);
+            laserctl::service::service_request_safety_abort(
+                laserctl::service::FaultReason::MotionAlarm);
             ESP_LOGE(kLogTag, "motion alarm: XY acceleration threshold exceeded");
         }
         vTaskDelayUntil(&next_wake, kCheckPeriod);
@@ -59,7 +59,7 @@ void sample_task(void*) {
 
 esp_err_t init() {
     if (s_initialized.load(std::memory_order_acquire)) return ESP_OK;
-    if (!ray2::driver::lis2dh12_is_initialized()) return ESP_ERR_INVALID_STATE;
+    if (!laserctl::driver::lis2dh12_is_initialized()) return ESP_ERR_INVALID_STATE;
 
     if (xTaskCreatePinnedToCore(sample_task, "accelerometer", 3072, nullptr, 3, &s_task,
                                 runtime::kNonRealtimeCore) != pdPASS) {
@@ -75,4 +75,4 @@ bool is_initialized() {
     return s_initialized.load(std::memory_order_acquire);
 }
 
-}  // namespace ray2::accelerometer
+}  // namespace laserctl::accelerometer

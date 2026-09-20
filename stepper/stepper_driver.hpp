@@ -6,9 +6,9 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 enum class Direction : bool {
     Negative = false,
@@ -57,4 +57,4 @@ void stepper_record_executed_steps_from_isr(machine::Axis axis, std::int32_t ste
 void stepper_invalidate_position(
     PositionInvalidationReason reason = PositionInvalidationReason::ExecutionFailure);
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

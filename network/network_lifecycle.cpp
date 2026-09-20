@@ -13,7 +13,7 @@
 #include "websocket_service.hpp"
 #include "wifi_service.hpp"
 
-namespace ray2::network {
+namespace laserctl::network {
 namespace {
 
 constexpr char kLogTag[] = "network_lifecycle";
@@ -177,4 +177,4 @@ esp_err_t network_lifecycle_request_wifi_restart() {
     return ESP_OK;
 }
 
-}  // namespace ray2::network
+}  // namespace laserctl::network

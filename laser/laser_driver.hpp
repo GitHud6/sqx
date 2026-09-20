@@ -5,7 +5,7 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 
-namespace ray2::laser {
+namespace laserctl::laser {
 
 // Initializes the PWM peripheral in its safe, disabled state without enabling laser output.
 esp_err_t laser_init();
@@ -20,4 +20,4 @@ void laser_set_motion_output_permitted(bool permitted);
 bool laser_is_output_enabled();
 std::uint32_t laser_current_duty();
 
-}  // namespace ray2::laser
+}  // namespace laserctl::laser

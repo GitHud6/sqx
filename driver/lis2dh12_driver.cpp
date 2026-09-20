@@ -6,7 +6,7 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 namespace {
 
 constexpr char kLogTag[] = "lis2dh12";
@@ -149,4 +149,4 @@ bool lis2dh12_is_initialized() {
     return s_initialized;
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

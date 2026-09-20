@@ -10,9 +10,9 @@
 #include "soc/gpio_struct.h"
 #include "soc/ledc_struct.h"
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 
-namespace ray2::laser {
+namespace laserctl::laser {
 namespace {
 
 constexpr ledc_mode_t kLedcMode = LEDC_LOW_SPEED_MODE;
@@ -26,11 +26,11 @@ std::atomic<std::uint32_t> s_current_duty = 0;
 std::atomic<bool> s_motion_output_permitted = true;
 
 int disabled_enable_level() {
-    return machine::raycube_laser().enable_active_high ? 0 : 1;
+    return machine::machine_laser().enable_active_high ? 0 : 1;
 }
 
 esp_err_t force_disabled_output() {
-    const auto& laser = machine::raycube_laser();
+    const auto& laser = machine::machine_laser();
     esp_err_t result = gpio_set_level(static_cast<gpio_num_t>(laser.enable_pin), disabled_enable_level());
     if (result != ESP_OK) {
         return result;
@@ -45,12 +45,12 @@ esp_err_t force_disabled_output() {
 }
 
 std::uint32_t duty_for_power(double power) {
-    const auto max_power = static_cast<double>(machine::raycube_laser().max_power);
+    const auto max_power = static_cast<double>(machine::machine_laser().max_power);
     return static_cast<std::uint32_t>(std::lround((power / max_power) * kLedcMaxDuty));
 }
 
 void IRAM_ATTR set_enable_level_from_isr(const int level) {
-    gpio_ll_set_level(&GPIO, machine::raycube_laser().enable_pin, level);
+    gpio_ll_set_level(&GPIO, machine::machine_laser().enable_pin, level);
 }
 
 void IRAM_ATTR set_duty_from_isr(const std::uint32_t duty) {
@@ -67,7 +67,7 @@ esp_err_t laser_init() {
         return ESP_OK;
     }
 
-    const auto& laser = machine::raycube_laser();
+    const auto& laser = machine::machine_laser();
     const auto pwm_pin = static_cast<gpio_num_t>(laser.pwm_pin);
     const auto enable_pin = static_cast<gpio_num_t>(laser.enable_pin);
 
@@ -137,7 +137,7 @@ esp_err_t laser_set_power(double power) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    const auto& laser = machine::raycube_laser();
+    const auto& laser = machine::machine_laser();
     if (!std::isfinite(power) || power < 0.0 || power > laser.max_power) {
         laser_disable();
         return ESP_ERR_INVALID_ARG;
@@ -185,7 +185,7 @@ void laser_apply_segment_power_from_isr(const std::uint16_t power_per_mille,
         return;
     }
     set_duty_from_isr(duty);
-    set_enable_level_from_isr(machine::raycube_laser().enable_active_high ? 1 : 0);
+    set_enable_level_from_isr(machine::machine_laser().enable_active_high ? 1 : 0);
     s_current_duty.store(duty, std::memory_order_relaxed);
     s_output_enabled.store(true, std::memory_order_release);
 }
@@ -215,4 +215,4 @@ std::uint32_t laser_current_duty() {
     return s_current_duty.load();
 }
 
-}  // namespace ray2::laser
+}  // namespace laserctl::laser

@@ -12,10 +12,10 @@
 #include "segment_ring.hpp"
 #include "trapezoid_execution_plan.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 constexpr std::size_t kTrapezoidPrepContextCapacity = 4;
-// Match the classic Grbl acceleration update cadence used by ray2-main.
+// Match the classic Grbl acceleration update cadence used by legacy-upstream.
 constexpr std::uint32_t kStepSegmentTargetDurationUs = 1000;
 constexpr std::uint32_t kStepTimerFrequencyHz = 20000000;
 constexpr std::uint32_t kStepTimerTicksPerMicrosecond = kStepTimerFrequencyHz / 1000000U;
@@ -47,4 +47,4 @@ const StepperProfile& stepper_prep_profile();
 bool stepper_prep_can_accept_block();
 bool stepper_prep_has_active_context();
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

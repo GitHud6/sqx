@@ -11,7 +11,7 @@
 #include "planner.hpp"
 #include "stepper_driver.hpp"
 
-namespace ray2::command {
+namespace laserctl::command {
 
 namespace {
 
@@ -170,7 +170,7 @@ Error parse_m_word(double value, ParsedBlock& parsed) {
         case 8:
         case 9:
             if (parsed.has_coolant_command) return Error::ModalGroupViolation;
-            // ray2-old accepts M8/M9 as Grbl coolant controls. RayCube has no
+            // legacy accepts M8/M9 as Grbl coolant controls. LaserController has no
             // coolant hardware, so accept either command without touching laser state.
             parsed.has_coolant_command = true;
             return Error::Ok;
@@ -765,4 +765,4 @@ const char* error_text(Error error) {
     return "unknown";
 }
 
-}  // namespace ray2::command
+}  // namespace laserctl::command

@@ -9,6 +9,7 @@
 #include "network_lifecycle.hpp"
 #include "accelerometer.hpp"
 #include "homing_service.hpp"
+#include "product_identity.hpp"
 #include "protocol_task.hpp"
 #include "planner.hpp"
 #include "sdcard_driver.hpp"
@@ -18,7 +19,7 @@
 #include "wifi_service.hpp"
 
 extern "C" void app_main(void) {
-    static const char* tag = "ray2-idf";
+    const char* const tag = laserctl::identity::kLogTag;
 
     esp_err_t nvs_result = nvs_flash_init();
     if (nvs_result == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -34,31 +35,31 @@ extern "C" void app_main(void) {
                  esp_err_to_name(nvs_result));
     }
 
-    ESP_ERROR_CHECK(ray2::laser::laser_init());
-    const esp_err_t sd_result = ray2::driver::sdcard_start();
+    ESP_ERROR_CHECK(laserctl::laser::laser_init());
+    const esp_err_t sd_result = laserctl::driver::sdcard_start();
     if (sd_result != ESP_OK) {
         ESP_LOGW(tag, "SD card mount unavailable: %s", esp_err_to_name(sd_result));
     }
-    ESP_ERROR_CHECK(ray2::driver::uart0_start());
-    ESP_ERROR_CHECK(ray2::stepper::timer_stepper_executor_init());
-    ESP_ERROR_CHECK(ray2::driver::limit_switch_driver_init());
-    ESP_ERROR_CHECK(ray2::driver::lis2dh12_init());
-    ESP_ERROR_CHECK(ray2::accelerometer::init());
-    ESP_ERROR_CHECK(ray2::homing::homing_init());
-    ESP_ERROR_CHECK(ray2::planner::planner_start());
-    ESP_ERROR_CHECK(ray2::laser::laser_attach_planner());
-    ESP_ERROR_CHECK(ray2::service::service_start());
+    ESP_ERROR_CHECK(laserctl::driver::uart0_start());
+    ESP_ERROR_CHECK(laserctl::stepper::timer_stepper_executor_init());
+    ESP_ERROR_CHECK(laserctl::driver::limit_switch_driver_init());
+    ESP_ERROR_CHECK(laserctl::driver::lis2dh12_init());
+    ESP_ERROR_CHECK(laserctl::accelerometer::init());
+    ESP_ERROR_CHECK(laserctl::homing::homing_init());
+    ESP_ERROR_CHECK(laserctl::planner::planner_start());
+    ESP_ERROR_CHECK(laserctl::laser::laser_attach_planner());
+    ESP_ERROR_CHECK(laserctl::service::service_start());
     if (nvs_result == ESP_OK) {
-        const esp_err_t wifi_result = ray2::wifi::wifi_start();
+        const esp_err_t wifi_result = laserctl::wifi::wifi_start();
         if (wifi_result != ESP_OK) {
             ESP_LOGW(tag, "Wi-Fi unavailable: %s", esp_err_to_name(wifi_result));
         } else {
-            const esp_err_t lifecycle_result = ray2::network::network_lifecycle_start();
+            const esp_err_t lifecycle_result = laserctl::network::network_lifecycle_start();
             if (lifecycle_result != ESP_OK) {
                 ESP_LOGW(tag, "Network lifecycle unavailable: %s", esp_err_to_name(lifecycle_result));
             }
         }
     }
-    ESP_ERROR_CHECK(ray2::protocol::protocol_start());
-    ESP_ERROR_CHECK(ray2::network::network_command_adapter_start());
+    ESP_ERROR_CHECK(laserctl::protocol::protocol_start());
+    ESP_ERROR_CHECK(laserctl::network::network_command_adapter_start());
 }

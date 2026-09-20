@@ -10,7 +10,7 @@
 
 #include "motion_request.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 constexpr std::size_t kStepSegmentBufferLength = 64;
 constexpr std::size_t kStepCompletionBufferLength = 32;
@@ -100,4 +100,4 @@ bool IRAM_ATTR stepper_completion_publish_from_isr(const SegmentCompletion& comp
 bool stepper_completion_consume(SegmentCompletion& completion);
 SegmentExecutionDiagnostics stepper_segment_diagnostics();
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

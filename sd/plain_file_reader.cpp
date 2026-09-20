@@ -5,7 +5,7 @@
 
 #include "sdcard_driver.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 namespace {
 
 constexpr char kMountPointPrefix[] = "/sd";
@@ -18,7 +18,7 @@ bool valid_path(const char* path) {
 
 bool PlainFileReader::open(const char* path) {
     close();
-    if (!ray2::driver::sdcard_is_mounted() || !valid_path(path)) {
+    if (!laserctl::driver::sdcard_is_mounted() || !valid_path(path)) {
         error_ = true;
         return false;
     }
@@ -131,4 +131,4 @@ void PlainFileReader::close() {
     error_ = false;
 }
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

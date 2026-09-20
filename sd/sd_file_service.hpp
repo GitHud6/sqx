@@ -5,7 +5,7 @@
 
 #include "file_reader.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 
 enum class FileResult : std::uint8_t {
     Ok,
@@ -68,4 +68,4 @@ bool file_service_is_busy();
 
 const char* file_result_text(FileResult result);
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

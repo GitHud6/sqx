@@ -6,10 +6,10 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 #include "segment_ring.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 // Stage two initialization remains passive until the new-driver-compatible
 // one-shot RMT backend is ready. It never emits a STEP pulse.
@@ -28,4 +28,4 @@ void IRAM_ATTR timer_stepper_executor_stop_from_isr();
 // Stops one active system-motion axis. Returns true when no system-motion axis remains.
 bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(std::size_t axis_index);
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

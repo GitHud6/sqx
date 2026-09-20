@@ -6,7 +6,7 @@
 #include "file_reader.hpp"
 #include "miniz.h"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 
 class GzipFileReader final : public FileReader {
 public:
@@ -44,4 +44,4 @@ private:
     bool error_ = false;
 };
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

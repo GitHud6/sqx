@@ -5,7 +5,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 constexpr std::size_t kProtocolTxMessageCapacity = 1600;
 
@@ -20,4 +20,4 @@ bool protocol_tx_publish_realtime_status(const std::uint8_t* data, std::size_t l
 // Drops unsent ordinary replies and status packets after Abort.
 void protocol_tx_abort_flush();
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

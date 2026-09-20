@@ -20,7 +20,7 @@
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
-namespace ray2::planner {
+namespace laserctl::planner {
 namespace {
 
 TaskHandle_t s_planner_task = nullptr;
@@ -1040,4 +1040,4 @@ SubmitResult planner_submit_dwell(const std::uint32_t milliseconds) {
     return submit_block(block);
 }
 
-}  // namespace ray2::planner
+}  // namespace laserctl::planner

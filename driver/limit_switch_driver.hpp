@@ -6,7 +6,7 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 
 using LimitSwitchIsrCallback = void (*)(std::size_t axis, void* user_data);
 
@@ -17,7 +17,7 @@ struct LimitSwitchState {
 
 using LimitSwitchStateCallback = void (*)(const LimitSwitchState& state, void* user_data);
 
-// Owns RayCube X/Y limit GPIO input, ISR wakeup, and debounced state snapshots.
+// Owns LaserController X/Y limit GPIO input, ISR wakeup, and debounced state snapshots.
 esp_err_t limit_switch_driver_init();
 bool limit_switch_driver_is_initialized();
 LimitSwitchState limit_switch_driver_state();
@@ -26,4 +26,4 @@ void limit_switch_driver_set_isr_callback(LimitSwitchIsrCallback callback, void*
 // called from the GPIO ISR and may request task-context safety handling.
 void limit_switch_driver_set_state_callback(LimitSwitchStateCallback callback, void* user_data);
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

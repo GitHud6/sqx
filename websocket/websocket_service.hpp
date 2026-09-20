@@ -5,7 +5,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::websocket {
+namespace laserctl::websocket {
 
 // Starts the dedicated WebSocket listener on TCP port 8849. The listener
 // keeps one active portal client and routes command ingress through network.
@@ -23,4 +23,4 @@ esp_err_t websocket_service_publish_binary(const std::uint8_t* data, std::size_t
 // Replaces an unsent realtime status with the newest status snapshot.
 bool websocket_service_publish_realtime_status(const std::uint8_t* data, std::size_t length);
 
-}  // namespace ray2::websocket
+}  // namespace laserctl::websocket

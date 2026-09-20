@@ -10,7 +10,7 @@
 #include "sdcard_driver.hpp"
 #include "sd_job_service.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 namespace {
 
 std::atomic<bool> s_file_access_claimed = false;
@@ -22,14 +22,14 @@ bool path_segment_is_valid(const char* const begin, const std::size_t length) {
 }
 
 bool acquire_file_access() {
-    if (!ray2::driver::sdcard_is_mounted() || ray2::sd::sd_job_is_active()) return false;
+    if (!laserctl::driver::sdcard_is_mounted() || laserctl::sd::sd_job_is_active()) return false;
 
     bool expected = false;
     if (!s_file_access_claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
                                                         std::memory_order_acquire)) {
         return false;
     }
-    if (!ray2::driver::sdcard_is_mounted() || ray2::sd::sd_job_is_active()) {
+    if (!laserctl::driver::sdcard_is_mounted() || laserctl::sd::sd_job_is_active()) {
         s_file_access_claimed.store(false, std::memory_order_release);
         return false;
     }
@@ -41,7 +41,7 @@ void release_file_access() {
 }
 
 FileResult unavailable_result() {
-    if (!ray2::driver::sdcard_is_mounted()) return FileResult::NotMounted;
+    if (!laserctl::driver::sdcard_is_mounted()) return FileResult::NotMounted;
     return FileResult::Busy;
 }
 
@@ -49,7 +49,7 @@ bool build_full_path(const char* const logical_path, char* const full_path,
                      const std::size_t full_path_capacity) {
     if (logical_path == nullptr || full_path == nullptr || full_path_capacity == 0) return false;
     const int length = std::snprintf(full_path, full_path_capacity, "%s%s",
-                                     ray2::driver::kSdCardMountPoint, logical_path);
+                                     laserctl::driver::kSdCardMountPoint, logical_path);
     return length > 0 && static_cast<std::size_t>(length) < full_path_capacity;
 }
 
@@ -121,7 +121,7 @@ FileResult list_directory(const char* const path, ListEntryCallback callback, vo
     if (normalized != FileResult::Ok) return normalized;
     if (!acquire_file_access()) return unavailable_result();
 
-    char full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     if (!build_full_path(normalized_path, full_path, sizeof(full_path))) {
         release_file_access();
         return FileResult::InvalidPath;
@@ -172,7 +172,7 @@ FileResult validate_directory(const char* const path) {
     if (normalized != FileResult::Ok) return normalized;
     if (!acquire_file_access()) return unavailable_result();
 
-    char full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     if (!build_full_path(normalized_path, full_path, sizeof(full_path))) {
         release_file_access();
         return FileResult::InvalidPath;
@@ -196,7 +196,7 @@ FileResult file_read_open(const char* const path, FileReadSession& session, std:
     }
     if (!acquire_file_access()) return unavailable_result();
 
-    char full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     struct stat path_stat = {};
     if (!build_full_path(normalized_path, full_path, sizeof(full_path))) {
         release_file_access();
@@ -224,7 +224,7 @@ FileResult file_read_next(FileReadSession& session, void* const buffer, const st
                           std::size_t& length) {
     length = 0;
     if (session.file == nullptr || buffer == nullptr || capacity == 0) return FileResult::IoError;
-    if (!ray2::driver::sdcard_is_mounted()) return FileResult::NotMounted;
+    if (!laserctl::driver::sdcard_is_mounted()) return FileResult::NotMounted;
     length = std::fread(buffer, 1, capacity, static_cast<std::FILE*>(session.file));
     return std::ferror(static_cast<std::FILE*>(session.file)) == 0 ? FileResult::Ok
                                                                     : FileResult::IoError;
@@ -258,7 +258,7 @@ FileResult file_upload_begin(const char* const path, FileUploadSession& session)
         return unavailable_result();
     }
 
-    char temporary_full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char temporary_full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     if (!build_full_path(session.temporary_path, temporary_full_path, sizeof(temporary_full_path))) {
         clear_upload_session(session);
         release_file_access();
@@ -277,7 +277,7 @@ FileResult file_upload_begin(const char* const path, FileUploadSession& session)
 FileResult file_upload_write(FileUploadSession& session, const void* const data,
                              const std::size_t length) {
     if (session.file == nullptr || data == nullptr || length == 0) return FileResult::IoError;
-    if (!ray2::driver::sdcard_is_mounted()) return FileResult::NotMounted;
+    if (!laserctl::driver::sdcard_is_mounted()) return FileResult::NotMounted;
     return std::fwrite(data, 1, length, static_cast<std::FILE*>(session.file)) == length
                ? FileResult::Ok
                : FileResult::IoError;
@@ -289,12 +289,12 @@ FileResult file_upload_commit(FileUploadSession& session) {
     const bool flushed = std::fflush(file) == 0;
     const bool closed = std::fclose(file) == 0;
     session.file = nullptr;
-    if (!flushed || !closed || !ray2::driver::sdcard_is_mounted()) {
+    if (!flushed || !closed || !laserctl::driver::sdcard_is_mounted()) {
         file_upload_abort(session);
-        return ray2::driver::sdcard_is_mounted() ? FileResult::IoError : FileResult::NotMounted;
+        return laserctl::driver::sdcard_is_mounted() ? FileResult::IoError : FileResult::NotMounted;
     }
 
-    char target_full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char target_full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     char temporary_full_path[sizeof(target_full_path)] = {};
     char backup_full_path[sizeof(target_full_path)] = {};
     if (!build_full_path(session.target_path, target_full_path, sizeof(target_full_path)) ||
@@ -334,7 +334,7 @@ void file_upload_abort(FileUploadSession& session) {
         session.file = nullptr;
     }
     if (session.temporary_path[0] != '\0') {
-        char temporary_full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+        char temporary_full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
         if (build_full_path(session.temporary_path, temporary_full_path, sizeof(temporary_full_path))) {
             (void)std::remove(temporary_full_path);
         }
@@ -351,7 +351,7 @@ FileResult file_delete(const char* const path) {
         return normalized == FileResult::Ok ? FileResult::InvalidPath : normalized;
     }
     if (!acquire_file_access()) return unavailable_result();
-    char full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     if (!build_full_path(normalized_path, full_path, sizeof(full_path))) {
         release_file_access();
         return FileResult::InvalidPath;
@@ -374,7 +374,7 @@ FileResult directory_create(const char* const path) {
         return normalized == FileResult::Ok ? FileResult::AlreadyExists : normalized;
     }
     if (!acquire_file_access()) return unavailable_result();
-    char full_path[kFilePathCapacity + sizeof(ray2::driver::kSdCardMountPoint)] = {};
+    char full_path[kFilePathCapacity + sizeof(laserctl::driver::kSdCardMountPoint)] = {};
     if (!build_full_path(normalized_path, full_path, sizeof(full_path))) {
         release_file_access();
         return FileResult::InvalidPath;
@@ -423,4 +423,4 @@ const char* file_result_text(const FileResult result) {
     return "unknown";
 }
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

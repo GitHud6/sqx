@@ -12,7 +12,7 @@
 
 #include "uart0_driver.hpp"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 namespace {
 
 constexpr std::size_t kNormalTxQueueLength = 4;
@@ -65,13 +65,13 @@ void protocol_tx_task(void*) {
                 if (xQueueReceive(s_normal_tx_queue, &normal_message, 0) != pdTRUE) {
                     break;
                 }
-                (void)ray2::driver::uart0_write_all(normal_message->data, normal_message->length);
+                (void)laserctl::driver::uart0_write_all(normal_message->data, normal_message->length);
                 xQueueSend(s_free_tx_queue, &normal_message, portMAX_DELAY);
                 sent_any = true;
             }
 
             if (take_realtime_status(realtime_status)) {
-                (void)ray2::driver::uart0_write_all(realtime_status.data, realtime_status.length);
+                (void)laserctl::driver::uart0_write_all(realtime_status.data, realtime_status.length);
                 sent_any = true;
             }
 
@@ -163,4 +163,4 @@ void protocol_tx_abort_flush() {
     portEXIT_CRITICAL(&s_realtime_status_lock);
 }
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

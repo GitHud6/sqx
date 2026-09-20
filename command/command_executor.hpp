@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ray2::command {
+namespace laserctl::command {
 
 enum class Error {
     Ok,
@@ -75,7 +75,7 @@ struct ParsedBlock {
     double spindle_speed = 0.0;
     bool has_spindle_mode = false;
     SpindleMode spindle_mode = SpindleMode::Off;
-    // RayCube has no coolant hardware. This remains separate from M3/M4/M5
+    // LaserController has no coolant hardware. This remains separate from M3/M4/M5
     // so compatibility M8/M9 commands cannot alter laser state.
     bool has_coolant_command = false;
     bool has_program_end = false;
@@ -91,4 +91,4 @@ Error execute_jog_line(const char* line, std::size_t length, ParserState& state)
 Error sync_parser_position_from_machine(ParserState& state);
 const char* error_text(Error error);
 
-}  // namespace ray2::command
+}  // namespace laserctl::command

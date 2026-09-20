@@ -5,7 +5,7 @@
 
 #include "sdcard_driver.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 namespace {
 
 constexpr char kMountPointPrefix[] = "/sd";
@@ -32,7 +32,7 @@ std::uint32_t little_u32(const unsigned char* data) {
 
 bool GzipFileReader::open(const char* path) {
     close();
-    if (!ray2::driver::sdcard_is_mounted() || !valid_path(path)) {
+    if (!laserctl::driver::sdcard_is_mounted() || !valid_path(path)) {
         error_ = true;
         return false;
     }
@@ -232,4 +232,4 @@ void GzipFileReader::close() {
     error_ = false;
 }
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

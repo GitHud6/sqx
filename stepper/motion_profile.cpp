@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 constexpr double kMinutesToMicroseconds = 60000000.0;
@@ -149,4 +149,4 @@ MotionProfilePhase motion_profile_phase_at_time_us(const MotionProfile& profile,
     return MotionProfilePhase::Decelerate;
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

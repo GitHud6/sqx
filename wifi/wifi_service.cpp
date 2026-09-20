@@ -11,16 +11,16 @@
 #include "esp_wifi.h"
 #include "lwip/inet.h"
 
+#include "product_identity.hpp"
 #include "wifi_settings.hpp"
 
-namespace ray2::wifi {
+namespace laserctl::wifi {
 namespace {
 
 constexpr char kLogTag[] = "wifi";
 constexpr char kApPassword[] = "12345678";
 constexpr char kApIp[] = "192.168.0.1";
 constexpr char kApNetmask[] = "255.255.255.0";
-constexpr char kApSsidPrefix[] = "LongerLaser";
 constexpr std::size_t kSsidCapacity = kWifiSsidCapacity;
 constexpr std::size_t kIpCapacity = kWifiIpTextCapacity;
 
@@ -125,10 +125,11 @@ void set_ap_static_ip() {
 void build_ap_ssid() {
     uint8_t mac[6] = {};
     if (esp_wifi_get_mac(WIFI_IF_AP, mac) == ESP_OK) {
-        std::snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s_%02X%02X", kApSsidPrefix,
+        std::snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s_%02X%02X",
+                      identity::kSoftApSsidPrefix,
                       static_cast<unsigned>(mac[4]), static_cast<unsigned>(mac[5]));
     } else {
-        std::snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s", "LongerLaser_0000");
+        std::snprintf(s_ap_ssid, sizeof(s_ap_ssid), "%s_0000", identity::kSoftApSsidPrefix);
     }
 }
 
@@ -414,4 +415,4 @@ bool wifi_get_runtime_info(RuntimeInfo& info) {
     return true;
 }
 
-}  // namespace ray2::wifi
+}  // namespace laserctl::wifi

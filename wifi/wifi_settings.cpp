@@ -4,7 +4,7 @@
 
 #include "nvs.h"
 
-namespace ray2::wifi {
+namespace laserctl::wifi {
 namespace {
 
 constexpr char kNvsNamespace[] = "laserctl_wifi";
@@ -183,4 +183,4 @@ const char* wifi_radio_mode_text(const RadioMode mode) {
     return "unknown";
 }
 
-}  // namespace ray2::wifi
+}  // namespace laserctl::wifi

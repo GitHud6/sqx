@@ -8,9 +8,9 @@
 
 #include "runtime_affinity.hpp"
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 namespace {
 
 constexpr TickType_t kDebounceDelay = pdMS_TO_TICKS(5);
@@ -27,7 +27,7 @@ void* s_state_callback_user_data = nullptr;
 std::uint32_t read_triggered_mask() {
     std::uint32_t mask = 0;
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
-        const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
+        const auto& axis = machine::machine_axis(static_cast<machine::Axis>(index));
         const int level = gpio_get_level(static_cast<gpio_num_t>(axis.limit_pin));
         const bool triggered = axis.limit_active_low ? level == 0 : level != 0;
         if (triggered) mask |= 1U << index;
@@ -72,7 +72,7 @@ esp_err_t limit_switch_driver_init() {
     if (s_initialized.load(std::memory_order_acquire)) return ESP_OK;
 
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
-        const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
+        const auto& axis = machine::machine_axis(static_cast<machine::Axis>(index));
         const gpio_config_t config = {
             .pin_bit_mask = 1ULL << axis.limit_pin,
             .mode = GPIO_MODE_INPUT,
@@ -97,7 +97,7 @@ esp_err_t limit_switch_driver_init() {
         return service_result;
     }
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
-        const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
+        const auto& axis = machine::machine_axis(static_cast<machine::Axis>(index));
         const esp_err_t result = gpio_isr_handler_add(
             static_cast<gpio_num_t>(axis.limit_pin), limit_switch_isr,
             reinterpret_cast<void*>(static_cast<std::uintptr_t>(index)));
@@ -131,4 +131,4 @@ void limit_switch_driver_set_state_callback(const LimitSwitchStateCallback callb
     s_state_callback_user_data = user_data;
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

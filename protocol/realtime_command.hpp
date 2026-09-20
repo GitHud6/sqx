@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 enum class RealtimeCommand : std::uint8_t {
     StatusReport,
@@ -17,4 +17,4 @@ bool realtime_command_from_byte(std::uint8_t byte, RealtimeCommand& command);
 // Records a received realtime command. Protocol owns reporting and future control behavior.
 void realtime_command_receive(RealtimeCommand command);
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

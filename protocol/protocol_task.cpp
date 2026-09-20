@@ -18,7 +18,7 @@
 #include "service.hpp"
 #include "uart0_driver.hpp"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 namespace {
 
@@ -122,8 +122,8 @@ bool protocol_process_byte(LineAssembler& assembler, const std::uint8_t byte) {
 }
 
 void protocol_task(void*) {
-    ray2::driver::Uart0RxChunk chunk = {};
-    QueueHandle_t rx_queue = ray2::driver::uart0_rx_queue();
+    laserctl::driver::Uart0RxChunk chunk = {};
+    QueueHandle_t rx_queue = laserctl::driver::uart0_rx_queue();
     LineAssembler assembler;
 
     while (true) {
@@ -134,7 +134,7 @@ void protocol_task(void*) {
         // A packet tagged before Ctrl-X is obsolete. New packets must remain
         // usable immediately after the reset, including the first `$H` or
         // A status request sent by a host.
-        if (chunk.generation != ray2::driver::uart0_normal_input_generation()) {
+        if (chunk.generation != laserctl::driver::uart0_normal_input_generation()) {
             assembler.reset_line();
             continue;
         }
@@ -163,7 +163,7 @@ esp_err_t protocol_start() {
     if (s_protocol_task != nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (ray2::driver::uart0_rx_queue() == nullptr) {
+    if (laserctl::driver::uart0_rx_queue() == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
     const esp_err_t dispatch_start_result = command_dispatch_start();
@@ -186,7 +186,7 @@ esp_err_t protocol_start() {
         s_realtime_task = nullptr;
         return ESP_ERR_NO_MEM;
     }
-    if (ray2::driver::uart0_set_ingress_handler(protocol_uart_ingress_handler, nullptr) != ESP_OK) {
+    if (laserctl::driver::uart0_set_ingress_handler(protocol_uart_ingress_handler, nullptr) != ESP_OK) {
         vTaskDelete(s_protocol_task);
         s_protocol_task = nullptr;
         vTaskDelete(s_realtime_task);
@@ -197,4 +197,4 @@ esp_err_t protocol_start() {
     return ESP_OK;
 }
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

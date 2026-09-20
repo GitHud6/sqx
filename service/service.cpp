@@ -22,7 +22,7 @@
 #include "timer_stepper_executor.hpp"
 #include "uart0_driver.hpp"
 
-namespace ray2::service {
+namespace laserctl::service {
 namespace {
 
 constexpr char kLogTag[] = "service";
@@ -110,9 +110,9 @@ void reject_event(const EventType type) {
 void apply_hard_reset() {
     // The realtime ingress path has already made pulse and laser output safe.
     // Keep all queue, task, and parser cleanup in this non-realtime task.
-    ray2::planner::planner_reset();
-    ray2::protocol::command_reset_after_hard_reset();
-    ray2::laser::laser_set_motion_output_permitted(false);
+    laserctl::planner::planner_reset();
+    laserctl::protocol::command_reset_after_hard_reset();
+    laserctl::laser::laser_set_motion_output_permitted(false);
     s_input_ended.store(false, std::memory_order_release);
     s_input_source.store(InputSource::Unknown, std::memory_order_release);
     s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
@@ -123,10 +123,10 @@ void apply_hard_reset() {
 void apply_safety_abort(const FaultReason reason) {
     // Output and executor have already been made safe by the detecting task.
     // Keep parser, planner, and position cleanup serialized here.
-    ray2::planner::planner_reset();
-    ray2::protocol::command_reset_after_hard_reset();
-    ray2::laser::laser_set_motion_output_permitted(false);
-    ray2::stepper::stepper_invalidate_position(position_reason_for_safety_fault(reason));
+    laserctl::planner::planner_reset();
+    laserctl::protocol::command_reset_after_hard_reset();
+    laserctl::laser::laser_set_motion_output_permitted(false);
+    laserctl::stepper::stepper_invalidate_position(position_reason_for_safety_fault(reason));
     s_input_ended.store(false, std::memory_order_release);
     s_input_source.store(InputSource::Unknown, std::memory_order_release);
     s_fault_reason.store(reason, std::memory_order_release);
@@ -135,8 +135,8 @@ void apply_safety_abort(const FaultReason reason) {
 }
 
 void on_limit_switch_state(const driver::LimitSwitchState& state, void*) {
-    if ((!state.triggered[0] && !state.triggered[1]) || ray2::homing::homing_is_active() ||
-        ray2::planner::planner_is_idle()) {
+    if ((!state.triggered[0] && !state.triggered[1]) || laserctl::homing::homing_is_active() ||
+        laserctl::planner::planner_is_idle()) {
         return;
     }
     service_request_safety_abort(FaultReason::HardLimit);
@@ -191,11 +191,11 @@ void apply_event(const ServiceEvent& event) {
     }
 
     if (event.type == EventType::ResumeRequested) {
-        ray2::laser::laser_set_motion_output_permitted(true);
-        if (ray2::stepper::timer_stepper_executor_resume_from_hold() == ESP_OK) {
+        laserctl::laser::laser_set_motion_output_permitted(true);
+        if (laserctl::stepper::timer_stepper_executor_resume_from_hold() == ESP_OK) {
             s_state.store(State::Running, std::memory_order_release);
         } else {
-            ray2::laser::laser_set_motion_output_permitted(false);
+            laserctl::laser::laser_set_motion_output_permitted(false);
             s_state.store(State::Held, std::memory_order_release);
         }
         return;
@@ -248,7 +248,7 @@ void apply_event(const ServiceEvent& event) {
 
 void complete_ended_input_when_drained() {
     if (!s_input_ended.load(std::memory_order_acquire) ||
-        !ray2::planner::planner_execution_is_drained()) {
+        !laserctl::planner::planner_execution_is_drained()) {
         return;
     }
 
@@ -279,7 +279,7 @@ void service_task(void*) {
 
         // Card detection is deliberately outside the pulse ISR. A removal
         // request only stops the SD feeder; it never resets planner motion.
-        const bool inserted = ray2::driver::sdcard_is_inserted();
+        const bool inserted = laserctl::driver::sdcard_is_inserted();
         if (!presence_initialized) {
             stable_inserted = inserted;
             candidate_inserted = inserted;
@@ -296,14 +296,14 @@ void service_task(void*) {
                 candidate_inserted != stable_inserted) {
                 stable_inserted = candidate_inserted;
                 if (!stable_inserted) {
-                    if (ray2::sd::sd_job_is_active()) {
+                    if (laserctl::sd::sd_job_is_active()) {
                         ESP_LOGI(kLogTag, "sd card removed: input-ended, draining motion");
-                        ray2::sd::sd_job_request_input_end();
-                    } else if (ray2::driver::sdcard_is_mounted() &&
-                               !ray2::sd::file_service_is_busy()) {
-                        ray2::driver::sdcard_stop();
+                        laserctl::sd::sd_job_request_input_end();
+                    } else if (laserctl::driver::sdcard_is_mounted() &&
+                               !laserctl::sd::file_service_is_busy()) {
+                        laserctl::driver::sdcard_stop();
                     }
-                } else if (!ray2::driver::sdcard_is_mounted()) {
+                } else if (!laserctl::driver::sdcard_is_mounted()) {
                     ESP_LOGI(kLogTag, "sd card inserted: remount pending");
                     next_mount_retry = 0;
                 }
@@ -311,12 +311,12 @@ void service_task(void*) {
         }
 
         const TickType_t now = xTaskGetTickCount();
-        if (stable_inserted && !ray2::driver::sdcard_is_mounted() &&
-            !ray2::sd::sd_job_is_active() &&
+        if (stable_inserted && !laserctl::driver::sdcard_is_mounted() &&
+            !laserctl::sd::sd_job_is_active() &&
             static_cast<std::int32_t>(now - next_mount_retry) >= 0) {
             // Covers boot without a card and a mount attempt that raced the
             // first stable detect sample.
-            ray2::driver::sdcard_start();
+            laserctl::driver::sdcard_start();
             next_mount_retry = now + kMountRetryTicks;
         }
     }
@@ -341,7 +341,7 @@ esp_err_t service_start() {
         return ESP_ERR_NO_MEM;
     }
 
-    ray2::driver::limit_switch_driver_set_state_callback(on_limit_switch_state, nullptr);
+    laserctl::driver::limit_switch_driver_set_state_callback(on_limit_switch_state, nullptr);
 
     ESP_LOGI(kLogTag, "started state=idle");
     return ESP_OK;
@@ -423,14 +423,14 @@ bool service_request_hard_reset() {
 
     // This makes the output safe before the service task can be scheduled.
     // The stop function is task-context only and must not be called by an ISR.
-    ray2::laser::laser_set_motion_output_permitted(false);
+    laserctl::laser::laser_set_motion_output_permitted(false);
     // These are atomic cancellation requests. Send them before stopping the
     // executor so neither producer can schedule another action in the gap.
-    ray2::sd::sd_job_request_abort();
-    ray2::homing::homing_request_abort();
-    ray2::stepper::timer_stepper_executor_stop();
-    ray2::driver::uart0_discard_pending_normal_input();
-    ray2::network::network_command_adapter_abort_pending();
+    laserctl::sd::sd_job_request_abort();
+    laserctl::homing::homing_request_abort();
+    laserctl::stepper::timer_stepper_executor_stop();
+    laserctl::driver::uart0_discard_pending_normal_input();
+    laserctl::network::network_command_adapter_abort_pending();
     s_fault_reason.store(FaultReason::HardReset, std::memory_order_release);
     s_state.store(State::Aborted, std::memory_order_release);
     // Hard reset supersedes every previously queued lifecycle event. This
@@ -440,8 +440,8 @@ bool service_request_hard_reset() {
 }
 
 bool service_request_alarm_unlock() {
-    if (s_event_queue == nullptr || s_task == nullptr || ray2::homing::homing_is_active() ||
-        !ray2::planner::planner_is_idle() || ray2::stepper::timer_stepper_executor_is_busy()) {
+    if (s_event_queue == nullptr || s_task == nullptr || laserctl::homing::homing_is_active() ||
+        !laserctl::planner::planner_is_idle() || laserctl::stepper::timer_stepper_executor_is_busy()) {
         return false;
     }
 
@@ -460,12 +460,12 @@ bool service_request_safety_abort(const FaultReason reason) {
 
     // This function is task-context only. Make the physical outputs safe in
     // the detecting task so service-queue latency cannot extend motion.
-    ray2::laser::laser_set_motion_output_permitted(false);
-    ray2::sd::sd_job_request_abort();
-    ray2::homing::homing_request_abort();
-    ray2::stepper::timer_stepper_executor_stop();
-    ray2::driver::uart0_discard_pending_normal_input();
-    ray2::network::network_command_adapter_abort_pending();
+    laserctl::laser::laser_set_motion_output_permitted(false);
+    laserctl::sd::sd_job_request_abort();
+    laserctl::homing::homing_request_abort();
+    laserctl::stepper::timer_stepper_executor_stop();
+    laserctl::driver::uart0_discard_pending_normal_input();
+    laserctl::network::network_command_adapter_abort_pending();
     s_fault_reason.store(reason, std::memory_order_release);
     s_state.store(State::Faulted, std::memory_order_release);
     xQueueReset(s_event_queue);
@@ -474,7 +474,7 @@ bool service_request_safety_abort(const FaultReason reason) {
 
 bool service_request_feed_hold() {
     if (s_event_queue == nullptr || s_task == nullptr ||
-        ray2::planner::planner_execution_is_drained()) {
+        laserctl::planner::planner_execution_is_drained()) {
         return false;
     }
     State state = s_state.load(std::memory_order_acquire);
@@ -492,15 +492,15 @@ bool service_request_feed_hold() {
         }
     }
 
-    ray2::laser::laser_set_motion_output_permitted(false);
-    if (ray2::stepper::timer_stepper_executor_request_hold()) return true;
+    laserctl::laser::laser_set_motion_output_permitted(false);
+    if (laserctl::stepper::timer_stepper_executor_request_hold()) return true;
 
     // No segment was active to own a deterministic boundary. Leave state
     // unchanged rather than allowing a stale hold to affect later motion.
     State expected = State::HoldRequested;
     s_state.compare_exchange_strong(expected, previous_state, std::memory_order_acq_rel,
                                     std::memory_order_acquire);
-    ray2::laser::laser_set_motion_output_permitted(true);
+    laserctl::laser::laser_set_motion_output_permitted(true);
     return false;
 }
 
@@ -552,4 +552,4 @@ const char* service_fault_reason_text(const FaultReason reason) {
     return "unknown";
 }
 
-}  // namespace ray2::service
+}  // namespace laserctl::service

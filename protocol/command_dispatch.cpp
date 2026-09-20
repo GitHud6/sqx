@@ -22,12 +22,13 @@
 #include "stepper_driver.hpp"
 #include "wifi_service.hpp"
 #include "network_lifecycle.hpp"
+#include "product_identity.hpp"
 #include "wifi_settings.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 namespace {
 
@@ -341,17 +342,8 @@ bool format_build_info(char* const response, const std::size_t capacity,
     response_length = 0;
     if (response == nullptr || capacity == 0) return false;
 
-    const auto& x_axis = machine::raycube_axis(machine::Axis::X);
-    const auto& y_axis = machine::raycube_axis(machine::Axis::Y);
-    static constexpr char kBuildInfo[] =
-        "[VER:1.0.0:RayCube-IDF]\r\n"
-        "[OPT:V,32,256]\r\n"
-        "[Board:Longer Laser Ray2 V1.0]\r\n"
-        "[Machine:Ray2]\r\n"
-        "[Software:1.0.0]\r\n"
-        "[Wavelength:450nm]\r\n"
-        "[Power:7.5W]\r\n";
-
+    const auto& x_axis = machine::machine_axis(machine::Axis::X);
+    const auto& y_axis = machine::machine_axis(machine::Axis::Y);
     wifi::RuntimeInfo wifi_info = {};
     char sta_message[192] = {};
     char ap_message[128] = {};
@@ -372,9 +364,18 @@ bool format_build_info(char* const response, const std::size_t capacity,
                       wifi_info.ap_mac[0] == '\0' ? "<unavailable>" : wifi_info.ap_mac);
     }
     const int length = std::snprintf(
-        response, capacity, "%s[Working Size:XSIZE=%.3f:YSIZE=%.3f]\r\n%s%sok\r\n", kBuildInfo,
-        static_cast<double>(x_axis.max_travel_mm), static_cast<double>(y_axis.max_travel_mm),
-        sta_message, ap_message);
+        response, capacity,
+        "[VER:1.0.0:%s]\r\n"
+        "[OPT:V,32,256]\r\n"
+        "[Board:%s]\r\n"
+        "[Machine:%s]\r\n"
+        "[Software:1.0.0]\r\n"
+        "[Wavelength:450nm]\r\n"
+        "[Power:7.5W]\r\n"
+        "[Working Size:XSIZE=%.3f:YSIZE=%.3f]\r\n%s%sok\r\n",
+        identity::kFirmwareIdentifier, identity::kBoardDescription,
+        identity::kMachineDescription, static_cast<double>(x_axis.max_travel_mm),
+        static_cast<double>(y_axis.max_travel_mm), sta_message, ap_message);
     if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
     response_length = static_cast<std::size_t>(length);
     return true;
@@ -433,9 +434,9 @@ bool report_coordinate_parameters() {
 }
 
 bool report_grbl_settings() {
-    const auto& x_axis = machine::raycube_axis(machine::Axis::X);
-    const auto& y_axis = machine::raycube_axis(machine::Axis::Y);
-    const auto& laser = machine::raycube_laser();
+    const auto& x_axis = machine::machine_axis(machine::Axis::X);
+    const auto& y_axis = machine::machine_axis(machine::Axis::Y);
+    const auto& laser = machine::machine_laser();
     static char response[512] = {};
     const int length = std::snprintf(
         response, sizeof(response),
@@ -630,8 +631,8 @@ bool report_position_status() {
         "[POS:state=%s|reason=%s|service=(state=%s,fault=%s)|steps=(%lld,%lld)|machine=(%.4f,%.4f)|planned=(%.4f,%.4f)|ahead=(%.4f,%.4f)]\r\nok\r\n",
         position_state_text(position.state),
         position_invalidation_reason_text(position.invalidation_reason),
-        ray2::service::service_state_text(ray2::service::service_state()),
-        ray2::service::service_fault_reason_text(ray2::service::service_fault_reason()),
+        laserctl::service::service_state_text(laserctl::service::service_state()),
+        laserctl::service::service_fault_reason_text(laserctl::service::service_fault_reason()),
         static_cast<long long>(position.steps[0]),
         static_cast<long long>(position.steps[1]),
         position.millimeters[0], position.millimeters[1], planned_x, planned_y,
@@ -707,14 +708,14 @@ bool command_format_realtime_status(char* const response, const std::size_t capa
     const double feed_rate = segment.active
                                   ? static_cast<double>(segment.active_end_speed_tenths_mm_per_min) / 10.0
                                   : 0.0;
-    const std::uint32_t sd_progress_tenths = ray2::sd::sd_job_progress_tenths_percent();
+    const std::uint32_t sd_progress_tenths = laserctl::sd::sd_job_progress_tenths_percent();
     const int length = std::snprintf(
         response, capacity, "<%s|MPos:%.3f,%.3f|FS:%.0f,%.0f|SD:%s,%u.%u,%u>\r\n",
         realtime_state_text(), position.millimeters[0], position.millimeters[1], feed_rate,
-        parser_state.spindle_speed, ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
+        parser_state.spindle_speed, laserctl::sd::sd_job_state_text(laserctl::sd::sd_job_state()),
         static_cast<unsigned>(sd_progress_tenths / 10U),
         static_cast<unsigned>(sd_progress_tenths % 10U),
-        static_cast<unsigned>(ray2::sd::sd_job_current_line()));
+        static_cast<unsigned>(laserctl::sd::sd_job_current_line()));
     if (length <= 0 || static_cast<std::size_t>(length) >= capacity) return false;
     response_length = static_cast<std::size_t>(length);
     return true;
@@ -824,46 +825,46 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
     if (is_work_command_path(line, length)) {
         return execute_work_command(line, length);
     }
-    ray2::sd::SystemCommand sd_command = {};
-    if (ray2::sd::parse_system_command(line, length, sd_command)) {
+    laserctl::sd::SystemCommand sd_command = {};
+    if (laserctl::sd::parse_system_command(line, length, sd_command)) {
         switch (sd_command.type) {
-            case ray2::sd::SystemCommandType::Status:
+            case laserctl::sd::SystemCommandType::Status:
                 {
                     char response[256] = {};
-                    const std::uint32_t progress_tenths = ray2::sd::sd_job_progress_tenths_percent();
+                    const std::uint32_t progress_tenths = laserctl::sd::sd_job_progress_tenths_percent();
                     const int response_length = std::snprintf(
                         response, sizeof(response),
                         "[SD:inserted=%u|mounted=%u|path=/sd|job=%s|progress=%u.%u|line=%u|fault=%s|error=%s]\r\nok\r\n",
-                        ray2::driver::sdcard_is_inserted() ? 1U : 0U,
-                        ray2::driver::sdcard_is_mounted() ? 1U : 0U,
-                        ray2::sd::sd_job_state_text(ray2::sd::sd_job_state()),
+                        laserctl::driver::sdcard_is_inserted() ? 1U : 0U,
+                        laserctl::driver::sdcard_is_mounted() ? 1U : 0U,
+                        laserctl::sd::sd_job_state_text(laserctl::sd::sd_job_state()),
                         static_cast<unsigned>(progress_tenths / 10U),
                         static_cast<unsigned>(progress_tenths % 10U),
-                        static_cast<unsigned>(ray2::sd::sd_job_current_line()),
-                        ray2::sd::sd_job_fault_text(ray2::sd::sd_job_fault()),
-                        command::error_text(ray2::sd::sd_job_command_error()));
+                        static_cast<unsigned>(laserctl::sd::sd_job_current_line()),
+                        laserctl::sd::sd_job_fault_text(laserctl::sd::sd_job_fault()),
+                        command::error_text(laserctl::sd::sd_job_command_error()));
                     return response_length > 0 && static_cast<std::size_t>(response_length) < sizeof(response) &&
                            write_all(reinterpret_cast<const std::uint8_t*>(response),
                                      static_cast<std::size_t>(response_length));
                 }
-            case ray2::sd::SystemCommandType::List:
-                if (!ray2::driver::sdcard_is_mounted()) {
+            case laserctl::sd::SystemCommandType::List:
+                if (!laserctl::driver::sdcard_is_mounted()) {
                     return write_text("error:sd-not-mounted\r\n");
                 }
                 {
                     SdListResponseContext context = {};
-                    if (!ray2::sd::list_root(write_sd_list_entry, &context) || context.write_failed) {
+                    if (!laserctl::sd::list_root(write_sd_list_entry, &context) || context.write_failed) {
                         return write_text("error:sd-list-failed\r\n");
                     }
                     return write_text("ok\r\n");
                 }
-            case ray2::sd::SystemCommandType::Run: {
-                if (ray2::stepper::machine_position_state() != ray2::stepper::PositionState::Known) {
+            case laserctl::sd::SystemCommandType::Run: {
+                if (laserctl::stepper::machine_position_state() != laserctl::stepper::PositionState::Known) {
                     return write_text("error:position-unknown\r\n");
                 }
-                const esp_err_t result = ray2::sd::sd_job_start(sd_command.path);
+                const esp_err_t result = laserctl::sd::sd_job_start(sd_command.path);
                 if (result == ESP_ERR_INVALID_STATE) {
-                    if (!ray2::driver::sdcard_is_mounted()) {
+                    if (!laserctl::driver::sdcard_is_mounted()) {
                         return write_text("error:sd-not-mounted\r\n");
                     }
                     return write_text("error:sd-job-active\r\n");
@@ -880,7 +881,7 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
             }
         }
     }
-    if (ray2::sd::is_system_command(line, length)) {
+    if (laserctl::sd::is_system_command(line, length)) {
         return write_text("error:sd-invalid-command\r\n");
     }
     xSemaphoreTake(s_parser_mutex, portMAX_DELAY);
@@ -965,4 +966,4 @@ void command_reset_after_hard_reset() {
     xSemaphoreGive(s_parser_mutex);
 }
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 enum class MotionProfileMode { Trapezoid, SCurve };
 enum class MotionProfilePhase { Accelerate, Cruise, Decelerate };
@@ -34,4 +34,4 @@ double motion_profile_distance_at_time_us(const MotionProfile& profile, double t
 double motion_profile_speed_at_time_us(const MotionProfile& profile, double time_us);
 MotionProfilePhase motion_profile_phase_at_time_us(const MotionProfile& profile, double time_us);
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

@@ -1,6 +1,6 @@
 #include "line_assembler.hpp"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 LineEvent LineAssembler::push(std::uint8_t byte) {
     if (ignore_next_lf_) {
@@ -60,4 +60,4 @@ LineEvent LineAssembler::finish_line() {
     return LineEvent::Ready;
 }
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

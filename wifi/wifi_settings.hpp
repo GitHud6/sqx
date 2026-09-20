@@ -5,7 +5,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::wifi {
+namespace laserctl::wifi {
 
 constexpr std::size_t kStaSsidCapacity = 33;
 constexpr std::size_t kStaPasswordCapacity = 65;
@@ -36,4 +36,4 @@ esp_err_t wifi_settings_clear_sta_credentials();
 
 const char* wifi_radio_mode_text(RadioMode mode);
 
-}  // namespace ray2::wifi
+}  // namespace laserctl::wifi

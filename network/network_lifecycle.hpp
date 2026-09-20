@@ -2,7 +2,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::network {
+namespace laserctl::network {
 
 // Owns HTTP and WebSocket transport lifetime. Wi-Fi callbacks only notify this
 // task; all socket stop/start work runs outside the ESP event loop.
@@ -13,4 +13,4 @@ bool network_lifecycle_is_started();
 // path used for a station reconnect.
 esp_err_t network_lifecycle_request_wifi_restart();
 
-}  // namespace ray2::network
+}  // namespace laserctl::network

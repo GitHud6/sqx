@@ -6,7 +6,7 @@
 #include "motion_request.hpp"
 #include "planner.hpp"
 
-namespace ray2::laser {
+namespace laserctl::laser {
 namespace {
 
 std::atomic<std::uint64_t> s_active_execution_id = 0;
@@ -55,4 +55,4 @@ std::uint64_t laser_active_execution_id() {
     return s_active_execution_id.load();
 }
 
-}  // namespace ray2::laser
+}  // namespace laserctl::laser

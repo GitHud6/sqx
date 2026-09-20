@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ray2::httpd {
+namespace laserctl::httpd {
 
 constexpr char kWebUiStyle[] = R"CSS(    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151d; color: #edf2f7; }
     * { box-sizing: border-box; }
@@ -50,4 +50,4 @@ constexpr char kWebUiStyle[] = R"CSS(    :root { color-scheme: dark; font-family
     .api dt { color: #8ea6bd; }
     .api dd { margin: 0; })CSS";
 
-}  // namespace ray2::httpd
+}  // namespace laserctl::httpd

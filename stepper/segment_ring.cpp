@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <atomic>
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 std::array<StepSegment, kStepSegmentBufferLength> s_segment_buffer = {};
@@ -178,4 +178,4 @@ SegmentExecutionDiagnostics stepper_segment_diagnostics() {
     return diagnostics;
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

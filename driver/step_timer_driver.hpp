@@ -5,7 +5,7 @@
 #include "esp_attr.h"
 #include "esp_err.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 
 using StepTimerAlarmCallback = bool (*)(void* user_data);
 
@@ -26,4 +26,4 @@ void IRAM_ATTR step_timer_driver_update_interval_from_isr(std::uint32_t interval
 // This is a latency observation only; it does not acknowledge or alter the alarm.
 std::uint64_t IRAM_ATTR step_timer_driver_lateness_ticks_from_isr();
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

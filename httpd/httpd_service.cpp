@@ -18,7 +18,7 @@
 #include "sdcard_driver.hpp"
 #include "wifi_service.hpp"
 
-namespace ray2::httpd {
+namespace laserctl::httpd {
 namespace {
 
 constexpr char kLogTag[] = "httpd";
@@ -951,4 +951,4 @@ bool httpd_service_is_started() {
     return s_server != nullptr;
 }
 
-}  // namespace ray2::httpd
+}  // namespace laserctl::httpd

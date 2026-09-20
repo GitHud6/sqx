@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ray2::httpd {
+namespace laserctl::httpd {
 
 constexpr char kWebUiScript[] = R"JS(    (() => {
       const status = document.getElementById('connection');
@@ -544,4 +544,4 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
       refreshFiles();
     })();)JS";
 
-}  // namespace ray2::httpd
+}  // namespace laserctl::httpd

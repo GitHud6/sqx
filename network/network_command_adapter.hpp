@@ -4,7 +4,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::network {
+namespace laserctl::network {
 
 enum class SubmitResult {
     Accepted,
@@ -28,4 +28,4 @@ SubmitResult network_command_adapter_submit(const char* text, std::size_t length
 // from task context and deliberately does not alter planner state itself.
 void network_command_adapter_abort_pending();
 
-}  // namespace ray2::network
+}  // namespace laserctl::network

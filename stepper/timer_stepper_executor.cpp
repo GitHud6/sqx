@@ -13,7 +13,7 @@
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 constexpr char kLogTag[] = "timer_stepper";
@@ -455,4 +455,4 @@ bool IRAM_ATTR timer_stepper_executor_stop_axis_from_isr(const std::size_t axis_
     return all_stopped;
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

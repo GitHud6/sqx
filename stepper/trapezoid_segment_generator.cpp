@@ -4,7 +4,7 @@
 #include <cmath>
 #include <limits>
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 bool valid_profile(const MotionProfile& profile) {
@@ -117,4 +117,4 @@ bool trapezoid_segment_generator_next(TrapezoidSegmentGenerator& generator,
     return true;
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

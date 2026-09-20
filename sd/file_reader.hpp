@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ray2::sd {
+namespace laserctl::sd {
 
 constexpr std::size_t kFilePathCapacity = 128;
 constexpr std::size_t kGcodeLineCapacity = 256;
@@ -23,4 +23,4 @@ public:
     virtual void close() = 0;
 };
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

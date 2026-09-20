@@ -11,7 +11,7 @@
 #include "planner.hpp"
 #include "stepper_prep.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 // The producer is the planner-facing transport boundary. It is intentionally
 // single-task for now: prep contexts are not yet safe for concurrent ownership.
@@ -35,4 +35,4 @@ void segment_producer_discard_pending();
 
 const StepperProfile& segment_producer_profile();
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

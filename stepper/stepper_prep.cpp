@@ -5,10 +5,10 @@
 #include <atomic>
 #include <cmath>
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 #include "segment_ring.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 constexpr std::uint32_t kMinimumStepIntervalUs = 4;
@@ -219,7 +219,7 @@ StepSegment build_segment(const TrapezoidPrepContext& context,
     } else if (laser_enabled) {
         segment.laser_power = source_block.request.spindle_power;
     }
-    const double max_power = static_cast<double>(machine::raycube_laser().max_power);
+    const double max_power = static_cast<double>(machine::machine_laser().max_power);
     segment.laser_power_per_mille = static_cast<std::uint16_t>(std::clamp(
         std::lround(segment.laser_power * 1000.0 / max_power), 0L, 1000L));
     segment.motion_mode = source_block.request.motion_mode;
@@ -395,4 +395,4 @@ bool stepper_prep_can_accept_block() {
 bool stepper_prep_has_active_context() {
     return s_context_count.load(std::memory_order_acquire) != 0;
 }
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

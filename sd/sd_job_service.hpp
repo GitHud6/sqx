@@ -6,7 +6,7 @@
 #include "esp_err.h"
 #include "command_executor.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 
 enum class JobState {
     Idle,
@@ -39,4 +39,4 @@ JobFault sd_job_fault();
 const char* sd_job_fault_text(JobFault fault);
 command::Error sd_job_command_error();
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

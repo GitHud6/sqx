@@ -12,13 +12,13 @@
 #include "laser_driver.hpp"
 #include "planner.hpp"
 #include "command_dispatch.hpp"
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 #include "sd_job_service.hpp"
 #include "stepper_driver.hpp"
 #include "stepper_prep.hpp"
 #include "timer_stepper_executor.hpp"
 
-namespace ray2::homing {
+namespace laserctl::homing {
 namespace {
 
 std::atomic<HomingState> s_state = HomingState::Idle;
@@ -62,9 +62,9 @@ bool run_parallel_homing() {
     seek.execution_id = 1;
     seek.system_motion = true;
     seek.step_interval_us = static_cast<std::uint32_t>(std::llround(
-        60000000.0 / (kSeekRateMmPerMin * machine::raycube_axis(machine::Axis::X).steps_per_mm)));
+        60000000.0 / (kSeekRateMmPerMin * machine::machine_axis(machine::Axis::X).steps_per_mm)));
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
+        const auto& hardware = machine::machine_axis(static_cast<machine::Axis>(axis));
         seek.axis_steps[axis] = static_cast<std::int32_t>(std::llround(
             hardware.max_travel_mm * kSeekDistanceMultiplier * hardware.steps_per_mm));
         seek.positive_direction[axis] = hardware.homing_seek_positive_direction;
@@ -92,9 +92,9 @@ bool run_parallel_homing() {
     pull_off.execution_id = 1;
     pull_off.system_motion = true;
     pull_off.step_interval_us = static_cast<std::uint32_t>(std::llround(
-        60000000.0 / (kSeekRateMmPerMin * machine::raycube_axis(machine::Axis::X).steps_per_mm)));
+        60000000.0 / (kSeekRateMmPerMin * machine::machine_axis(machine::Axis::X).steps_per_mm)));
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
+        const auto& hardware = machine::machine_axis(static_cast<machine::Axis>(axis));
         pull_off.axis_steps[axis] = static_cast<std::int32_t>(std::llround(kPullOffMm * hardware.steps_per_mm));
         pull_off.positive_direction[axis] = !hardware.homing_seek_positive_direction;
         pull_off.major_steps = std::max(pull_off.major_steps, pull_off.axis_steps[axis]);
@@ -153,7 +153,7 @@ void homing_task(void*) {
 void seek_test_task(void*) {
     const std::size_t axis_index = s_seek_axis.load(std::memory_order_relaxed);
     const auto axis = static_cast<machine::Axis>(axis_index);
-    const auto& hardware = machine::raycube_axis(axis);
+    const auto& hardware = machine::machine_axis(axis);
     const std::int32_t steps = static_cast<std::int32_t>(
         std::llround(hardware.max_travel_mm * kSeekDistanceMultiplier * hardware.steps_per_mm));
     const std::uint32_t interval_us = static_cast<std::uint32_t>(std::llround(
@@ -274,4 +274,4 @@ const char* homing_state_text(const HomingState state) {
     return "unknown";
 }
 
-}  // namespace ray2::homing
+}  // namespace laserctl::homing

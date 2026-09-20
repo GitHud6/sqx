@@ -4,7 +4,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::service {
+namespace laserctl::service {
 
 enum class State : std::uint8_t {
     Idle,
@@ -100,4 +100,4 @@ const char* service_state_text(State state);
 FaultReason service_fault_reason();
 const char* service_fault_reason_text(FaultReason reason);
 
-}  // namespace ray2::service
+}  // namespace laserctl::service

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace ray2::motion {
+namespace laserctl::motion {
 
 enum class MotionType {
     Rapid,
@@ -32,4 +32,4 @@ struct MotionGeometry {
     bool positive_direction[3] = {};
 };
 
-}  // namespace ray2::motion
+}  // namespace laserctl::motion

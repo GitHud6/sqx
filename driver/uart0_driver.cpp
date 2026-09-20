@@ -9,7 +9,7 @@
 
 #include "runtime_affinity.hpp"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 
 namespace {
 
@@ -188,4 +188,4 @@ int uart0_write(const std::uint8_t* data, const std::size_t length) {
     return written;
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

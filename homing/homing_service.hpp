@@ -4,7 +4,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::homing {
+namespace laserctl::homing {
 
 enum class HomingState {
     Idle,
@@ -34,4 +34,4 @@ StartResult homing_start_seek_test(TestAxis axis);
 // Requests that an active homing task exit after its system motion is stopped.
 void homing_request_abort();
 
-}  // namespace ray2::homing
+}  // namespace laserctl::homing

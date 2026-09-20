@@ -1,6 +1,6 @@
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 
-namespace ray2::machine {
+namespace laserctl::machine {
 namespace {
 
 constexpr AxisHardware kAxes[kAxisCount] = {
@@ -45,12 +45,12 @@ constexpr LaserHardware kLaser = {
 
 }  // namespace
 
-const AxisHardware& raycube_axis(Axis axis) {
+const AxisHardware& machine_axis(Axis axis) {
     return kAxes[static_cast<std::size_t>(axis)];
 }
 
-const LaserHardware& raycube_laser() {
+const LaserHardware& machine_laser() {
     return kLaser;
 }
 
-}  // namespace ray2::machine
+}  // namespace laserctl::machine

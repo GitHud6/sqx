@@ -5,7 +5,7 @@
 #include "motion_profile.hpp"
 #include "trapezoid_segment_generator.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 struct TrapezoidExecutionPlanInput {
     std::uint64_t execution_id = 0;
@@ -30,4 +30,4 @@ bool trapezoid_execution_plan_next(TrapezoidExecutionPlan& plan,
                                    TrapezoidTimeSlice& slice);
 bool trapezoid_execution_plan_complete(const TrapezoidExecutionPlan& plan);
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

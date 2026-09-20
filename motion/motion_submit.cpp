@@ -6,10 +6,10 @@
 #include <limits>
 
 #include "esp_log.h"
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 #include "planner.hpp"
 
-namespace ray2::motion {
+namespace laserctl::motion {
 namespace {
 
 MotionRequest s_last_request = {};
@@ -65,7 +65,7 @@ bool build_motion_geometry_impl(const MotionRequest& request, MotionGeometry& ge
 
     MotionGeometry candidate = {};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
-        const auto& hardware = machine::raycube_axis(static_cast<machine::Axis>(axis));
+        const auto& hardware = machine::machine_axis(static_cast<machine::Axis>(axis));
         if ((request.motion_mode == MotionType::Linear &&
              request.feed_rate_mm_per_min > hardware.max_rate_mm_per_min) ||
             !valid_coordinate(request.start_mm[axis], hardware.max_travel_mm) ||
@@ -109,7 +109,7 @@ double rapid_rate_for_direction(const planner::PlannerBlock& block) {
 
         const double axis_component = std::abs(block.unit_vector[axis]);
         const double axis_max_rate =
-            machine::raycube_axis(static_cast<machine::Axis>(axis)).max_rate_mm_per_min;
+            machine::machine_axis(static_cast<machine::Axis>(axis)).max_rate_mm_per_min;
         if (!std::isfinite(axis_component) || axis_component <= 0.0 ||
             !std::isfinite(axis_max_rate) || axis_max_rate <= 0.0) {
             return 0.0;
@@ -146,7 +146,7 @@ bool make_planner_block(const MotionRequest& request,
         const double axis_component = std::abs(block.unit_vector[axis]);
         if (axis_component == 0.0) continue;
         const double axis_limited_acceleration =
-            machine::raycube_axis(static_cast<machine::Axis>(axis)).acceleration_mm_per_sec2 /
+            machine::machine_axis(static_cast<machine::Axis>(axis)).acceleration_mm_per_sec2 /
             axis_component;
         if (block.acceleration_mm_per_sec2 == 0.0 ||
             axis_limited_acceleration < block.acceleration_mm_per_sec2) {
@@ -232,4 +232,4 @@ const char* submit_result_text(MotionSubmitResult result) {
     return "unknown";
 }
 
-}  // namespace ray2::motion
+}  // namespace laserctl::motion

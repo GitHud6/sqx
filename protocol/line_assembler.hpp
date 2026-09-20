@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 constexpr std::size_t kLineBufferSize = 256;
 
@@ -30,4 +30,4 @@ private:
     bool discard_until_eol_ = false;
 };
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

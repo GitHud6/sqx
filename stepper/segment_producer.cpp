@@ -2,7 +2,7 @@
 
 #include "timer_stepper_executor.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 std::size_t publish_available_segments() {
@@ -85,4 +85,4 @@ const StepperProfile& segment_producer_profile() {
     return stepper_prep_profile();
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

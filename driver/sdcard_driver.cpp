@@ -5,7 +5,7 @@
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 namespace {
 
 sdmmc_card_t* s_card = nullptr;
@@ -74,4 +74,4 @@ bool sdcard_is_inserted() {
     return gpio_get_level(static_cast<gpio_num_t>(kSdCardDetectPin)) == 0;
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

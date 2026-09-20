@@ -2,8 +2,8 @@
 
 #include "esp_err.h"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 esp_err_t protocol_start();
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

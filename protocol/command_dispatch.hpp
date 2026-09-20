@@ -8,7 +8,7 @@
 #include "command_executor.hpp"
 #include "service.hpp"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 // Initializes protocol-owned state required by both the normal command task
 // and the UART realtime ingress path.
@@ -54,4 +54,4 @@ command::Error command_sync_parser_position_from_machine();
 // deliberately unavailable until a later homing operation establishes it.
 void command_reset_after_hard_reset();
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

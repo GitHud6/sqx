@@ -12,9 +12,9 @@
 #include "soc/rmt_struct.h"
 #include "soc/soc_caps.h"
 
-#include "raycube_machine.hpp"
+#include "machine_profile.hpp"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 namespace {
 
 // The RMT memory is a separate APB-mapped region. Keep this small local view
@@ -29,7 +29,7 @@ struct RmtMemory {
 
 extern "C" RmtMemory RMTMEM;
 
-// Match ray2-main: 80 MHz / 20 yields a 4 MHz RMT clock. The first
+// Match legacy-upstream: 80 MHz / 20 yields a 4 MHz RMT clock. The first
 // 0.25 us holds the idle level, followed by the 3 us active STEP pulse.
 constexpr std::uint32_t kRmtClockDivider = 20;
 constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
@@ -37,7 +37,7 @@ constexpr std::uint32_t kRmtPulseSymbol = 1U | (12U << 16U) | (1U << 31U);
 std::atomic<bool> s_initialized = false;
 
 void configure_axis(const std::size_t axis_index) {
-    const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(axis_index));
+    const auto& axis = machine::machine_axis(static_cast<machine::Axis>(axis_index));
     rmt_ll_tx_stop(&RMT, axis_index);
     rmt_ll_tx_set_channel_clock_div(&RMT, axis_index, kRmtClockDivider);
     rmt_ll_tx_set_mem_blocks(&RMT, axis_index, 2);
@@ -122,4 +122,4 @@ void rmt_step_pulse_driver_trigger(const std::size_t axis_index) {
     rmt_ll_tx_start(&RMT, axis_index);
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

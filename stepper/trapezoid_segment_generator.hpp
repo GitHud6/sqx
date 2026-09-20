@@ -5,7 +5,7 @@
 
 #include "motion_profile.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 // Pure fixed-time segment generator. It owns no ring, GPIO, FreeRTOS state,
 // or executor state. The caller maps its major-axis output to X/Y steps.
@@ -44,4 +44,4 @@ bool trapezoid_segment_generator_init(TrapezoidSegmentGenerator& generator,
 bool trapezoid_segment_generator_next(TrapezoidSegmentGenerator& generator,
                                       TrapezoidTimeSlice& slice);
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

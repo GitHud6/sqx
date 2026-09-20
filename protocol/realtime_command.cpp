@@ -1,6 +1,6 @@
 #include "realtime_command.hpp"
 
-namespace ray2::protocol {
+namespace laserctl::protocol {
 
 bool realtime_command_from_byte(const std::uint8_t byte, RealtimeCommand& command) {
     switch (byte) {
@@ -33,4 +33,4 @@ void realtime_command_receive(const RealtimeCommand command) {
     }
 }
 
-}  // namespace ray2::protocol
+}  // namespace laserctl::protocol

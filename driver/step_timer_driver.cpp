@@ -11,7 +11,7 @@
 #include "esp_intr_alloc.h"
 #include "freertos/FreeRTOS.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 namespace {
 
 constexpr timer_group_t kStepTimerGroup = TIMER_GROUP_0;
@@ -146,4 +146,4 @@ std::uint64_t IRAM_ATTR step_timer_driver_lateness_ticks_from_isr() {
     return timer_group_get_counter_value_in_isr(kStepTimerGroup, kStepTimerIndex);
 }
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver

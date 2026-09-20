@@ -5,7 +5,7 @@
 
 #include "esp_err.h"
 
-namespace ray2::wifi {
+namespace laserctl::wifi {
 
 constexpr std::size_t kWifiSsidCapacity = 33;
 constexpr std::size_t kWifiIpTextCapacity = 16;
@@ -61,4 +61,4 @@ bool wifi_get_ap_ssid(char* buffer, std::size_t capacity);
 bool wifi_get_ap_ip(char* buffer, std::size_t capacity);
 bool wifi_get_runtime_info(RuntimeInfo& info);
 
-}  // namespace ray2::wifi
+}  // namespace laserctl::wifi

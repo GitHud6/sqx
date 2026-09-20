@@ -10,7 +10,7 @@
 #include "hal/gpio_ll.h"
 #include "soc/gpio_struct.h"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 namespace {
 
 bool s_initialized = false;
@@ -33,7 +33,7 @@ const machine::AxisHardware* axis_hardware(machine::Axis axis) {
         return nullptr;
     }
 
-    return &machine::raycube_axis(axis);
+    return &machine::machine_axis(axis);
 }
 
 bool axis_index(machine::Axis axis, std::size_t& index) {
@@ -59,7 +59,7 @@ esp_err_t stepper_init() {
     output_config.mode = GPIO_MODE_OUTPUT;
 
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
-        const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
+        const auto& axis = machine::machine_axis(static_cast<machine::Axis>(index));
         output_config.pin_bit_mask |= (1ULL << axis.step_pin);
         output_config.pin_bit_mask |= (1ULL << axis.direction_pin);
         output_config.pin_bit_mask |= (1ULL << axis.disable_pin);
@@ -71,7 +71,7 @@ esp_err_t stepper_init() {
     }
 
     for (std::size_t index = 0; index < machine::kAxisCount; ++index) {
-        const auto& axis = machine::raycube_axis(static_cast<machine::Axis>(index));
+        const auto& axis = machine::machine_axis(static_cast<machine::Axis>(index));
 
         result = set_output_level(axis.step_pin, false);
         if (result != ESP_OK) {
@@ -136,7 +136,7 @@ void stepper_set_direction_from_isr(const machine::Axis axis,
     if (index >= machine::kAxisCount) {
         return;
     }
-    const auto& hardware = machine::raycube_axis(axis);
+    const auto& hardware = machine::machine_axis(axis);
     const bool direction_level =
         (direction == Direction::Positive) ^ hardware.direction_inverted;
     gpio_ll_set_level(&GPIO, hardware.direction_pin, direction_level ? 1U : 0U);
@@ -184,7 +184,7 @@ double machine_position_mm(machine::Axis axis) {
         return 0.0;
     }
 
-    const float steps_per_mm = machine::raycube_axis(axis).steps_per_mm;
+    const float steps_per_mm = machine::machine_axis(axis).steps_per_mm;
     if (steps_per_mm <= 0.0F) {
         return 0.0;
     }
@@ -201,7 +201,7 @@ MachinePosition machine_position() {
 
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const float steps_per_mm =
-            machine::raycube_axis(static_cast<machine::Axis>(axis)).steps_per_mm;
+            machine::machine_axis(static_cast<machine::Axis>(axis)).steps_per_mm;
         if (steps_per_mm > 0.0F) {
             position.millimeters[axis] = static_cast<double>(position.steps[axis]) / steps_per_mm;
         }
@@ -224,7 +224,7 @@ esp_err_t stepper_set_machine_position_mm(const double position_mm[machine::kAxi
     std::array<std::int64_t, machine::kAxisCount> steps = {};
     for (std::size_t axis = 0; axis < machine::kAxisCount; ++axis) {
         const auto current_axis = static_cast<machine::Axis>(axis);
-        const auto& hardware = machine::raycube_axis(current_axis);
+        const auto& hardware = machine::machine_axis(current_axis);
         if (!std::isfinite(position_mm[axis]) || position_mm[axis] < 0.0 ||
             position_mm[axis] > hardware.max_travel_mm || hardware.steps_per_mm <= 0.0F) {
             return ESP_ERR_INVALID_ARG;
@@ -272,4 +272,4 @@ void stepper_invalidate_position(const PositionInvalidationReason reason) {
     portEXIT_CRITICAL(&s_position_lock);
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

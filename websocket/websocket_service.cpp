@@ -25,7 +25,7 @@
 #include "runtime_affinity.hpp"
 #include "wifi_service.hpp"
 
-namespace ray2::websocket {
+namespace laserctl::websocket {
 namespace {
 
 constexpr char kLogTag[] = "websocket";
@@ -669,4 +669,4 @@ bool websocket_service_publish_realtime_status(const std::uint8_t* const data,
     return true;
 }
 
-}  // namespace ray2::websocket
+}  // namespace laserctl::websocket

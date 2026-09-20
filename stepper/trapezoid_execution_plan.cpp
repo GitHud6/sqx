@@ -1,6 +1,6 @@
 #include "trapezoid_execution_plan.hpp"
 
-namespace ray2::stepper {
+namespace laserctl::stepper {
 
 bool trapezoid_execution_plan_build(const TrapezoidExecutionPlanInput& input,
                                     TrapezoidExecutionPlan& plan) {
@@ -37,4 +37,4 @@ bool trapezoid_execution_plan_complete(const TrapezoidExecutionPlan& plan) {
     return plan.generator.complete;
 }
 
-}  // namespace ray2::stepper
+}  // namespace laserctl::stepper

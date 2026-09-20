@@ -5,7 +5,7 @@
 
 #include "motion_request.hpp"
 
-namespace ray2::motion {
+namespace laserctl::motion {
 
 enum class MotionSubmitResult {
     Accepted,
@@ -21,4 +21,4 @@ const MotionGeometry& last_motion_geometry();
 std::uint64_t submitted_motion_count();
 const char* submit_result_text(MotionSubmitResult result);
 
-}  // namespace ray2::motion
+}  // namespace laserctl::motion

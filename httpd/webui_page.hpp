@@ -1,6 +1,6 @@
 #pragma once
 
-namespace ray2::httpd {
+namespace laserctl::httpd {
 
 // Small HTML entry point. Styles and behaviour are delivered as sequential
 // static assets so an HTTP refresh never needs to send the entire portal at once.
@@ -10,13 +10,13 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <title>RayCube 控制台</title>
+  <title>Laser Controller 控制台</title>
   <link rel="stylesheet" href="/app.css">
   <script>document.querySelector('link[href="/app.css"]').addEventListener('load', () => { const script = document.createElement('script'); script.src = '/app.js'; document.head.appendChild(script); }, { once: true });</script>
 </head>
 <body>
   <header>
-    <div><h1>RayCube 控制台</h1><div class="subtle">本地设备入口 · 初始界面</div></div>
+    <div><h1>Laser Controller 控制台</h1><div class="subtle">本地设备入口 · 初始界面</div></div>
     <div class="connection-group">
       <div id="position" class="badge offline">位置待确认</div>
       <div id="connection" class="badge offline">WebSocket 连接中</div>
@@ -111,4 +111,4 @@ constexpr char kWebUiPage[] = R"HTML(<!doctype html>
 </html>
 )HTML";
 
-}  // namespace ray2::httpd
+}  // namespace laserctl::httpd

@@ -9,7 +9,7 @@
 #include "motion_request.hpp"
 #include "stepper_driver.hpp"
 
-namespace ray2::planner {
+namespace laserctl::planner {
 
 constexpr std::size_t kPlannerQueueLength = 32;
 constexpr double kJunctionDeviationMm = 0.01;
@@ -101,4 +101,4 @@ std::size_t planner_free_blocks();
 void planner_wait_for_free_block();
 std::uint64_t planner_completed_block_count();
 
-}  // namespace ray2::planner
+}  // namespace laserctl::planner

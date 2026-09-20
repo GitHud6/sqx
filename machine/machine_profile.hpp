@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace ray2::machine {
+namespace laserctl::machine {
 
 enum class Axis : std::size_t {
     X = 0,
@@ -38,7 +38,7 @@ struct LaserHardware {
 constexpr std::size_t kAxisCount = 2;
 constexpr unsigned int kStepPulseMicroseconds = 3;
 
-const AxisHardware& raycube_axis(Axis axis);
-const LaserHardware& raycube_laser();
+const AxisHardware& machine_axis(Axis axis);
+const LaserHardware& machine_laser();
 
-}  // namespace ray2::machine
+}  // namespace laserctl::machine

@@ -2,7 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 
-namespace ray2::runtime {
+namespace laserctl::runtime {
 
 // Timer Group 0 is initialized from app_main on CPU0, and its Level-3 ISR is
 // allocated on that same core. All blocking, parsing and planning tasks must
@@ -10,4 +10,4 @@ namespace ray2::runtime {
 constexpr BaseType_t kRealtimeCore = 0;
 constexpr BaseType_t kNonRealtimeCore = 1;
 
-}  // namespace ray2::runtime
+}  // namespace laserctl::runtime

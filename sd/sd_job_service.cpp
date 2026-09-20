@@ -17,7 +17,7 @@
 #include "stepper_driver.hpp"
 #include "service.hpp"
 
-namespace ray2::sd {
+namespace laserctl::sd {
 namespace {
 
 constexpr char kLogTag[] = "sd_job";
@@ -86,7 +86,7 @@ void finish_job(JobState state,
     // A realtime Ctrl-X has already synchronously reset motion before asking
     // the SD feeder to exit. Avoid a second concurrent executor reset here.
     if (state == JobState::Faulted && fault != JobFault::Aborted) {
-        ray2::planner::planner_reset();
+        laserctl::planner::planner_reset();
     }
     log_position(state == JobState::Completed ? "completed" : "faulted");
     s_job_fault.store(fault);
@@ -96,13 +96,13 @@ void finish_job(JobState state,
     }
     s_job_state.store(state);
     if (fault == JobFault::Aborted) {
-        ray2::service::service_input_aborted(ray2::service::InputSource::SdCard);
+        laserctl::service::service_input_aborted(laserctl::service::InputSource::SdCard);
     } else if (state == JobState::Faulted) {
-        ray2::service::service_input_faulted(ray2::service::InputSource::SdCard,
-                                              ray2::service::FaultReason::General);
+        laserctl::service::service_input_faulted(laserctl::service::InputSource::SdCard,
+                                              laserctl::service::FaultReason::General);
     }
     if (s_job_file_access_claimed.exchange(false, std::memory_order_acq_rel)) {
-        ray2::sd::file_service_release_job_access();
+        laserctl::sd::file_service_release_job_access();
     }
     s_job_task = nullptr;
     vTaskDelete(nullptr);
@@ -134,7 +134,7 @@ void sd_job_task(void*) {
     update_progress(*reader);
 
     s_job_state.store(JobState::Running);
-    ray2::service::service_input_data_available(ray2::service::InputSource::SdCard);
+    laserctl::service::service_input_data_available(laserctl::service::InputSource::SdCard);
     log_position("running");
     char line[kGcodeLineCapacity] = {};
     bool program_ended = false;
@@ -145,7 +145,7 @@ void sd_job_task(void*) {
             return;
         }
         if (s_input_end_requested.load(std::memory_order_acquire) ||
-            !ray2::driver::sdcard_is_inserted()) {
+            !laserctl::driver::sdcard_is_inserted()) {
             reader->close();
             break;
         }
@@ -163,14 +163,14 @@ void sd_job_task(void*) {
                     return;
                 }
                 if (s_input_end_requested.load(std::memory_order_acquire) ||
-                    !ray2::driver::sdcard_is_inserted()) {
+                    !laserctl::driver::sdcard_is_inserted()) {
                     reader->close();
                     program_ended = true;
                     break;
                 }
                 const command::Error result =
-                    ray2::protocol::command_dispatch_external(
-                        line, std::strlen(line), ray2::service::InputSource::SdCard);
+                    laserctl::protocol::command_dispatch_external(
+                        line, std::strlen(line), laserctl::service::InputSource::SdCard);
                 if (result == command::Error::Ok) {
                     break;
                 }
@@ -179,7 +179,7 @@ void sd_job_task(void*) {
                     break;
                 }
                 if (result == command::Error::MotionBusy) {
-                    ray2::planner::planner_wait_for_free_block();
+                    laserctl::planner::planner_wait_for_free_block();
                     continue;
                 }
                 ESP_LOGE(kLogTag,
@@ -207,10 +207,10 @@ void sd_job_task(void*) {
     }
 
     reader->close();
-    ray2::service::service_input_ended(ray2::service::InputSource::SdCard);
+    laserctl::service::service_input_ended(laserctl::service::InputSource::SdCard);
     s_job_state.store(JobState::Draining);
     log_position("draining");
-    while (!ray2::planner::planner_execution_is_drained()) {
+    while (!laserctl::planner::planner_execution_is_drained()) {
         if (s_abort_requested.load(std::memory_order_acquire)) {
             finish_job(JobState::Faulted, JobFault::Aborted);
             return;
@@ -223,16 +223,16 @@ void sd_job_task(void*) {
 }  // namespace
 
 esp_err_t sd_job_start(const char* path) {
-    if (!ray2::driver::sdcard_is_mounted()) {
+    if (!laserctl::driver::sdcard_is_mounted()) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (ray2::stepper::machine_position_state() != ray2::stepper::PositionState::Known) {
+    if (laserctl::stepper::machine_position_state() != laserctl::stepper::PositionState::Known) {
         return ESP_ERR_INVALID_STATE;
     }
     if (sd_job_is_active()) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!ray2::sd::file_service_acquire_job_access()) {
+    if (!laserctl::sd::file_service_acquire_job_access()) {
         return ESP_ERR_INVALID_STATE;
     }
     s_job_file_access_claimed.store(true, std::memory_order_release);
@@ -240,7 +240,7 @@ esp_err_t sd_job_start(const char* path) {
     char normalized_path[kJobPathCapacity] = {};
     if (!copy_path(normalized_path, path)) {
         s_job_file_access_claimed.store(false, std::memory_order_release);
-        ray2::sd::file_service_release_job_access();
+        laserctl::sd::file_service_release_job_access();
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -255,9 +255,9 @@ esp_err_t sd_job_start(const char* path) {
     s_abort_requested.store(false, std::memory_order_release);
     s_input_end_requested.store(false, std::memory_order_release);
 
-    if (!ray2::service::service_input_started(ray2::service::InputSource::SdCard)) {
+    if (!laserctl::service::service_input_started(laserctl::service::InputSource::SdCard)) {
         s_job_file_access_claimed.store(false, std::memory_order_release);
-        ray2::sd::file_service_release_job_access();
+        laserctl::sd::file_service_release_job_access();
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -265,7 +265,7 @@ esp_err_t sd_job_start(const char* path) {
                                 runtime::kNonRealtimeCore) != pdPASS) {
         s_job_state.store(JobState::Faulted);
         s_job_file_access_claimed.store(false, std::memory_order_release);
-        ray2::sd::file_service_release_job_access();
+        laserctl::sd::file_service_release_job_access();
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
@@ -331,4 +331,4 @@ command::Error sd_job_command_error() {
     return s_job_command_error.load();
 }
 
-}  // namespace ray2::sd
+}  // namespace laserctl::sd

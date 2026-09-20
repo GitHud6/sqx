@@ -7,7 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-namespace ray2::driver {
+namespace laserctl::driver {
 
 constexpr int kUart0TxPin = 43;
 constexpr int kUart0RxPin = 44;
@@ -37,4 +37,4 @@ std::uint32_t uart0_normal_input_generation();
 int uart0_write(const std::uint8_t* data, std::size_t length);
 bool uart0_write_all(const std::uint8_t* data, std::size_t length);
 
-}  // namespace ray2::driver
+}  // namespace laserctl::driver
