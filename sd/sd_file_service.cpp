@@ -6,6 +6,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
+#include "esp_log.h"
+
 #include "file_reader.hpp"
 #include "sdcard_driver.hpp"
 #include "sd_job_service.hpp"
@@ -13,6 +15,7 @@
 namespace laserctl::sd {
 namespace {
 
+constexpr char kLogTag[] = "sd_file";
 std::atomic<bool> s_file_access_claimed = false;
 
 bool path_segment_is_valid(const char* const begin, const std::size_t length) {
@@ -22,22 +25,34 @@ bool path_segment_is_valid(const char* const begin, const std::size_t length) {
 }
 
 bool acquire_file_access() {
-    if (!laserctl::driver::sdcard_is_mounted() || laserctl::sd::sd_job_is_active()) return false;
+    if (!laserctl::driver::sdcard_is_mounted()) {
+        ESP_LOGW(kLogTag, "access denied reason=not-mounted");
+        return false;
+    }
+    if (laserctl::sd::sd_job_is_active()) {
+        ESP_LOGW(kLogTag, "access denied reason=sd-job-active");
+        return false;
+    }
 
     bool expected = false;
     if (!s_file_access_claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
                                                         std::memory_order_acquire)) {
+        ESP_LOGW(kLogTag, "access denied reason=file-access-held");
         return false;
     }
     if (!laserctl::driver::sdcard_is_mounted() || laserctl::sd::sd_job_is_active()) {
         s_file_access_claimed.store(false, std::memory_order_release);
+        ESP_LOGW(kLogTag, "access released during claim mounted=%d job=%d",
+                 laserctl::driver::sdcard_is_mounted(), laserctl::sd::sd_job_is_active());
         return false;
     }
+    ESP_LOGI(kLogTag, "access acquired");
     return true;
 }
 
 void release_file_access() {
-    s_file_access_claimed.store(false, std::memory_order_release);
+    const bool was_claimed = s_file_access_claimed.exchange(false, std::memory_order_acq_rel);
+    if (was_claimed) ESP_LOGI(kLogTag, "access released");
 }
 
 FileResult unavailable_result() {
@@ -115,6 +130,7 @@ FileResult normalize_path(const char* const source, char* const target, const st
 
 FileResult list_directory(const char* const path, ListEntryCallback callback, void* const user_data) {
     if (callback == nullptr) return FileResult::InvalidPath;
+    ESP_LOGI(kLogTag, "list begin path=%s", path == nullptr ? "<null>" : path);
 
     char normalized_path[kFilePathCapacity] = {};
     const FileResult normalized = normalize_path(path, normalized_path, sizeof(normalized_path));
@@ -163,6 +179,7 @@ FileResult list_directory(const char* const path, ListEntryCallback callback, vo
     }
     closedir(directory);
     release_file_access();
+    ESP_LOGI(kLogTag, "list end path=%s result=%s", normalized_path, file_result_text(result));
     return result;
 }
 
@@ -189,6 +206,7 @@ FileResult validate_directory(const char* const path) {
 FileResult file_read_open(const char* const path, FileReadSession& session, std::uintmax_t& size) {
     file_read_close(session);
     size = 0;
+    ESP_LOGI(kLogTag, "read open path=%s", path == nullptr ? "<null>" : path);
     char normalized_path[kFilePathCapacity] = {};
     const FileResult normalized = normalize_path(path, normalized_path, sizeof(normalized_path));
     if (normalized != FileResult::Ok || std::strcmp(normalized_path, "/") == 0) {
@@ -217,6 +235,8 @@ FileResult file_read_open(const char* const path, FileReadSession& session, std:
     }
     session.file = file;
     size = static_cast<std::uintmax_t>(path_stat.st_size);
+    ESP_LOGI(kLogTag, "read opened path=%s bytes=%llu", normalized_path,
+             static_cast<unsigned long long>(size));
     return FileResult::Ok;
 }
 
@@ -235,6 +255,7 @@ void file_read_close(FileReadSession& session) {
         std::fclose(static_cast<std::FILE*>(session.file));
         clear_read_session(session);
         release_file_access();
+        ESP_LOGI(kLogTag, "read closed");
     }
 }
 
@@ -271,6 +292,8 @@ FileResult file_upload_begin(const char* const path, FileUploadSession& session)
         release_file_access();
         return FileResult::IoError;
     }
+    ESP_LOGI(kLogTag, "upload opened target=%s temporary=%s", session.target_path,
+             session.temporary_path);
     return FileResult::Ok;
 }
 
@@ -285,6 +308,7 @@ FileResult file_upload_write(FileUploadSession& session, const void* const data,
 
 FileResult file_upload_commit(FileUploadSession& session) {
     if (session.file == nullptr) return FileResult::IoError;
+    ESP_LOGI(kLogTag, "upload commit target=%s", session.target_path);
     std::FILE* const file = static_cast<std::FILE*>(session.file);
     const bool flushed = std::fflush(file) == 0;
     const bool closed = std::fclose(file) == 0;
@@ -325,10 +349,13 @@ FileResult file_upload_commit(FileUploadSession& session) {
     if (target_exists) (void)std::remove(backup_full_path);
     clear_upload_session(session);
     release_file_access();
+    ESP_LOGI(kLogTag, "upload committed");
     return FileResult::Ok;
 }
 
 void file_upload_abort(FileUploadSession& session) {
+    const bool had_session = session.target_path[0] != '\0' || session.file != nullptr;
+    if (had_session) ESP_LOGW(kLogTag, "upload abort target=%s", session.target_path);
     if (session.file != nullptr) {
         std::fclose(static_cast<std::FILE*>(session.file));
         session.file = nullptr;
@@ -396,11 +423,14 @@ bool list_root(ListEntryCallback callback, void* user_data) {
 
 bool file_service_acquire_job_access() {
     bool expected = false;
-    return s_file_access_claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
-                                                          std::memory_order_acquire);
+    const bool acquired = s_file_access_claimed.compare_exchange_strong(
+        expected, true, std::memory_order_acq_rel, std::memory_order_acquire);
+    ESP_LOGI(kLogTag, "job access %s", acquired ? "acquired" : "denied");
+    return acquired;
 }
 
 void file_service_release_job_access() {
+    ESP_LOGI(kLogTag, "job access release");
     release_file_access();
 }
 

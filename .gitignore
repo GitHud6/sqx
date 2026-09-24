@@ -2,10 +2,16 @@
 /build/
 /sdkconfig
 /sdkconfig.old
+/CMakeCache.txt
+/CMakeFiles/
 
 # IDE and editor files
 /.idea/
 *.code-workspace
+/.clangd
+
+# Local packet captures
+*.pcapng
 
 # Python cache
 __pycache__/

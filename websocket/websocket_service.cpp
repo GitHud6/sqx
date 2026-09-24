@@ -32,7 +32,9 @@ constexpr char kLogTag[] = "websocket";
 constexpr std::uint16_t kServerPort = 8849;
 constexpr std::size_t kMaximumInboundFrameBytes = 1024;
 constexpr std::size_t kMaximumOutboundMessageBytes = 1600;
-constexpr std::size_t kOutboundQueueLength = 32;
+// One portal client is supported. Eight frames retain room for a command
+// response burst without permanently reserving 32 x 1600 bytes of DRAM.
+constexpr std::size_t kOutboundQueueLength = 8;
 constexpr std::size_t kStatusMessageCapacity = 256;
 constexpr std::size_t kHandshakeCapacity = 2048;
 constexpr std::size_t kReceiveCapacity = kMaximumInboundFrameBytes + 32;
@@ -212,13 +214,19 @@ bool queue_message(const std::uint32_t target_session, const std::uint8_t opcode
         length > kMaximumOutboundMessageBytes || s_free_messages == nullptr ||
         s_ready_messages == nullptr) return false;
     OutboundMessage* message = nullptr;
-    if (xQueueReceive(s_free_messages, &message, 0) != pdTRUE) return false;
+    if (xQueueReceive(s_free_messages, &message, 0) != pdTRUE) {
+        ESP_LOGW(kLogTag, "outbound queue exhausted target=%u bytes=%u",
+                 static_cast<unsigned>(target_session), static_cast<unsigned>(length));
+        return false;
+    }
     message->target_session = target_session;
     message->opcode = opcode;
     message->length = length;
     if (length != 0) std::memcpy(message->data, data, length);
     if (xQueueSend(s_ready_messages, &message, 0) != pdTRUE) {
         (void)xQueueSend(s_free_messages, &message, 0);
+        ESP_LOGW(kLogTag, "outbound queue rejected target=%u bytes=%u",
+                 static_cast<unsigned>(target_session), static_cast<unsigned>(length));
         return false;
     }
     return true;
@@ -350,7 +358,11 @@ bool parse_frame(std::array<std::uint8_t, kReceiveCapacity>& buffer, std::size_t
     if (buffer_length < 2) return true;
     const std::uint8_t first = buffer[0];
     const std::uint8_t second = buffer[1];
-    if ((first & 0x80U) == 0 || (second & 0x80U) == 0) return false;
+    if ((first & 0x80U) == 0 || (second & 0x80U) == 0) {
+        ESP_LOGW(kLogTag, "invalid frame flags session=%u first=0x%02x second=0x%02x",
+                 static_cast<unsigned>(session), first, second);
+        return false;
+    }
     const std::uint8_t opcode = first & 0x0fU;
     std::size_t header_length = 2;
     std::uint64_t payload_length = second & 0x7fU;
@@ -359,9 +371,14 @@ bool parse_frame(std::array<std::uint8_t, kReceiveCapacity>& buffer, std::size_t
         payload_length = (static_cast<std::uint64_t>(buffer[2]) << 8U) | buffer[3];
         header_length = 4;
     } else if (payload_length == 127) {
+        ESP_LOGW(kLogTag, "unsupported 64-bit frame session=%u", static_cast<unsigned>(session));
         return false;
     }
-    if (payload_length > kMaximumInboundFrameBytes) return false;
+    if (payload_length > kMaximumInboundFrameBytes) {
+        ESP_LOGW(kLogTag, "frame too large session=%u bytes=%u",
+                 static_cast<unsigned>(session), static_cast<unsigned>(payload_length));
+        return false;
+    }
     const std::size_t frame_length = header_length + 4U + static_cast<std::size_t>(payload_length);
     if (buffer_length < frame_length) return true;
     const std::size_t mask_offset = header_length;
@@ -388,8 +405,11 @@ bool parse_frame(std::array<std::uint8_t, kReceiveCapacity>& buffer, std::size_t
         case kPong:
             break;
         case kClose:
+            ESP_LOGI(kLogTag, "peer close frame session=%u", static_cast<unsigned>(session));
             return false;
         default:
+            ESP_LOGW(kLogTag, "unsupported frame opcode session=%u opcode=0x%02x",
+                     static_cast<unsigned>(session), opcode);
             return false;
     }
     const std::size_t remaining = buffer_length - frame_length;
@@ -470,7 +490,7 @@ void websocket_task(void*) {
         timeout.tv_usec = 10000;
         const int selected = select(maximum_fd + 1, &read_set, &write_set, nullptr, &timeout);
         if (selected < 0) {
-            if (errno != EINTR) ESP_LOGW(kLogTag, "select failed errno=%d", errno);
+            if (errno != EINTR) ESP_LOGW(kLogTag, "select failed fd=%d errno=%d", client_fd, errno);
             continue;
         }
 
@@ -486,6 +506,7 @@ void websocket_task(void*) {
                 ESP_LOGI(kLogTag, "session open port=%u fd=%d session=%u", kServerPort, client_fd,
                          static_cast<unsigned>(session));
             } else if (accepted >= 0) {
+                ESP_LOGW(kLogTag, "accepted socket setup failed fd=%d errno=%d", accepted, errno);
                 close(accepted);
             }
         }
@@ -498,7 +519,10 @@ void websocket_task(void*) {
                                               handshake_response_sent,
                                           handshake_response_length - handshake_response_sent, 0);
                 if (sent > 0) handshake_response_sent += static_cast<std::size_t>(sent);
-                else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) close_client();
+                else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    ESP_LOGW(kLogTag, "handshake send failed fd=%d errno=%d", client_fd, errno);
+                    close_client();
+                }
                 if (client_fd >= 0 && handshake_response_sent == handshake_response_length) {
                     ready = true;
                     s_client_ready.store(true, std::memory_order_release);
@@ -513,7 +537,12 @@ void websocket_task(void*) {
                                               transmit.header_length - transmit.header_sent, 0);
                     if (sent > 0) transmit.header_sent += static_cast<std::size_t>(sent);
                     else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-                    else { close_client(); break; }
+                    else {
+                        ESP_LOGW(kLogTag, "frame header send failed fd=%d session=%u errno=%d",
+                                 client_fd, static_cast<unsigned>(session), errno);
+                        close_client();
+                        break;
+                    }
                 }
                 while (client_fd >= 0 && transmit.header_sent == transmit.header_length &&
                        transmit.payload_sent < transmit.message->length) {
@@ -522,7 +551,15 @@ void websocket_task(void*) {
                                               transmit.message->length - transmit.payload_sent, 0);
                     if (sent > 0) transmit.payload_sent += static_cast<std::size_t>(sent);
                     else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-                    else { close_client(); break; }
+                    else {
+                        ESP_LOGW(kLogTag,
+                                 "frame payload send failed fd=%d session=%u offset=%u/%u errno=%d",
+                                 client_fd, static_cast<unsigned>(session),
+                                 static_cast<unsigned>(transmit.payload_sent),
+                                 static_cast<unsigned>(transmit.message->length), errno);
+                        close_client();
+                        break;
+                    }
                 }
                 if (client_fd >= 0 && transmit.message != nullptr &&
                     transmit.payload_sent == transmit.message->length) release_active(transmit);
@@ -532,7 +569,13 @@ void websocket_task(void*) {
         if (client_fd >= 0 && FD_ISSET(client_fd, &read_set)) {
             const ssize_t received = recv(client_fd, s_session_buffers.receive.data() + receive_length,
                                           s_session_buffers.receive.size() - receive_length, 0);
-            if (received == 0 || (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+            if (received == 0) {
+                ESP_LOGW(kLogTag, "peer disconnected fd=%d session=%u",
+                         client_fd, static_cast<unsigned>(session));
+                close_client();
+            } else if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                ESP_LOGW(kLogTag, "frame recv failed fd=%d session=%u errno=%d",
+                         client_fd, static_cast<unsigned>(session), errno);
                 close_client();
             } else if (received > 0) {
                 receive_length += static_cast<std::size_t>(received);
@@ -557,6 +600,9 @@ void websocket_task(void*) {
                                                       s_session_buffers.handshake_response.data(),
                                                       s_session_buffers.handshake_response.size(),
                                                       handshake_response_length)) {
+                            ESP_LOGW(kLogTag, "handshake parse failed fd=%d session=%u bytes=%u",
+                                     client_fd, static_cast<unsigned>(session),
+                                     static_cast<unsigned>(request_length));
                             close_client();
                         } else {
                             handshake_response_sent = 0;
@@ -568,6 +614,9 @@ void websocket_task(void*) {
                             receive_length = trailing;
                         }
                     } else if (receive_length >= s_session_buffers.receive.size()) {
+                        ESP_LOGW(kLogTag, "handshake too large fd=%d session=%u bytes=%u",
+                                 client_fd, static_cast<unsigned>(session),
+                                 static_cast<unsigned>(receive_length));
                         close_client();
                     }
                 } else {
@@ -581,6 +630,9 @@ void websocket_task(void*) {
                         if (receive_length == previous_length) break;
                     }
                     if (!valid || receive_length > s_session_buffers.receive.size()) {
+                        ESP_LOGW(kLogTag, "frame parse failed fd=%d session=%u buffered=%u",
+                                 client_fd, static_cast<unsigned>(session),
+                                 static_cast<unsigned>(receive_length));
                         close_client();
                     }
                 }

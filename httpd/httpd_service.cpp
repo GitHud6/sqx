@@ -7,6 +7,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -29,6 +31,7 @@ constexpr std::size_t kCommandBodyCapacity = 1024;
 constexpr std::size_t kMaximumHttpSessions = 4;
 constexpr std::size_t kFileTransferBufferCapacity = 1024;
 constexpr std::size_t kMaximumUploadBytes = 16U * 1024U * 1024U;
+constexpr std::size_t kTransferTraceInterval = 64U * 1024U;
 // Start small: this handler runs beside the WebSocket and several App setup
 // connections, so a fixed 16 KiB contiguous allocation is unnecessarily
 // fragile. The response expands only when the actual directory requires it.
@@ -41,6 +44,60 @@ constexpr std::size_t kMultipartHeaderCapacity = 2048;
 constexpr std::size_t kMaximumHttpUriHandlers = 14;
 
 httpd_handle_t s_server = nullptr;
+
+using HttpHandler = esp_err_t (*)(httpd_req_t*);
+
+std::uint32_t trace_now_ms() {
+    return esp_log_timestamp();
+}
+
+void log_http_request_begin(httpd_req_t* const request, const char* const route,
+                            const std::uint32_t started_ms) {
+    const int fd = request == nullptr ? -1 : httpd_req_to_sockfd(request);
+    const int method = request == nullptr ? -1 : request->method;
+    const char* const uri = request == nullptr ? "<null>" : request->uri;
+    const std::size_t content_length = request == nullptr ? 0 : request->content_len;
+    const std::size_t heap_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const std::size_t heap_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const unsigned stack_free = static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+    ESP_LOGI(kLogTag,
+             "request begin t=%u route=%s fd=%d method=%d uri=%s content=%u heap=%u largest=%u stack=%u",
+             static_cast<unsigned>(started_ms), route, fd, method, uri,
+             static_cast<unsigned>(content_length), static_cast<unsigned>(heap_free),
+             static_cast<unsigned>(heap_largest), stack_free);
+}
+
+esp_err_t invoke_traced_handler(httpd_req_t* const request, const char* const route,
+                                const HttpHandler handler) {
+    const std::uint32_t started_ms = trace_now_ms();
+    log_http_request_begin(request, route, started_ms);
+    const esp_err_t result = handler(request);
+    const std::uint32_t elapsed_ms = trace_now_ms() - started_ms;
+    const std::size_t heap_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const std::size_t heap_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const unsigned stack_free = static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+    ESP_LOGI(kLogTag,
+             "request end route=%s fd=%d result=%s elapsed=%u heap=%u largest=%u stack=%u errno=%d",
+             route, request == nullptr ? -1 : httpd_req_to_sockfd(request),
+             esp_err_to_name(result), static_cast<unsigned>(elapsed_ms),
+             static_cast<unsigned>(heap_free), static_cast<unsigned>(heap_largest), stack_free, errno);
+    return result;
+}
+
+esp_err_t http_session_open(httpd_handle_t hd, const int fd) {
+    (void)hd;
+    ESP_LOGI(kLogTag, "session open port=8848 fd=%d", fd);
+    // Keep the ESP-IDF HTTPD default send function for the transport A/B test.
+    return ESP_OK;
+}
+
+void http_session_close(httpd_handle_t, const int fd) {
+    ESP_LOGI(kLogTag, "session close port=8848 fd=%d", fd);
+}
 
 esp_err_t send_text(httpd_req_t* const request, const char* const body, const char* const content_type,
                     const char* const status = nullptr) {
@@ -67,11 +124,20 @@ esp_err_t send_gzip(httpd_req_t* const request, const std::uint8_t* const body,
     if (result != ESP_OK) return result;
     result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     if (result != ESP_OK) return result;
+    const int fd = httpd_req_to_sockfd(request);
+    const std::uint32_t started_ms = trace_now_ms();
+    ESP_LOGI(kLogTag, "static send begin fd=%d bytes=%u type=%s", fd,
+             static_cast<unsigned>(body_size), content_type);
     errno = 0;
     result = httpd_resp_send(request, reinterpret_cast<const char*>(body), body_size);
+    const std::uint32_t elapsed_ms = trace_now_ms() - started_ms;
     if (result != ESP_OK) {
-        ESP_LOGW(kLogTag, "gzip send failed fd=%d bytes=%u result=%s errno=%d", httpd_req_to_sockfd(request),
-                 static_cast<unsigned>(body_size), esp_err_to_name(result), errno);
+        ESP_LOGW(kLogTag, "gzip send failed fd=%d bytes=%u result=%s errno=%d",
+                 fd, static_cast<unsigned>(body_size),
+                 esp_err_to_name(result), errno);
+    } else {
+        ESP_LOGI(kLogTag, "static send end fd=%d bytes=%u elapsed=%u", fd,
+                 static_cast<unsigned>(body_size), static_cast<unsigned>(elapsed_ms));
     }
     return result;
 }
@@ -195,11 +261,19 @@ bool receive_command_body(httpd_req_t* const request, char* const body, std::siz
             const int received = httpd_req_recv(
                 request, body + body_length,
                 static_cast<std::size_t>(request->content_len) - body_length);
-            if (received <= 0) return false;
+            if (received <= 0) {
+                ESP_LOGW(kLogTag, "command recv failed fd=%d requested=%u received=%d errno=%d",
+                         httpd_req_to_sockfd(request),
+                         static_cast<unsigned>(static_cast<std::size_t>(request->content_len) - body_length),
+                         received, errno);
+                return false;
+            }
             body_length += static_cast<std::size_t>(received);
         }
         body[body_length] = '\0';
         command_text = true;
+        ESP_LOGI(kLogTag, "command body fd=%d bytes=%u", httpd_req_to_sockfd(request),
+                 static_cast<unsigned>(body_length));
         return body_length != 0;
     }
 
@@ -215,7 +289,11 @@ bool receive_command_body(httpd_req_t* const request, char* const body, std::siz
         return false;
     }
     body_length = std::strlen(body);
-    return body_length != 0 && url_decode_in_place(body, body_length);
+    const bool decoded = body_length != 0 && url_decode_in_place(body, body_length);
+    ESP_LOGI(kLogTag, "command query fd=%d bytes=%u text=%d decoded=%d",
+             httpd_req_to_sockfd(request), static_cast<unsigned>(body_length), command_text,
+             decoded);
+    return decoded;
 }
 
 bool receive_path_query(httpd_req_t* const request, char* const path, const std::size_t capacity) {
@@ -247,7 +325,12 @@ esp_err_t command_get_handler(httpd_req_t* const request) {
         return send_json_error(request, "400 Bad Request", "invalid-command-body");
     }
 
-    switch (network::network_command_adapter_submit(body, body_length, command_text)) {
+    const network::SubmitResult submit_result =
+        network::network_command_adapter_submit(body, body_length, command_text);
+    ESP_LOGI(kLogTag, "command submit fd=%d bytes=%u text=%d result=%d",
+             httpd_req_to_sockfd(request), static_cast<unsigned>(body_length), command_text,
+             static_cast<int>(submit_result));
+    switch (submit_result) {
         case network::SubmitResult::Accepted:
             return send_empty_accepted(request);
         case network::SubmitResult::Busy:
@@ -297,15 +380,51 @@ void format_human_size(const std::uintmax_t size, char* const target, const std:
 }
 
 struct FileListResponseContext {
-    httpd_req_t* request = nullptr;
+    char* response = nullptr;
+    std::size_t capacity = 0;
+    std::size_t length = 0;
+    std::size_t entries = 0;
     bool first = true;
     bool write_failed = false;
 };
 
+bool append_file_list_response(FileListResponseContext& context, const char* const text,
+                               const std::size_t text_length) {
+    if (context.response == nullptr || text == nullptr || context.length > context.capacity) {
+        context.write_failed = true;
+        return false;
+    }
+
+    const std::size_t required_capacity = context.length + text_length + 1;
+    if (required_capacity > context.capacity) {
+        std::size_t expanded_capacity = context.capacity;
+        while (expanded_capacity < required_capacity &&
+               expanded_capacity < kUploadListingMaximumCapacity) {
+            expanded_capacity *= 2;
+        }
+        if (expanded_capacity < required_capacity) {
+            context.write_failed = true;
+            return false;
+        }
+        char* const expanded_response = static_cast<char*>(
+            heap_caps_realloc(context.response, expanded_capacity, MALLOC_CAP_8BIT));
+        if (expanded_response == nullptr) {
+            context.write_failed = true;
+            return false;
+        }
+        context.response = expanded_response;
+        context.capacity = expanded_capacity;
+    }
+    std::memcpy(context.response + context.length, text, text_length);
+    context.length += text_length;
+    context.response[context.length] = '\0';
+    return true;
+}
+
 bool write_file_list_entry(const char* const path, const std::uintmax_t size, const bool is_directory,
                            void* const user_data) {
     auto* const context = static_cast<FileListResponseContext*>(user_data);
-    if (context == nullptr || context->request == nullptr) return false;
+    if (context == nullptr || context->response == nullptr || path == nullptr) return false;
 
     char escaped_path[512] = {};
     std::size_t escaped_length = 0;
@@ -319,11 +438,12 @@ bool write_file_list_entry(const char* const path, const std::uintmax_t size, co
         context->first ? "" : ",", escaped_path, static_cast<unsigned long long>(size),
         is_directory ? "true" : "false");
     if (entry_length <= 0 || static_cast<std::size_t>(entry_length) >= sizeof(entry) ||
-        httpd_resp_send_chunk(context->request, entry, entry_length) != ESP_OK) {
+        !append_file_list_response(*context, entry, static_cast<std::size_t>(entry_length))) {
         context->write_failed = true;
         return false;
     }
     context->first = false;
+    ++context->entries;
     return true;
 }
 
@@ -450,10 +570,14 @@ esp_err_t file_download_handler(httpd_req_t* const request, const char* const pa
     std::uintmax_t size = 0;
     const sd::FileResult open_result = sd::file_read_open(path, session, size);
     if (open_result != sd::FileResult::Ok) return send_file_error(request, open_result);
+    ESP_LOGI(kLogTag, "file download begin fd=%d path=%s bytes=%llu",
+             httpd_req_to_sockfd(request), path, static_cast<unsigned long long>(size));
 
     esp_err_t result = httpd_resp_set_type(request, "application/octet-stream");
     if (result == ESP_OK) result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     char transfer_buffer[kFileTransferBufferCapacity] = {};
+    std::size_t transferred = 0;
+    std::size_t next_trace = kTransferTraceInterval;
     while (result == ESP_OK) {
         std::size_t length = 0;
         const sd::FileResult read_result =
@@ -466,10 +590,28 @@ esp_err_t file_download_handler(httpd_req_t* const request, const char* const pa
         }
         if (length == 0) break;
         result = httpd_resp_send_chunk(request, transfer_buffer, length);
+        if (result != ESP_OK) {
+            ESP_LOGW(kLogTag,
+                     "file download send failed fd=%d path=%s sent=%u/%u result=%s errno=%d",
+                     httpd_req_to_sockfd(request), path, static_cast<unsigned>(transferred),
+                     static_cast<unsigned>(size), esp_err_to_name(result), errno);
+        } else {
+            transferred += length;
+            if (transferred >= next_trace) {
+                ESP_LOGI(kLogTag, "file download progress fd=%d path=%s sent=%u/%u",
+                         httpd_req_to_sockfd(request), path, static_cast<unsigned>(transferred),
+                         static_cast<unsigned>(size));
+                next_trace = transferred + kTransferTraceInterval;
+            }
+        }
     }
     sd::file_read_close(session);
     if (result != ESP_OK) return result;
-    return httpd_resp_send_chunk(request, nullptr, 0);
+    result = httpd_resp_send_chunk(request, nullptr, 0);
+    ESP_LOGI(kLogTag, "file download end fd=%d path=%s sent=%u result=%s",
+             httpd_req_to_sockfd(request), path, static_cast<unsigned>(transferred),
+             esp_err_to_name(result));
+    return result;
 }
 
 esp_err_t files_get_handler(httpd_req_t* const request) {
@@ -483,24 +625,42 @@ esp_err_t files_get_handler(httpd_req_t* const request) {
     }
     if (validation != sd::FileResult::Ok) return send_file_error(request, validation);
 
-    esp_err_t result = httpd_resp_set_type(request, "application/json");
-    if (result != ESP_OK) return result;
-    result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
-    if (result != ESP_OK) return result;
-    if (httpd_resp_send_chunk(request, "[", 1) != ESP_OK) return ESP_FAIL;
-
     FileListResponseContext context = {};
-    context.request = request;
+    context.response = static_cast<char*>(
+        heap_caps_malloc(kUploadListingInitialCapacity, MALLOC_CAP_8BIT));
+    context.capacity = kUploadListingInitialCapacity;
+    if (context.response == nullptr) {
+        return send_json_error(request, "503 Service Unavailable", "file-list-unavailable");
+    }
+    context.response[0] = '\0';
+    if (!append_file_list_response(context, "[", 1)) {
+        heap_caps_free(context.response);
+        return send_json_error(request, "503 Service Unavailable", "file-list-unavailable");
+    }
     const sd::FileResult list_result =
         sd::list_directory(requested_path, write_file_list_entry, &context);
-    if (list_result != sd::FileResult::Ok || context.write_failed) {
+    ESP_LOGI(kLogTag, "file list collected fd=%d path=%s entries=%u bytes=%u result=%s",
+             httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(context.entries),
+             static_cast<unsigned>(context.length), sd::file_result_text(list_result));
+    if (context.write_failed) {
         ESP_LOGW(kLogTag, "file list failed path=%s result=%s", requested_path,
                  sd::file_result_text(list_result));
-        return ESP_FAIL;
+        heap_caps_free(context.response);
+        return send_json_error(request, "507 Insufficient Storage", "file-list-too-large");
     }
-    return httpd_resp_send_chunk(request, "]\n", 2) == ESP_OK
-               ? httpd_resp_send_chunk(request, nullptr, 0)
-               : ESP_FAIL;
+    if (list_result != sd::FileResult::Ok || !append_file_list_response(context, "]\n", 2)) {
+        ESP_LOGW(kLogTag, "file list failed path=%s result=%s", requested_path,
+                 sd::file_result_text(list_result));
+        heap_caps_free(context.response);
+        return list_result == sd::FileResult::Ok
+                   ? send_json_error(request, "507 Insufficient Storage", "file-list-too-large")
+                   : send_file_error(request, list_result);
+    }
+    esp_err_t result = httpd_resp_set_type(request, "application/json");
+    if (result == ESP_OK) result = httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (result == ESP_OK) result = httpd_resp_send(request, context.response, context.length);
+    heap_caps_free(context.response);
+    return result;
 }
 
 bool request_is_multipart_form(httpd_req_t* const request) {
@@ -615,27 +775,51 @@ bool receive_multipart_header(httpd_req_t* const request, char* const header,
         const std::size_t free_length = kMultipartHeaderCapacity - 1 - header_length;
         const std::size_t request_length = std::min(unread_length, free_length);
         const int received = httpd_req_recv(request, header + header_length, request_length);
-        if (received <= 0) return false;
+        if (received <= 0) {
+            ESP_LOGW(kLogTag, "multipart header recv failed fd=%d received=%d unread=%u errno=%d",
+                     httpd_req_to_sockfd(request), received, static_cast<unsigned>(unread_length),
+                     errno);
+            return false;
+        }
         const std::size_t received_length = static_cast<std::size_t>(received);
         header_length += received_length;
         unread_length -= received_length;
         header[header_length] = '\0';
-        if (parse_multipart_upload_info(header, info)) return true;
+        if (parse_multipart_upload_info(header, info)) {
+            ESP_LOGI(kLogTag,
+                     "multipart header parsed fd=%d header=%u unread=%u path=%s file=%s bytes=%u",
+                     httpd_req_to_sockfd(request), static_cast<unsigned>(header_length),
+                     static_cast<unsigned>(unread_length), info.directory, info.filename,
+                     static_cast<unsigned>(info.file_size));
+            return true;
+        }
     }
     return false;
 }
 
 bool write_upload_bytes(httpd_req_t* const request, sd::FileUploadSession& session,
-                        char* const transfer_buffer, std::size_t& unread_length,
+                        char* const transfer_buffer, const std::size_t transfer_buffer_capacity,
+                        std::size_t& unread_length,
                         std::size_t file_length) {
-    if (file_length > unread_length) return false;
+    if (transfer_buffer == nullptr || transfer_buffer_capacity == 0 || file_length > unread_length) {
+        return false;
+    }
     while (file_length > 0) {
-        const std::size_t request_length = std::min(file_length, sizeof(transfer_buffer));
+        const std::size_t request_length = std::min(file_length, transfer_buffer_capacity);
         const int received = httpd_req_recv(request, transfer_buffer, request_length);
-        if (received <= 0) return false;
+        if (received <= 0) {
+            ESP_LOGW(kLogTag, "multipart file recv failed fd=%d received=%d remaining=%u errno=%d",
+                     httpd_req_to_sockfd(request), received, static_cast<unsigned>(file_length),
+                     errno);
+            return false;
+        }
         const std::size_t received_length = static_cast<std::size_t>(received);
-        if (received_length > unread_length ||
-            sd::file_upload_write(session, transfer_buffer, received_length) != sd::FileResult::Ok) {
+        const sd::FileResult write_result =
+            sd::file_upload_write(session, transfer_buffer, received_length);
+        if (received_length > unread_length || write_result != sd::FileResult::Ok) {
+            ESP_LOGW(kLogTag, "multipart file write failed fd=%d received=%u unread=%u result=%s",
+                     httpd_req_to_sockfd(request), static_cast<unsigned>(received_length),
+                     static_cast<unsigned>(unread_length), sd::file_result_text(write_result));
             return false;
         }
         unread_length -= received_length;
@@ -645,11 +829,18 @@ bool write_upload_bytes(httpd_req_t* const request, sd::FileUploadSession& sessi
 }
 
 bool discard_upload_bytes(httpd_req_t* const request, char* const transfer_buffer,
+                          const std::size_t transfer_buffer_capacity,
                           std::size_t& unread_length) {
+    if (transfer_buffer == nullptr || transfer_buffer_capacity == 0) return false;
     while (unread_length > 0) {
-        const std::size_t request_length = std::min(unread_length, sizeof(transfer_buffer));
+        const std::size_t request_length = std::min(unread_length, transfer_buffer_capacity);
         const int received = httpd_req_recv(request, transfer_buffer, request_length);
-        if (received <= 0) return false;
+        if (received <= 0) {
+            ESP_LOGW(kLogTag, "multipart tail recv failed fd=%d received=%d unread=%u errno=%d",
+                     httpd_req_to_sockfd(request), received, static_cast<unsigned>(unread_length),
+                     errno);
+            return false;
+        }
         const std::size_t received_length = static_cast<std::size_t>(received);
         if (received_length > unread_length) return false;
         unread_length -= received_length;
@@ -665,25 +856,46 @@ esp_err_t upload_raw_post_handler(httpd_req_t* const request) {
     sd::FileUploadSession session = {};
     const sd::FileResult begin_result = sd::file_upload_begin(requested_path, session);
     if (begin_result != sd::FileResult::Ok) return send_file_error(request, begin_result);
+    const std::size_t total = static_cast<std::size_t>(request->content_len);
+    ESP_LOGI(kLogTag, "upload raw begin fd=%d path=%s bytes=%u",
+             httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(total));
 
     char transfer_buffer[kFileTransferBufferCapacity] = {};
-    std::size_t remaining = static_cast<std::size_t>(request->content_len);
+    std::size_t remaining = total;
+    std::size_t next_trace = kTransferTraceInterval;
     while (remaining > 0) {
         const int received = httpd_req_recv(
             request, transfer_buffer,
             remaining < sizeof(transfer_buffer)
                 ? remaining
                 : sizeof(transfer_buffer));
-        if (received <= 0 ||
-            sd::file_upload_write(session, transfer_buffer, static_cast<std::size_t>(received)) !=
-                sd::FileResult::Ok) {
+        if (received <= 0) {
+            ESP_LOGW(kLogTag, "upload raw recv failed fd=%d remaining=%u received=%d errno=%d",
+                     httpd_req_to_sockfd(request), static_cast<unsigned>(remaining), received, errno);
+            sd::file_upload_abort(session);
+            return send_json_error(request, "500 Internal Server Error", "upload-failed");
+        }
+        const sd::FileResult write_result =
+            sd::file_upload_write(session, transfer_buffer, static_cast<std::size_t>(received));
+        if (write_result != sd::FileResult::Ok) {
+            ESP_LOGW(kLogTag, "upload raw write failed fd=%d received=%d result=%s",
+                     httpd_req_to_sockfd(request), received, sd::file_result_text(write_result));
             sd::file_upload_abort(session);
             return send_json_error(request, "500 Internal Server Error", "upload-failed");
         }
         remaining -= static_cast<std::size_t>(received);
+        const std::size_t transferred = total - remaining;
+        if (transferred >= next_trace) {
+            ESP_LOGI(kLogTag, "upload raw progress fd=%d path=%s received=%u/%u",
+                     httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(transferred),
+                     static_cast<unsigned>(total));
+            next_trace = transferred + kTransferTraceInterval;
+        }
     }
     const sd::FileResult commit_result = sd::file_upload_commit(session);
     if (commit_result != sd::FileResult::Ok) return send_file_error(request, commit_result);
+    ESP_LOGI(kLogTag, "upload raw end fd=%d path=%s bytes=%u", httpd_req_to_sockfd(request),
+             requested_path, static_cast<unsigned>(total));
     return send_text(request, "{\"result\":\"ok\"}\n", "application/json");
 }
 
@@ -717,10 +929,13 @@ esp_err_t upload_multipart_post_handler(httpd_req_t* const request) {
     }
     char transfer_buffer[kFileTransferBufferCapacity] = {};
     if (write_ok) {
-        write_ok = write_upload_bytes(request, session, transfer_buffer, unread_length,
-                                      info.file_size - buffered_file_length);
+        write_ok = write_upload_bytes(request, session, transfer_buffer, sizeof(transfer_buffer),
+                                      unread_length, info.file_size - buffered_file_length);
     }
-    if (write_ok) write_ok = discard_upload_bytes(request, transfer_buffer, unread_length);
+    if (write_ok) {
+        write_ok = discard_upload_bytes(request, transfer_buffer, sizeof(transfer_buffer),
+                                        unread_length);
+    }
     if (!write_ok) {
         sd::file_upload_abort(session);
         return send_json_error(request, "500 Internal Server Error", "upload-failed");
@@ -786,101 +1001,159 @@ esp_err_t storage_directory_put_handler(httpd_req_t* const request) {
     return files_put_handler(request);
 }
 
+esp_err_t traced_root_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/", root_get_handler);
+}
+
+esp_err_t traced_command_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/command", command_get_handler);
+}
+
+esp_err_t traced_files_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/files", files_get_handler);
+}
+
+esp_err_t traced_files_delete_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/files DELETE", files_delete_handler);
+}
+
+esp_err_t traced_files_put_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/files PUT", files_put_handler);
+}
+
+esp_err_t traced_upload_post_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/upload POST", upload_post_handler);
+}
+
+esp_err_t traced_upload_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/upload", upload_get_handler);
+}
+
+esp_err_t traced_style_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/app.css", style_get_handler);
+}
+
+esp_err_t traced_script_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/app.js", script_get_handler);
+}
+
+esp_err_t traced_storage_list_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/storage/list", storage_list_handler);
+}
+
+esp_err_t traced_storage_file_get_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/storage/file GET", storage_file_get_handler);
+}
+
+esp_err_t traced_storage_file_put_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/storage/file PUT", storage_file_put_handler);
+}
+
+esp_err_t traced_storage_file_delete_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/storage/file DELETE",
+                                  storage_file_delete_handler);
+}
+
+esp_err_t traced_storage_directory_put_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/storage/directory PUT",
+                                  storage_directory_put_handler);
+}
+
 const httpd_uri_t kRootUri = {
     .uri = "/",
     .method = HTTP_GET,
-    .handler = root_get_handler,
+    .handler = traced_root_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kCommandUri = {
     .uri = "/command",
     .method = HTTP_GET,
-    .handler = command_get_handler,
+    .handler = traced_command_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kFilesUri = {
     .uri = "/files",
     .method = HTTP_GET,
-    .handler = files_get_handler,
+    .handler = traced_files_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kFilesDeleteUri = {
     .uri = "/files",
     .method = HTTP_DELETE,
-    .handler = files_delete_handler,
+    .handler = traced_files_delete_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kFilesPutUri = {
     .uri = "/files",
     .method = HTTP_PUT,
-    .handler = files_put_handler,
+    .handler = traced_files_put_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kUploadUri = {
     .uri = "/upload",
     .method = HTTP_POST,
-    .handler = upload_post_handler,
+    .handler = traced_upload_post_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kUploadGetUri = {
     .uri = "/upload",
     .method = HTTP_GET,
-    .handler = upload_get_handler,
+    .handler = traced_upload_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStyleUri = {
     .uri = "/app.css",
     .method = HTTP_GET,
-    .handler = style_get_handler,
+    .handler = traced_style_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kScriptUri = {
     .uri = "/app.js",
     .method = HTTP_GET,
-    .handler = script_get_handler,
+    .handler = traced_script_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStorageListUri = {
     .uri = "/api/v1/storage/list",
     .method = HTTP_GET,
-    .handler = storage_list_handler,
+    .handler = traced_storage_list_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStorageFileGetUri = {
     .uri = "/api/v1/storage/file",
     .method = HTTP_GET,
-    .handler = storage_file_get_handler,
+    .handler = traced_storage_file_get_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStorageFilePutUri = {
     .uri = "/api/v1/storage/file",
     .method = HTTP_PUT,
-    .handler = storage_file_put_handler,
+    .handler = traced_storage_file_put_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStorageFileDeleteUri = {
     .uri = "/api/v1/storage/file",
     .method = HTTP_DELETE,
-    .handler = storage_file_delete_handler,
+    .handler = traced_storage_file_delete_handler,
     .user_ctx = nullptr,
 };
 
 const httpd_uri_t kStorageDirectoryPutUri = {
     .uri = "/api/v1/storage/directory",
     .method = HTTP_PUT,
-    .handler = storage_directory_put_handler,
+    .handler = traced_storage_directory_put_handler,
     .user_ctx = nullptr,
 };
 
@@ -891,6 +1164,9 @@ esp_err_t httpd_service_start() {
     if (!wifi::wifi_is_started()) return ESP_ERR_INVALID_STATE;
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    // Upload and directory-list handlers have deep call chains and multiple
+    // bounded local buffers. Keep the original stack budget until their peak
+    // runtime watermarks have been measured separately.
     config.stack_size = 8192;
     config.task_priority = 4;
     config.server_port = 8848;
@@ -904,6 +1180,8 @@ esp_err_t httpd_service_start() {
     config.lru_purge_enable = true;
     config.recv_wait_timeout = 10;
     config.send_wait_timeout = 10;
+    config.open_fn = http_session_open;
+    config.close_fn = http_session_close;
 
     httpd_handle_t server = nullptr;
     esp_err_t result = ::httpd_start(&server, &config);
@@ -932,8 +1210,11 @@ esp_err_t httpd_service_start() {
     }
 
     s_server = server;
-    ESP_LOGI(kLogTag, "started port=%u routes=/,/app.css,/app.js,/command,/files,/upload,/api/v1/storage",
-             static_cast<unsigned>(config.server_port));
+    ESP_LOGI(kLogTag,
+             "started port=%u sessions=%u backlog=%u recv_timeout=%u send_timeout=%u stack=%u",
+             static_cast<unsigned>(config.server_port), static_cast<unsigned>(config.max_open_sockets),
+             static_cast<unsigned>(config.backlog_conn), static_cast<unsigned>(config.recv_wait_timeout),
+             static_cast<unsigned>(config.send_wait_timeout), static_cast<unsigned>(config.stack_size));
     return ESP_OK;
 }
 

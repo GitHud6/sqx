@@ -157,7 +157,7 @@ esp_err_t configure_sta(const WifiSettings& settings) {
     return esp_wifi_set_config(WIFI_IF_STA, &sta_config);
 }
 
-void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, void*) {
+void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         s_sta_has_ip.store(true, std::memory_order_release);
         s_state.store(State::StaConnected, std::memory_order_release);
@@ -205,6 +205,26 @@ void wifi_event_handler(void*, esp_event_base_t event_base, int32_t event_id, vo
                 }
             }
             break;
+        case WIFI_EVENT_AP_STACONNECTED: {
+            const auto* const event = static_cast<const wifi_event_ap_staconnected_t*>(event_data);
+            if (event != nullptr) {
+                ESP_LOGI(kLogTag, "AP client joined mac=%02x:%02x:%02x:%02x:%02x:%02x aid=%u",
+                         event->mac[0], event->mac[1], event->mac[2], event->mac[3], event->mac[4],
+                         event->mac[5], static_cast<unsigned>(event->aid));
+            }
+            break;
+        }
+        case WIFI_EVENT_AP_STADISCONNECTED: {
+            const auto* const event = static_cast<const wifi_event_ap_stadisconnected_t*>(event_data);
+            if (event != nullptr) {
+                ESP_LOGW(kLogTag,
+                         "AP client left mac=%02x:%02x:%02x:%02x:%02x:%02x aid=%u reason=%u",
+                         event->mac[0], event->mac[1], event->mac[2], event->mac[3], event->mac[4],
+                         event->mac[5], static_cast<unsigned>(event->aid),
+                         static_cast<unsigned>(event->reason));
+            }
+            break;
+        }
         default:
             break;
     }

@@ -23,7 +23,9 @@ namespace laserctl::network {
 namespace {
 
 constexpr char kLogTag[] = "network";
-constexpr std::size_t kIngressQueueLength = 32;
+// HTTP and WebSocket are control transports, not a bulk G-code stream.
+// Eight complete lines preserve short command bursts while bounding DRAM.
+constexpr std::size_t kIngressQueueLength = 8;
 constexpr std::size_t kMaximumBatchLines = kIngressQueueLength - 2;
 constexpr std::uint32_t kTaskStackBytes = 4096;
 constexpr std::size_t kResponseCapacity = 1600;

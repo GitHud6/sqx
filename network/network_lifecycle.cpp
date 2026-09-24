@@ -17,6 +17,8 @@ namespace laserctl::network {
 namespace {
 
 constexpr char kLogTag[] = "network_lifecycle";
+// This task owns HTTPD and WebSocket stop/start transitions. Their synchronous
+// lifecycle calls require the original 4 KiB stack budget.
 constexpr std::uint32_t kTaskStackBytes = 4096;
 constexpr std::uint32_t kNotifyStaDisconnected = 1U << 0U;
 constexpr std::uint32_t kNotifyStaGotIp = 1U << 1U;
@@ -26,6 +28,11 @@ constexpr TickType_t kWebSocketStopPoll = pdMS_TO_TICKS(10);
 
 TaskHandle_t s_task = nullptr;
 std::atomic<bool> s_started = false;
+
+void log_stack_watermark(const char* const event) {
+    ESP_LOGI(kLogTag, "stack event=%s remaining=%u", event,
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+}
 
 void notify(const std::uint32_t bits) {
     const TaskHandle_t task = s_task;
@@ -98,6 +105,7 @@ void start_if_link_available() {
         ESP_LOGI(kLogTag, "transports ready ap=%u sta=%u ip=%s", info.ap_enabled ? 1U : 0U,
                  info.sta_connected ? 1U : 0U,
                  info.sta_connected ? info.sta_ip : info.ap_ip);
+        log_stack_watermark("transports-ready");
     }
 }
 
@@ -118,6 +126,7 @@ void handle_sta_disconnect() {
     if (result != ESP_OK && result != ESP_ERR_WIFI_STATE) {
         ESP_LOGW(kLogTag, "STA reconnect request failed: %s", esp_err_to_name(result));
     }
+    log_stack_watermark("sta-disconnect");
 }
 
 void handle_wifi_restart() {
@@ -128,6 +137,7 @@ void handle_wifi_restart() {
         return;
     }
     start_if_link_available();
+    log_stack_watermark("wifi-restart");
 }
 
 void network_lifecycle_task(void*) {

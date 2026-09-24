@@ -44,6 +44,7 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
       let sdJobActive = false;
       let realtimeMotionState = 'Idle';
       let wifiRestartExpected = false;
+      let fileTransferActive = false;
       const httpRequestTimeoutMs = 60000;
       const httpRequestQueue = [];
       let httpRequestActive = false;
@@ -99,9 +100,28 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
       }
 
       function updateEngraveButtons() {
-        const available = homeReady && !sdJobActive && socket && socket.readyState === WebSocket.OPEN;
+        const available = homeReady && !sdJobActive && !fileTransferActive && socket && socket.readyState === WebSocket.OPEN;
         document.querySelectorAll('[data-engrave]').forEach((button) => { button.disabled = !available; });
         updateJobControls();
+      }
+
+      function setFileTransferActive(active) {
+        fileTransferActive = active;
+        refreshFilesButton.disabled = active;
+        uploadButton.disabled = active;
+        uploadFile.disabled = active;
+        fileList.querySelectorAll('[data-file-operation]').forEach((button) => { button.disabled = active; });
+        fileList.querySelectorAll('[data-file-download]').forEach((link) => {
+          if (active) {
+            link.dataset.downloadUrl = link.href;
+            link.removeAttribute('href');
+            link.setAttribute('aria-disabled', 'true');
+          } else if (link.dataset.downloadUrl) {
+            link.href = link.dataset.downloadUrl;
+            link.removeAttribute('aria-disabled');
+          }
+        });
+        updateEngraveButtons();
       }
 
       function updateJobControls() {
@@ -343,6 +363,7 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
           if (!entry.directory) {
             const download = document.createElement('a');
             download.href = `/api/v1/storage/file?path=${encodeURIComponent(entry.path)}`;
+            download.dataset.fileDownload = '1';
             download.textContent = '下载';
             download.className = 'subtle';
             actions.append(download);
@@ -358,12 +379,14 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
             remove.type = 'button';
             remove.className = 'danger';
             remove.textContent = '删除';
+            remove.dataset.fileOperation = '1';
             remove.addEventListener('click', () => deleteFile(entry.path));
             actions.append(remove);
           }
           item.append(name, size, actions);
           fileList.append(item);
         }
+        setFileTransferActive(fileTransferActive);
       }
 
       async function refreshFiles() {
@@ -381,11 +404,12 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
           fileList.replaceChildren();
           setFileNotice(`无法读取文件列表：${error.message}`, true);
         } finally {
-          refreshFilesButton.disabled = false;
+          refreshFilesButton.disabled = fileTransferActive;
         }
       }
 
       async function deleteFile(path) {
+        if (fileTransferActive) return;
         if (!window.confirm(`确认删除 ${path}？`)) return;
         setFileNotice(`正在删除 ${path}…`);
         try {
@@ -440,8 +464,7 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
           return;
         }
         const targetPath = `/${file.name}`;
-        uploadButton.disabled = true;
-        uploadFile.disabled = true;
+        setFileTransferActive(true);
         setUploadProgress(0, file.size);
         setFileNotice(`正在上传 ${file.name}…`);
         try {
@@ -453,8 +476,7 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
           setUploadProgress(0, file.size, `上传失败：${error.message}`, true);
           setFileNotice(`上传失败：${error.message}`, true);
         } finally {
-          uploadButton.disabled = false;
-          uploadFile.disabled = false;
+          setFileTransferActive(false);
         }
       });
 
