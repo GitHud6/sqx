@@ -24,6 +24,7 @@
 #include "network_lifecycle.hpp"
 #include "product_identity.hpp"
 #include "wifi_settings.hpp"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -395,6 +396,33 @@ bool report_build_info() {
     return result;
 }
 
+bool report_ram_usage() {
+    const std::size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    const std::size_t heap_minimum = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+    const std::size_t heap_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    const std::size_t internal_free =
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const std::size_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const std::size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    const std::size_t dma_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    const unsigned stack_high_water_words =
+        static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr));
+
+    char response[256] = {};
+    const int length = std::snprintf(
+        response, sizeof(response),
+        "[RAM:heap_free=%u|heap_min=%u|heap_largest=%u|internal_free=%u|internal_largest=%u|"
+        "dma_free=%u|dma_largest=%u|stack_hw_words=%u]\r\nok\r\n",
+        static_cast<unsigned>(heap_free), static_cast<unsigned>(heap_minimum),
+        static_cast<unsigned>(heap_largest), static_cast<unsigned>(internal_free),
+        static_cast<unsigned>(internal_largest), static_cast<unsigned>(dma_free),
+        static_cast<unsigned>(dma_largest), stack_high_water_words);
+    return length > 0 && static_cast<std::size_t>(length) < sizeof(response) &&
+           write_all(reinterpret_cast<const std::uint8_t*>(response), static_cast<std::size_t>(length));
+}
+
 bool report_gcode_modes() {
     command::ParserState state = {};
     if (!snapshot_parser_state(state)) return write_text("error:protocol-no-mem\r\n");
@@ -761,6 +789,9 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
 
     if (equals_ignore_case(line, length, "$I")) {
         return report_build_info();
+    }
+    if (equals_ignore_case(line, length, "$RAM")) {
+        return report_ram_usage();
     }
     if (equals_ignore_case(line, length, "$G")) {
         return report_gcode_modes();
