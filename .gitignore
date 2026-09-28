@@ -17,4 +17,7 @@
 __pycache__/
 *.py[cod]
 
+# Local transport and diagnostic tools
+/tools/
+
 /doc/*PLAN*.md
