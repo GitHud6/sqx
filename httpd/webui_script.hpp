@@ -45,7 +45,7 @@ constexpr char kWebUiScript[] = R"JS(    (() => {
       let realtimeMotionState = 'Idle';
       let wifiRestartExpected = false;
       let fileTransferActive = false;
-      const httpRequestTimeoutMs = 60000;
+      const httpRequestTimeoutMs = 300000;
       const httpRequestQueue = [];
       let httpRequestActive = false;
 

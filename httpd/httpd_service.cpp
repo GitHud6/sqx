@@ -2,19 +2,24 @@
 #include "webui_assets_gzip.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lwip/sockets.h"
 
 #include "network_command_adapter.hpp"
+#include "runtime_affinity.hpp"
 #include "sd_file_service.hpp"
 #include "sd_job_service.hpp"
 #include "sdcard_driver.hpp"
@@ -30,6 +35,12 @@ constexpr std::size_t kCommandBodyCapacity = 1024;
 // slow peers from monopolising the single HTTPD worker and stalling refreshes.
 constexpr std::size_t kMaximumHttpSessions = 4;
 constexpr std::size_t kFileTransferBufferCapacity = 1024;
+// Uploads use four DMA-capable buffers. The fourth buffer lets HTTP continue
+// consuming a short SD write stall before TCP receive-window backpressure.
+constexpr std::size_t kUploadTransferBufferCapacity = 8U * 1024U;
+constexpr std::size_t kUploadTransferBufferCount = 4;
+constexpr std::uint8_t kUploadWriterStop = kUploadTransferBufferCount;
+constexpr std::uint32_t kUploadWriterStackSize = 4096;
 constexpr std::size_t kMaximumUploadBytes = 16U * 1024U * 1024U;
 constexpr std::size_t kTransferTraceInterval = 64U * 1024U;
 // Start small: this handler runs beside the WebSocket and several App setup
@@ -41,7 +52,7 @@ constexpr std::size_t kUploadListingMaximumCapacity = 16U * 1024U;
 // App upload metadata consists of path, size and file headers. Keep this
 // bounded so an HTTP handler cannot exhaust the server task's 8 KiB stack.
 constexpr std::size_t kMultipartHeaderCapacity = 2048;
-constexpr std::size_t kMaximumHttpUriHandlers = 14;
+constexpr std::size_t kMaximumHttpUriHandlers = 15;
 
 httpd_handle_t s_server = nullptr;
 
@@ -765,16 +776,242 @@ bool build_multipart_target_path(const MultipartUploadInfo& info, char* const ta
     return true;
 }
 
+struct UploadTiming {
+    std::uint64_t receive_wait_us = 0;
+    std::uint64_t receive_wait_max_us = 0;
+    std::uint32_t receive_calls = 0;
+    std::uint64_t free_buffer_wait_us = 0;
+    std::uint64_t free_buffer_wait_max_us = 0;
+    std::uint32_t free_buffer_wait_calls = 0;
+    std::uint64_t queue_send_wait_us = 0;
+    std::uint64_t queue_send_wait_max_us = 0;
+    std::uint32_t queue_send_wait_calls = 0;
+    UBaseType_t pending_queue_max_depth = 0;
+    std::uint64_t writer_wait_us = 0;
+    std::uint64_t writer_wait_max_us = 0;
+    std::uint32_t writer_wait_calls = 0;
+    std::uint64_t write_us = 0;
+    std::uint64_t write_max_us = 0;
+    std::uint32_t write_calls = 0;
+    std::uint64_t commit_us = 0;
+    std::uint64_t commit_max_us = 0;
+    std::uint32_t commit_calls = 0;
+};
+
+void add_upload_timing(std::uint64_t& total_us, std::uint64_t& maximum_us,
+                       std::uint32_t& calls, const std::int64_t elapsed_us) {
+    if (elapsed_us < 0) return;
+    const auto elapsed = static_cast<std::uint64_t>(elapsed_us);
+    total_us += elapsed;
+    if (elapsed > maximum_us) maximum_us = elapsed;
+    ++calls;
+}
+
+struct UploadBuffer {
+    char* data = nullptr;
+    std::size_t length = 0;
+};
+
+struct UploadPipeline {
+    sd::FileUploadSession* session = nullptr;
+    UploadBuffer buffers[kUploadTransferBufferCount] = {};
+    QueueHandle_t free_buffers = nullptr;
+    QueueHandle_t pending_buffers = nullptr;
+    SemaphoreHandle_t completed = nullptr;
+    TaskHandle_t writer_task = nullptr;
+    std::atomic<sd::FileResult> write_result = sd::FileResult::Ok;
+    UploadTiming timing = {};
+};
+
+void upload_writer_task(void* const argument) {
+    auto* const pipeline = static_cast<UploadPipeline*>(argument);
+    std::uint8_t buffer_index = 0;
+    for (;;) {
+        const std::int64_t queue_wait_started_us = esp_timer_get_time();
+        if (xQueueReceive(pipeline->pending_buffers, &buffer_index, portMAX_DELAY) != pdPASS) break;
+        add_upload_timing(pipeline->timing.writer_wait_us, pipeline->timing.writer_wait_max_us,
+                          pipeline->timing.writer_wait_calls,
+                          esp_timer_get_time() - queue_wait_started_us);
+        if (buffer_index == kUploadWriterStop) break;
+
+        if (pipeline->write_result.load(std::memory_order_acquire) == sd::FileResult::Ok) {
+            const std::int64_t started_us = esp_timer_get_time();
+            const sd::FileResult result = sd::file_upload_write(
+                *pipeline->session, pipeline->buffers[buffer_index].data,
+                pipeline->buffers[buffer_index].length);
+            add_upload_timing(pipeline->timing.write_us, pipeline->timing.write_max_us,
+                              pipeline->timing.write_calls, esp_timer_get_time() - started_us);
+            if (result != sd::FileResult::Ok) {
+                ESP_LOGW(kLogTag, "upload writer failed buffer=%u bytes=%u result=%s",
+                         static_cast<unsigned>(buffer_index),
+                         static_cast<unsigned>(pipeline->buffers[buffer_index].length),
+                         sd::file_result_text(result));
+                pipeline->write_result.store(result, std::memory_order_release);
+            }
+        }
+
+        pipeline->buffers[buffer_index].length = 0;
+        (void)xQueueSend(pipeline->free_buffers, &buffer_index, portMAX_DELAY);
+    }
+    xSemaphoreGive(pipeline->completed);
+    vTaskDelete(nullptr);
+}
+
+void destroy_upload_pipeline(UploadPipeline& pipeline) {
+    if (pipeline.writer_task != nullptr) {
+        const std::uint8_t stop = kUploadWriterStop;
+        (void)xQueueSend(pipeline.pending_buffers, &stop, portMAX_DELAY);
+        (void)xSemaphoreTake(pipeline.completed, portMAX_DELAY);
+        pipeline.writer_task = nullptr;
+    }
+    if (pipeline.completed != nullptr) {
+        vSemaphoreDelete(pipeline.completed);
+        pipeline.completed = nullptr;
+    }
+    if (pipeline.pending_buffers != nullptr) {
+        vQueueDelete(pipeline.pending_buffers);
+        pipeline.pending_buffers = nullptr;
+    }
+    if (pipeline.free_buffers != nullptr) {
+        vQueueDelete(pipeline.free_buffers);
+        pipeline.free_buffers = nullptr;
+    }
+    for (auto& buffer : pipeline.buffers) {
+        heap_caps_free(buffer.data);
+        buffer.data = nullptr;
+        buffer.length = 0;
+    }
+}
+
+bool create_upload_pipeline(UploadPipeline& pipeline, sd::FileUploadSession& session) {
+    pipeline.session = &session;
+    pipeline.free_buffers = xQueueCreate(kUploadTransferBufferCount, sizeof(std::uint8_t));
+    pipeline.pending_buffers = xQueueCreate(kUploadTransferBufferCount, sizeof(std::uint8_t));
+    pipeline.completed = xSemaphoreCreateBinary();
+    if (pipeline.free_buffers == nullptr || pipeline.pending_buffers == nullptr ||
+        pipeline.completed == nullptr) {
+        ESP_LOGW(kLogTag, "upload queue allocation failed heap=%u largest=%u",
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        destroy_upload_pipeline(pipeline);
+        return false;
+    }
+    for (std::uint8_t index = 0; index < kUploadTransferBufferCount; ++index) {
+        pipeline.buffers[index].data = static_cast<char*>(heap_caps_malloc(
+            kUploadTransferBufferCapacity,
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+        if (pipeline.buffers[index].data == nullptr) {
+            ESP_LOGW(kLogTag, "upload buffer allocation failed index=%u bytes=%u heap=%u largest=%u",
+                     static_cast<unsigned>(index),
+                     static_cast<unsigned>(kUploadTransferBufferCapacity),
+                     static_cast<unsigned>(
+                         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                     static_cast<unsigned>(
+                         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+            destroy_upload_pipeline(pipeline);
+            return false;
+        }
+        (void)xQueueSend(pipeline.free_buffers, &index, 0);
+    }
+    if (xTaskCreatePinnedToCore(upload_writer_task, "upload_writer", kUploadWriterStackSize,
+                                &pipeline, 4, &pipeline.writer_task,
+                                runtime::kNonRealtimeCore) != pdPASS) {
+        ESP_LOGW(kLogTag, "upload writer task creation failed");
+        destroy_upload_pipeline(pipeline);
+        return false;
+    }
+    return true;
+}
+
+bool acquire_upload_buffer(UploadPipeline& pipeline, std::uint8_t& buffer_index) {
+    const std::int64_t started_us = esp_timer_get_time();
+    if (xQueueReceive(pipeline.free_buffers, &buffer_index, portMAX_DELAY) != pdPASS) return false;
+    add_upload_timing(pipeline.timing.free_buffer_wait_us, pipeline.timing.free_buffer_wait_max_us,
+                      pipeline.timing.free_buffer_wait_calls, esp_timer_get_time() - started_us);
+    return pipeline.write_result.load(std::memory_order_acquire) == sd::FileResult::Ok;
+}
+
+bool queue_upload_buffer(UploadPipeline& pipeline, const std::uint8_t buffer_index) {
+    if (pipeline.write_result.load(std::memory_order_acquire) != sd::FileResult::Ok) return false;
+    const std::int64_t started_us = esp_timer_get_time();
+    if (xQueueSend(pipeline.pending_buffers, &buffer_index, portMAX_DELAY) != pdPASS) return false;
+    add_upload_timing(pipeline.timing.queue_send_wait_us, pipeline.timing.queue_send_wait_max_us,
+                      pipeline.timing.queue_send_wait_calls, esp_timer_get_time() - started_us);
+    const UBaseType_t queue_depth = uxQueueMessagesWaiting(pipeline.pending_buffers);
+    if (queue_depth > pipeline.timing.pending_queue_max_depth) {
+        pipeline.timing.pending_queue_max_depth = queue_depth;
+    }
+    return true;
+}
+
+bool complete_upload_pipeline(UploadPipeline& pipeline) {
+    if (pipeline.writer_task == nullptr) return false;
+    const std::uint8_t stop = kUploadWriterStop;
+    if (xQueueSend(pipeline.pending_buffers, &stop, portMAX_DELAY) != pdPASS) return false;
+    if (xSemaphoreTake(pipeline.completed, portMAX_DELAY) != pdPASS) return false;
+    pipeline.writer_task = nullptr;
+    return pipeline.write_result.load(std::memory_order_acquire) == sd::FileResult::Ok;
+}
+
+int receive_upload_chunk(httpd_req_t* const request, char* const buffer,
+                         const std::size_t length, UploadTiming& timing) {
+    const std::int64_t started_us = esp_timer_get_time();
+    const int received = httpd_req_recv(request, buffer, length);
+    add_upload_timing(timing.receive_wait_us, timing.receive_wait_max_us,
+                      timing.receive_calls, esp_timer_get_time() - started_us);
+    return received;
+}
+
+sd::FileResult commit_upload(sd::FileUploadSession& session, UploadTiming& timing) {
+    const std::int64_t started_us = esp_timer_get_time();
+    const sd::FileResult result = sd::file_upload_commit(session);
+    add_upload_timing(timing.commit_us, timing.commit_max_us, timing.commit_calls,
+                      esp_timer_get_time() - started_us);
+    return result;
+}
+
+void log_upload_timing(const char* const kind, const int fd, const char* const path,
+                       const std::size_t bytes, const std::uint32_t elapsed_ms,
+                       const UploadTiming& timing) {
+    ESP_LOGI(kLogTag,
+             "upload %s timing fd=%d path=%s bytes=%u elapsed_ms=%u recv_us=%llu/%u max=%llu "
+             "free_wait_us=%llu/%u max=%llu",
+             kind, fd, path, static_cast<unsigned>(bytes), static_cast<unsigned>(elapsed_ms),
+             static_cast<unsigned long long>(timing.receive_wait_us),
+             static_cast<unsigned>(timing.receive_calls),
+             static_cast<unsigned long long>(timing.receive_wait_max_us),
+             static_cast<unsigned long long>(timing.free_buffer_wait_us),
+             static_cast<unsigned>(timing.free_buffer_wait_calls),
+             static_cast<unsigned long long>(timing.free_buffer_wait_max_us));
+    ESP_LOGI(kLogTag,
+             "upload %s writer queue_send_us=%llu/%u max=%llu qmax=%u writer_wait_us=%llu/%u "
+             "max=%llu sd_write_us=%llu/%u max=%llu commit_us=%llu/%u max=%llu",
+             kind, static_cast<unsigned long long>(timing.queue_send_wait_us),
+             static_cast<unsigned>(timing.queue_send_wait_calls),
+             static_cast<unsigned long long>(timing.queue_send_wait_max_us),
+             static_cast<unsigned>(timing.pending_queue_max_depth),
+             static_cast<unsigned long long>(timing.writer_wait_us),
+             static_cast<unsigned>(timing.writer_wait_calls),
+             static_cast<unsigned long long>(timing.writer_wait_max_us),
+             static_cast<unsigned long long>(timing.write_us),
+             static_cast<unsigned>(timing.write_calls),
+             static_cast<unsigned long long>(timing.write_max_us),
+             static_cast<unsigned long long>(timing.commit_us),
+             static_cast<unsigned>(timing.commit_calls),
+             static_cast<unsigned long long>(timing.commit_max_us));
+}
+
 bool receive_multipart_header(httpd_req_t* const request, char* const header,
                               std::size_t& header_length, std::size_t& unread_length,
-                              MultipartUploadInfo& info) {
+                              MultipartUploadInfo& info, UploadTiming& timing) {
     header_length = 0;
     unread_length = static_cast<std::size_t>(request->content_len);
     header[0] = '\0';
     while (unread_length > 0 && header_length + 1 < kMultipartHeaderCapacity) {
         const std::size_t free_length = kMultipartHeaderCapacity - 1 - header_length;
         const std::size_t request_length = std::min(unread_length, free_length);
-        const int received = httpd_req_recv(request, header + header_length, request_length);
+        const int received = receive_upload_chunk(request, header + header_length, request_length, timing);
         if (received <= 0) {
             ESP_LOGW(kLogTag, "multipart header recv failed fd=%d received=%d unread=%u errno=%d",
                      httpd_req_to_sockfd(request), received, static_cast<unsigned>(unread_length),
@@ -797,16 +1034,32 @@ bool receive_multipart_header(httpd_req_t* const request, char* const header,
     return false;
 }
 
-bool write_upload_bytes(httpd_req_t* const request, sd::FileUploadSession& session,
-                        char* const transfer_buffer, const std::size_t transfer_buffer_capacity,
-                        std::size_t& unread_length,
-                        std::size_t file_length) {
-    if (transfer_buffer == nullptr || transfer_buffer_capacity == 0 || file_length > unread_length) {
+bool receive_upload_file(httpd_req_t* const request, UploadPipeline& pipeline,
+                         const char* const initial_data, const std::size_t initial_length,
+                         std::size_t file_length, std::size_t* const unread_length,
+                         UploadTiming& timing) {
+    if (initial_length > kUploadTransferBufferCapacity ||
+        (unread_length != nullptr && file_length > *unread_length)) {
         return false;
     }
+    std::uint8_t buffer_index = 0;
+    if (!acquire_upload_buffer(pipeline, buffer_index)) return false;
+    if (initial_length > 0) {
+        std::memcpy(pipeline.buffers[buffer_index].data, initial_data, initial_length);
+        pipeline.buffers[buffer_index].length = initial_length;
+    }
     while (file_length > 0) {
-        const std::size_t request_length = std::min(file_length, transfer_buffer_capacity);
-        const int received = httpd_req_recv(request, transfer_buffer, request_length);
+        if (pipeline.buffers[buffer_index].length == kUploadTransferBufferCapacity) {
+            if (!queue_upload_buffer(pipeline, buffer_index) ||
+                !acquire_upload_buffer(pipeline, buffer_index)) {
+                return false;
+            }
+        }
+        UploadBuffer& active_buffer = pipeline.buffers[buffer_index];
+        const std::size_t request_length =
+            std::min(file_length, kUploadTransferBufferCapacity - active_buffer.length);
+        const int received =
+            receive_upload_chunk(request, active_buffer.data + active_buffer.length, request_length, timing);
         if (received <= 0) {
             ESP_LOGW(kLogTag, "multipart file recv failed fd=%d received=%d remaining=%u errno=%d",
                      httpd_req_to_sockfd(request), received, static_cast<unsigned>(file_length),
@@ -814,27 +1067,29 @@ bool write_upload_bytes(httpd_req_t* const request, sd::FileUploadSession& sessi
             return false;
         }
         const std::size_t received_length = static_cast<std::size_t>(received);
-        const sd::FileResult write_result =
-            sd::file_upload_write(session, transfer_buffer, received_length);
-        if (received_length > unread_length || write_result != sd::FileResult::Ok) {
-            ESP_LOGW(kLogTag, "multipart file write failed fd=%d received=%u unread=%u result=%s",
+        if (received_length > request_length ||
+            (unread_length != nullptr && received_length > *unread_length)) {
+            ESP_LOGW(kLogTag, "multipart receive exceeded body fd=%d received=%u unread=%u",
                      httpd_req_to_sockfd(request), static_cast<unsigned>(received_length),
-                     static_cast<unsigned>(unread_length), sd::file_result_text(write_result));
+                     static_cast<unsigned>(unread_length == nullptr ? 0 : *unread_length));
             return false;
         }
-        unread_length -= received_length;
+        if (unread_length != nullptr) *unread_length -= received_length;
         file_length -= received_length;
+        active_buffer.length += received_length;
     }
-    return true;
+    if (pipeline.buffers[buffer_index].length == 0) return true;
+    return queue_upload_buffer(pipeline, buffer_index);
 }
 
-bool discard_upload_bytes(httpd_req_t* const request, char* const transfer_buffer,
-                          const std::size_t transfer_buffer_capacity,
-                          std::size_t& unread_length) {
-    if (transfer_buffer == nullptr || transfer_buffer_capacity == 0) return false;
+bool discard_upload_bytes(httpd_req_t* const request, UploadPipeline& pipeline,
+                          std::size_t& unread_length, UploadTiming& timing) {
     while (unread_length > 0) {
-        const std::size_t request_length = std::min(unread_length, transfer_buffer_capacity);
-        const int received = httpd_req_recv(request, transfer_buffer, request_length);
+        std::uint8_t buffer_index = 0;
+        if (!acquire_upload_buffer(pipeline, buffer_index)) return false;
+        UploadBuffer& buffer = pipeline.buffers[buffer_index];
+        const std::size_t request_length = std::min(unread_length, kUploadTransferBufferCapacity);
+        const int received = receive_upload_chunk(request, buffer.data, request_length, timing);
         if (received <= 0) {
             ESP_LOGW(kLogTag, "multipart tail recv failed fd=%d received=%d unread=%u errno=%d",
                      httpd_req_to_sockfd(request), received, static_cast<unsigned>(unread_length),
@@ -844,11 +1099,13 @@ bool discard_upload_bytes(httpd_req_t* const request, char* const transfer_buffe
         const std::size_t received_length = static_cast<std::size_t>(received);
         if (received_length > unread_length) return false;
         unread_length -= received_length;
+        (void)xQueueSend(pipeline.free_buffers, &buffer_index, 0);
     }
     return true;
 }
 
 esp_err_t upload_raw_post_handler(httpd_req_t* const request) {
+    const std::uint32_t started_ms = trace_now_ms();
     char requested_path[sd::kFilePathCapacity] = {};
     if (!receive_path_query(request, requested_path, sizeof(requested_path))) {
         return send_json_error(request, "400 Bad Request", "invalid-path");
@@ -856,55 +1113,49 @@ esp_err_t upload_raw_post_handler(httpd_req_t* const request) {
     sd::FileUploadSession session = {};
     const sd::FileResult begin_result = sd::file_upload_begin(requested_path, session);
     if (begin_result != sd::FileResult::Ok) return send_file_error(request, begin_result);
-    const std::size_t total = static_cast<std::size_t>(request->content_len);
-    ESP_LOGI(kLogTag, "upload raw begin fd=%d path=%s bytes=%u",
-             httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(total));
-
-    char transfer_buffer[kFileTransferBufferCapacity] = {};
-    std::size_t remaining = total;
-    std::size_t next_trace = kTransferTraceInterval;
-    while (remaining > 0) {
-        const int received = httpd_req_recv(
-            request, transfer_buffer,
-            remaining < sizeof(transfer_buffer)
-                ? remaining
-                : sizeof(transfer_buffer));
-        if (received <= 0) {
-            ESP_LOGW(kLogTag, "upload raw recv failed fd=%d remaining=%u received=%d errno=%d",
-                     httpd_req_to_sockfd(request), static_cast<unsigned>(remaining), received, errno);
-            sd::file_upload_abort(session);
-            return send_json_error(request, "500 Internal Server Error", "upload-failed");
-        }
-        const sd::FileResult write_result =
-            sd::file_upload_write(session, transfer_buffer, static_cast<std::size_t>(received));
-        if (write_result != sd::FileResult::Ok) {
-            ESP_LOGW(kLogTag, "upload raw write failed fd=%d received=%d result=%s",
-                     httpd_req_to_sockfd(request), received, sd::file_result_text(write_result));
-            sd::file_upload_abort(session);
-            return send_json_error(request, "500 Internal Server Error", "upload-failed");
-        }
-        remaining -= static_cast<std::size_t>(received);
-        const std::size_t transferred = total - remaining;
-        if (transferred >= next_trace) {
-            ESP_LOGI(kLogTag, "upload raw progress fd=%d path=%s received=%u/%u",
-                     httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(transferred),
-                     static_cast<unsigned>(total));
-            next_trace = transferred + kTransferTraceInterval;
-        }
+    UploadPipeline pipeline = {};
+    if (!create_upload_pipeline(pipeline, session)) {
+        sd::file_upload_abort(session);
+        return send_json_error(request, "503 Service Unavailable", "upload-buffer-unavailable");
     }
-    const sd::FileResult commit_result = sd::file_upload_commit(session);
+    const std::size_t total = static_cast<std::size_t>(request->content_len);
+    ESP_LOGI(kLogTag,
+             "upload raw begin fd=%d path=%s bytes=%u buffers=%u*%u dma_heap=%u dma_largest=%u",
+             httpd_req_to_sockfd(request), requested_path, static_cast<unsigned>(total),
+             static_cast<unsigned>(kUploadTransferBufferCount),
+             static_cast<unsigned>(kUploadTransferBufferCapacity),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
+
+    std::size_t remaining = total;
+    const bool received = receive_upload_file(request, pipeline, nullptr, 0, remaining, nullptr,
+                                               pipeline.timing);
+    const bool written = received && complete_upload_pipeline(pipeline);
+    if (!written) {
+        destroy_upload_pipeline(pipeline);
+        log_upload_timing("raw-failed", httpd_req_to_sockfd(request), requested_path, total,
+                          trace_now_ms() - started_ms, pipeline.timing);
+        sd::file_upload_abort(session);
+        return send_json_error(request, "500 Internal Server Error", "upload-failed");
+    }
+    const sd::FileResult commit_result = commit_upload(session, pipeline.timing);
+    const UploadTiming completed_timing = pipeline.timing;
+    destroy_upload_pipeline(pipeline);
     if (commit_result != sd::FileResult::Ok) return send_file_error(request, commit_result);
-    ESP_LOGI(kLogTag, "upload raw end fd=%d path=%s bytes=%u", httpd_req_to_sockfd(request),
-             requested_path, static_cast<unsigned>(total));
+    log_upload_timing("raw", httpd_req_to_sockfd(request), requested_path, total,
+                      trace_now_ms() - started_ms, completed_timing);
     return send_text(request, "{\"result\":\"ok\"}\n", "application/json");
 }
 
 esp_err_t upload_multipart_post_handler(httpd_req_t* const request) {
+    const std::uint32_t started_ms = trace_now_ms();
+    UploadTiming timing = {};
     char multipart_header[kMultipartHeaderCapacity] = {};
     std::size_t header_length = 0;
     std::size_t unread_length = 0;
     MultipartUploadInfo info = {};
-    if (!receive_multipart_header(request, multipart_header, header_length, unread_length, info)) {
+    if (!receive_multipart_header(request, multipart_header, header_length, unread_length, info, timing)) {
         return send_json_error(request, "400 Bad Request", "invalid-multipart-upload");
     }
     if (info.file_size > kMaximumUploadBytes || info.file_payload_offset > header_length) {
@@ -919,30 +1170,46 @@ esp_err_t upload_multipart_post_handler(httpd_req_t* const request) {
     sd::FileUploadSession session = {};
     const sd::FileResult begin_result = sd::file_upload_begin(target_path, session);
     if (begin_result != sd::FileResult::Ok) return send_file_error(request, begin_result);
+    UploadPipeline pipeline = {};
+    if (!create_upload_pipeline(pipeline, session)) {
+        sd::file_upload_abort(session);
+        return send_json_error(request, "503 Service Unavailable", "upload-buffer-unavailable");
+    }
+    pipeline.timing = timing;
+    ESP_LOGI(kLogTag,
+             "upload multipart begin fd=%d path=%s bytes=%u buffers=%u*%u dma_heap=%u dma_largest=%u",
+             httpd_req_to_sockfd(request), target_path, static_cast<unsigned>(info.file_size),
+             static_cast<unsigned>(kUploadTransferBufferCount),
+             static_cast<unsigned>(kUploadTransferBufferCapacity),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
 
     const std::size_t buffered_file_length =
         std::min(info.file_size, header_length - info.file_payload_offset);
-    bool write_ok = true;
-    if (buffered_file_length > 0) {
-        write_ok = sd::file_upload_write(session, multipart_header + info.file_payload_offset,
-                                         buffered_file_length) == sd::FileResult::Ok;
+    bool upload_ok = receive_upload_file(
+        request, pipeline, multipart_header + info.file_payload_offset, buffered_file_length,
+        info.file_size - buffered_file_length, &unread_length, pipeline.timing);
+    if (upload_ok) {
+        upload_ok = discard_upload_bytes(request, pipeline, unread_length, pipeline.timing);
     }
-    char transfer_buffer[kFileTransferBufferCapacity] = {};
-    if (write_ok) {
-        write_ok = write_upload_bytes(request, session, transfer_buffer, sizeof(transfer_buffer),
-                                      unread_length, info.file_size - buffered_file_length);
+    if (upload_ok) {
+        upload_ok = complete_upload_pipeline(pipeline);
     }
-    if (write_ok) {
-        write_ok = discard_upload_bytes(request, transfer_buffer, sizeof(transfer_buffer),
-                                        unread_length);
-    }
-    if (!write_ok) {
+    if (!upload_ok) {
+        destroy_upload_pipeline(pipeline);
+        log_upload_timing("multipart-failed", httpd_req_to_sockfd(request), target_path,
+                          info.file_size, trace_now_ms() - started_ms, pipeline.timing);
         sd::file_upload_abort(session);
         return send_json_error(request, "500 Internal Server Error", "upload-failed");
     }
 
-    const sd::FileResult commit_result = sd::file_upload_commit(session);
+    const sd::FileResult commit_result = commit_upload(session, pipeline.timing);
+    const UploadTiming completed_timing = pipeline.timing;
+    destroy_upload_pipeline(pipeline);
     if (commit_result != sd::FileResult::Ok) return send_file_error(request, commit_result);
+    log_upload_timing("multipart", httpd_req_to_sockfd(request), target_path, info.file_size,
+                      trace_now_ms() - started_ms, completed_timing);
     return send_text(request, "{\"result\":\"ok\"}\n", "application/json");
 }
 
@@ -991,6 +1258,64 @@ esp_err_t storage_file_put_handler(httpd_req_t* const request) {
         return send_json_error(request, "413 Payload Too Large", "invalid-upload-length");
     }
     return upload_raw_post_handler(request);
+}
+
+esp_err_t benchmark_receive_handler(httpd_req_t* const request) {
+    if (request == nullptr) return ESP_ERR_INVALID_ARG;
+    if (request->content_len <= 0 ||
+        static_cast<std::size_t>(request->content_len) > kMaximumUploadBytes) {
+        return send_json_error(request, "413 Payload Too Large", "invalid-benchmark-length");
+    }
+
+    char* const buffer = static_cast<char*>(
+        heap_caps_malloc(kUploadTransferBufferCapacity, MALLOC_CAP_8BIT));
+    if (buffer == nullptr) {
+        ESP_LOGW(kLogTag, "benchmark rx buffer allocation failed bytes=%u heap=%u largest=%u",
+                 static_cast<unsigned>(kUploadTransferBufferCapacity),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(
+                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        return send_json_error(request, "503 Service Unavailable", "benchmark-buffer-unavailable");
+    }
+
+    const int fd = httpd_req_to_sockfd(request);
+    const std::size_t total = static_cast<std::size_t>(request->content_len);
+    std::size_t remaining = total;
+    UploadTiming timing = {};
+    const std::uint32_t started_ms = trace_now_ms();
+    ESP_LOGI(kLogTag, "benchmark rx begin fd=%d bytes=%u buffer=%u", fd,
+             static_cast<unsigned>(total), static_cast<unsigned>(kUploadTransferBufferCapacity));
+
+    while (remaining > 0) {
+        const std::size_t request_length = std::min(remaining, kUploadTransferBufferCapacity);
+        const int received = receive_upload_chunk(request, buffer, request_length, timing);
+        if (received <= 0) {
+            ESP_LOGW(kLogTag, "benchmark rx receive failed fd=%d received=%d remaining=%u errno=%d",
+                     fd, received, static_cast<unsigned>(remaining), errno);
+            heap_caps_free(buffer);
+            return send_json_error(request, "500 Internal Server Error", "benchmark-receive-failed");
+        }
+        remaining -= static_cast<std::size_t>(received);
+    }
+
+    const std::uint32_t elapsed_ms = trace_now_ms() - started_ms;
+    ESP_LOGI(kLogTag, "benchmark rx end fd=%d bytes=%u elapsed_ms=%u recv_us=%llu calls=%u max=%llu",
+             fd, static_cast<unsigned>(total), static_cast<unsigned>(elapsed_ms),
+             static_cast<unsigned long long>(timing.receive_wait_us),
+             static_cast<unsigned>(timing.receive_calls),
+             static_cast<unsigned long long>(timing.receive_wait_max_us));
+    char response[192] = {};
+    const int response_length = std::snprintf(
+        response, sizeof(response),
+        "{\"result\":\"ok\",\"bytes\":%u,\"elapsed_ms\":%u,\"recv_us\":%llu,\"recv_max_us\":%llu}\\n",
+        static_cast<unsigned>(total), static_cast<unsigned>(elapsed_ms),
+        static_cast<unsigned long long>(timing.receive_wait_us),
+        static_cast<unsigned long long>(timing.receive_wait_max_us));
+    heap_caps_free(buffer);
+    if (response_length <= 0 || static_cast<std::size_t>(response_length) >= sizeof(response)) {
+        return ESP_FAIL;
+    }
+    return send_text(request, response, "application/json");
 }
 
 esp_err_t storage_file_delete_handler(httpd_req_t* const request) {
@@ -1047,6 +1372,10 @@ esp_err_t traced_storage_file_get_handler(httpd_req_t* const request) {
 
 esp_err_t traced_storage_file_put_handler(httpd_req_t* const request) {
     return invoke_traced_handler(request, "/api/v1/storage/file PUT", storage_file_put_handler);
+}
+
+esp_err_t traced_benchmark_receive_handler(httpd_req_t* const request) {
+    return invoke_traced_handler(request, "/api/v1/benchmark/rx", benchmark_receive_handler);
 }
 
 esp_err_t traced_storage_file_delete_handler(httpd_req_t* const request) {
@@ -1143,6 +1472,13 @@ const httpd_uri_t kStorageFilePutUri = {
     .user_ctx = nullptr,
 };
 
+const httpd_uri_t kBenchmarkReceiveUri = {
+    .uri = "/api/v1/benchmark/rx",
+    .method = HTTP_POST,
+    .handler = traced_benchmark_receive_handler,
+    .user_ctx = nullptr,
+};
+
 const httpd_uri_t kStorageFileDeleteUri = {
     .uri = "/api/v1/storage/file",
     .method = HTTP_DELETE,
@@ -1169,6 +1505,10 @@ esp_err_t httpd_service_start() {
     // runtime watermarks have been measured separately.
     config.stack_size = 8192;
     config.task_priority = 4;
+    // Keep HTTP request processing with the custom WebSocket server on CPU1.
+    // The Wi-Fi driver remains on CPU1 until a dedicated Core-0 topology has
+    // passed both transport and motion-real-time validation.
+    config.core_id = runtime::kNonRealtimeCore;
     config.server_port = 8848;
     config.max_uri_handlers = kMaximumHttpUriHandlers;
     // The WebSocket service has an independent three-client pool on port
@@ -1201,6 +1541,7 @@ esp_err_t httpd_service_start() {
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageListUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFileGetUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFilePutUri);
+    if (result == ESP_OK) result = httpd_register_uri_handler(server, &kBenchmarkReceiveUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageFileDeleteUri);
     if (result == ESP_OK) result = httpd_register_uri_handler(server, &kStorageDirectoryPutUri);
     if (result != ESP_OK) {
@@ -1211,8 +1552,9 @@ esp_err_t httpd_service_start() {
 
     s_server = server;
     ESP_LOGI(kLogTag,
-             "started port=%u sessions=%u backlog=%u recv_timeout=%u send_timeout=%u stack=%u",
+             "started port=%u core=%d sessions=%u backlog=%u recv_timeout=%u send_timeout=%u stack=%u",
              static_cast<unsigned>(config.server_port), static_cast<unsigned>(config.max_open_sockets),
+             static_cast<int>(config.core_id),
              static_cast<unsigned>(config.backlog_conn), static_cast<unsigned>(config.recv_wait_timeout),
              static_cast<unsigned>(config.send_wait_timeout), static_cast<unsigned>(config.stack_size));
     return ESP_OK;

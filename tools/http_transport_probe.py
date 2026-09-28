@@ -1,4 +1,4 @@
-"""Validate the device HTTP transport without a browser or WebSocket client."""
+"""Validate HTTP page delivery or raw device receive throughput without a browser."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import concurrent.futures
 import socket
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 
 DEFAULT_PORT = 8848
@@ -22,6 +23,17 @@ class HttpResult:
     received_bytes: int
     connect_ms: float
     first_byte_ms: float
+    complete_ms: float
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    local_port: int
+    sent_bytes: int
+    status: int
+    response_body: str
+    connect_ms: float
+    upload_ms: float
     complete_ms: float
 
 
@@ -118,6 +130,71 @@ def request_once(host: str, port: int, path: str, timeout: float, keep_alive: bo
         sock.close()
 
 
+def receive_response_body(sock: socket.socket) -> tuple[int, bytes]:
+    headers_raw, body = receive_headers(sock)
+    status, headers = parse_headers(headers_raw)
+    expected_text = headers.get("content-length")
+    if expected_text is None:
+        raise ConnectionError("response has no Content-Length")
+    expected_bytes = int(expected_text)
+    while len(body) < expected_bytes:
+        chunk = sock.recv(expected_bytes - len(body))
+        if not chunk:
+            raise ConnectionError(f"connection closed with incomplete response {len(body)}/{expected_bytes}")
+        body += chunk
+    if len(body) != expected_bytes:
+        raise ConnectionError(f"received excess response bytes {len(body)}/{expected_bytes}")
+    return status, body
+
+
+def benchmark_receive_once(
+    host: str, port: int, file_path: Path, timeout: float, progress_bytes: int,
+) -> BenchmarkResult:
+    file_size = file_path.stat().st_size
+    if file_size <= 0:
+        raise ValueError("benchmark file must not be empty")
+
+    started = time.perf_counter()
+    sock = socket.create_connection((host, port), timeout=timeout)
+    connect_ms = (time.perf_counter() - started) * 1000
+    try:
+        sock.settimeout(timeout)
+        headers = (
+            "POST /api/v1/benchmark/rx HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            f"Content-Length: {file_size}\r\n"
+            "Connection: close\r\n\r\n"
+        )
+        sock.sendall(headers.encode("ascii"))
+        sent_bytes = 0
+        next_progress = progress_bytes
+        with file_path.open("rb") as payload:
+            while chunk := payload.read(16 * 1024):
+                sock.sendall(chunk)
+                sent_bytes += len(chunk)
+                if progress_bytes and sent_bytes >= next_progress:
+                    print(
+                        f"  benchmark sent={sent_bytes}/{file_size} bytes "
+                        f"elapsed_ms={(time.perf_counter() - started) * 1000:.1f}",
+                        flush=True,
+                    )
+                    next_progress += progress_bytes
+        upload_ms = (time.perf_counter() - started) * 1000
+        status, body = receive_response_body(sock)
+        return BenchmarkResult(
+            local_port=sock.getsockname()[1],
+            sent_bytes=file_size,
+            status=status,
+            response_body=body.decode("utf-8", errors="replace").strip(),
+            connect_ms=connect_ms,
+            upload_ms=upload_ms,
+            complete_ms=(time.perf_counter() - started) * 1000,
+        )
+    finally:
+        sock.close()
+
+
 def print_result(cycle: int, result: HttpResult) -> None:
     print(
         f"cycle={cycle} HTTP path={result.path} local_port={result.local_port} "
@@ -129,6 +206,16 @@ def print_result(cycle: int, result: HttpResult) -> None:
 
 def print_failure(cycle: int, path: str, mode: str, error: Exception) -> None:
     print(f"cycle={cycle} HTTP path={path} mode={mode} FAILED {type(error).__name__}: {error}")
+
+
+def print_benchmark_result(cycle: int, result: BenchmarkResult) -> None:
+    mib_per_second = result.sent_bytes / (1024 * 1024) / (result.upload_ms / 1000)
+    print(
+        f"cycle={cycle} benchmark local_port={result.local_port} status={result.status} "
+        f"bytes={result.sent_bytes} connect_ms={result.connect_ms:.1f} "
+        f"upload_ms={result.upload_ms:.1f} throughput_mib_s={mib_per_second:.3f} "
+        f"complete_ms={result.complete_ms:.1f} response={result.response_body}"
+    )
 
 
 def run_serial(host: str, port: int, paths: tuple[str, ...], timeout: float, cycle: int) -> None:
@@ -182,14 +269,44 @@ def main() -> int:
     parser.add_argument("--interval-ms", type=int, default=1000)
     parser.add_argument("--path", action="append", dest="paths")
     parser.add_argument(
+        "--benchmark-file",
+        type=Path,
+        help="stream this local file to POST /api/v1/benchmark/rx; no SD-card write occurs",
+    )
+    parser.add_argument(
+        "--progress-mib",
+        type=float,
+        default=1.0,
+        help="benchmark client progress interval in MiB; 0 disables it (default: 1)",
+    )
+    parser.add_argument(
         "--mode",
         choices=("serial", "parallel", "keep-alive"),
         default="serial",
         help="one request at a time, browser-like parallel assets, or repeated keep-alive requests",
     )
     args = parser.parse_args()
-    if args.cycles < 1 or args.timeout <= 0 or args.interval_ms < 0:
-        parser.error("cycles and timeout must be positive; interval-ms cannot be negative")
+    if args.cycles < 1 or args.timeout <= 0 or args.interval_ms < 0 or args.progress_mib < 0:
+        parser.error("cycles and timeout must be positive; interval-ms and progress-mib cannot be negative")
+    if args.benchmark_file is not None and not args.benchmark_file.is_file():
+        parser.error(f"benchmark file does not exist: {args.benchmark_file}")
+
+    if args.benchmark_file is not None:
+        progress_bytes = int(args.progress_mib * 1024 * 1024)
+        for cycle in range(1, args.cycles + 1):
+            try:
+                print_benchmark_result(
+                    cycle,
+                    benchmark_receive_once(
+                        args.host, args.port, args.benchmark_file, args.timeout, progress_bytes,
+                    ),
+                )
+            except (ConnectionError, OSError, TimeoutError, ValueError) as error:
+                print_failure(cycle, "/api/v1/benchmark/rx", "benchmark", error)
+            if cycle != args.cycles and args.interval_ms:
+                time.sleep(args.interval_ms / 1000)
+        return 0
+
     paths = tuple(args.paths) if args.paths else DEFAULT_PATHS
     runners = {
         "serial": run_serial,
