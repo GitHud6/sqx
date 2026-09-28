@@ -1,137 +1,183 @@
-# ray2-idf
+# LaserCtl ESP32-S3 激光雕刻固件
 
-`ray2-idf` 是面向 ESP32-S3 激光雕刻机的 ESP-IDF 5.5.1 固件实现。项目将 G-code
-解析、前瞻速度规划、步进脉冲执行、作业生命周期与网络门户拆分为独立模块；网络或
-存储功能不会进入 Timer/RMT 的实时热路径。
+`ray2-idf` 是面向 ESP32-S3 双轴激光雕刻机的 ESP-IDF 5.5.1 固件项目。它实现从
+G-code 解析到物理 STEP 脉冲的完整执行链，并提供 SD 卡作业、归零、激光安全控制和
+本地 Wi-Fi 网页门户。
 
-当前工程以稳定的梯形速度曲线为基线，提供二维 G-code 运动、SD 卡雕刻、暂停/继续、
-归零、网络文件管理和本地网页控制。S 曲线与闭环振动补偿不属于当前稳定功能。
+项目以执行所有权划分边界。UART、HTTP、WebSocket 和 SD 作业都只是输入传输层，
+它们不能直接操作 planner、步进定时器、RMT 或激光输出。所有运动和系统请求必须经过
+共享的 `protocol` 与 `service` 边界。
 
 ## 功能范围
 
-- 支持 G0/G1 直线和 G2/G3 圆弧；圆弧在 `command` 层离散为短直线后复用同一条运动链。
-- 支持 32 个 `PlannerBlock` 前瞻窗口、梯形 profile、AMASS/DDA 量化和 64 个
-  `StepSegment` 环形队列。
-- 支持 SD 卡未压缩 G-code 文件的列举、上传、删除、目录操作与作业执行。
-- 支持 `$H` 归零、`?` 状态查询、`!` 暂停、`~` 继续和 `0x18` 硬复位。
-- 支持 UART、HTTP 和 WebSocket 命令入口；所有普通命令最终进入同一个 `protocol`
-  和 `service` 门控。
-- 支持 Wi-Fi 配置持久化、SoftAP 与 STA 连接、本地网页门户、HTTP 文件接口和实时状态
-  推送。
-- 接入 LIS2DH12 加速度计作为非实时异常加速度保护，明确不用于振动补偿或脉冲闭环。
+当前稳定功能：
+
+- 支持两轴 G0/G1 直线和 G2/G3 圆弧；圆弧在进入运动规划前会离散为短直线。
+- 支持前瞻规划、梯形速度曲线、AMASS/DDA 量化，以及 Timer Group 加 RMT 的 STEP
+  脉冲输出。
+- 支持归零、可信位置恢复和受软限位约束的运动请求。
+- 支持 SD 卡文件列举、上传、下载、删除、目录创建和未压缩 G-code 作业执行。
+- 支持 SD 作业进度、暂停、继续和硬复位，且 UART 与本地网页具有相同控制语义。
+- 支持 NVS 持久化 AP、STA、AP+STA 配置，本地 HTTP 门户和自研 socket WebSocket
+  控制会话。
+- 支持 LIS2DH12 异常加速度检测，作为非实时安全输入。
+
+明确不包含：
+
+- S 曲线、闭环位置控制或振动补偿。
+- OTA、云服务、MQTT Broker 或专用手机 App。
+- gzip 压缩 SD 作业执行。`.gz` 文件可以保存到 SD 卡，但启动作业时会被拒绝。
+- 高吞吐文件服务器能力。本地 Wi-Fi 门户面向机器控制和偶发文件管理。
 
 ## 总体架构
 
-```text
-UART ────────────┐
-HTTP :8848 ──────┼─> network command adapter ─> protocol ─> command / motion
-WebSocket :8849 ─┤                                      │              │
-SD job ──────────┘                                      │              v
-                                                        │          planner
-实时字节 ? ! ~ 0x18 ────────────────────────────────────┤              │
-                                                        v              v
-                                                    service      profile / prep
-                                             作业状态与安全编排       │
-                                                        │              v
-                                      laser / homing / SD       segment ring
-                                                                       │
-                                                                       v
-                                                           Timer ISR / RMT / STEP
-```
+### 启动顺序
 
-`protocol` 是所有输入源共享的协议边界。`service` 是任务级协调层：它拥有作业
-生命周期、暂停/继续、硬复位、输入结束和安全中止的状态转换，但不解析 G-code、计算
-速度或生成脉冲。冻结后的 segment 只由 Timer/RMT 消费，ISR 不调用文件、网络或复杂
-状态机代码。
-
-## 运动执行链
+`main/app_main.cpp` 拥有启动顺序。硬件和运动服务在可选网络传输层之前初始化，因此
+SD 卡或 Wi-Fi 不可用时，UART 和核心运动链仍可启动。
 
 ```text
-G-code/parser
-  -> MotionRequest
-  -> planner
-  -> profile
-  -> stepper_prep
-  -> StepSegment ring
-  -> Timer Group ISR
-  -> RMT STEP pulse
+NVS
+ -> laser / SD / UART / Timer-RMT / limits / accelerometer
+ -> homing / planner / laser-planner adapter / service
+ -> Wi-Fi / network lifecycle（NVS 可用时）
+ -> protocol / network command adapter
 ```
 
-各层职责保持单一：
+### 数据与控制路径
 
-| 层 | 职责 |
+```text
+UART ---------------------+
+HTTP :8848 ---------------+--> network command adapter --> protocol
+WebSocket :8849 ----------+                                |
+SD job -------------------+                                +--> command --> motion --> planner
+                                                                   |                    |
+实时字节 ? ! ~ 0x18 ------------------------------------------------+                    v
+                                                                service          profile / prep
+                                                                   |                    |
+                                                        laser / homing / SD   segment ring
+                                                                                     |
+                                                                                     v
+                                                                      Timer Group ISR / RMT / STEP
+```
+
+普通命令先组装为完整行，再经过 `protocol -> command -> motion -> planner`。实时字节
+在行组装前分流，保留系统控制语义，并经由 `service` 所拥有的控制路径处理，不作为普通
+G-code 对待。
+
+### 实时执行边界
+
+```text
+G-code parser
+ -> MotionRequest
+ -> planner block 与 junction 限制
+ -> 梯形执行计划
+ -> 固定时间片 stepper preparation
+ -> 不可变 StepSegment ring
+ -> Timer Group ISR
+ -> RMT STEP pulse
+```
+
+Timer Group ISR 分配在 CPU0。所有阻塞工作、解析、规划、网络和文件系统访问固定在
+CPU1。ISR 只消费已准备好的 segment，不执行 socket I/O、SD I/O、动态内存申请或复杂的
+状态转换。
+
+## 执行与安全模型
+
+`service` 拥有任务级生命周期转换，并明确区分正常输入结束和破坏性中断：
+
+| 事件 | 结果 |
 | --- | --- |
-| `command` | 解析 G-code、维护模态状态、离散圆弧 |
-| `motion` | 校验坐标和工艺请求，构造运动几何并提交 planner |
-| `planner` | 管理 block、junction 及 entry/exit/nominal 速度边界 |
-| `stepper` | 生成梯形 profile，按时间片积分、量化 segment，并消费 segment 输出脉冲 |
-| `driver` | 提供 Timer、RMT、UART、SD、限位和 I2C 等硬件适配 |
+| SD 文件到达 EOF 或被移除 | 停止后续供料，已准备的运动安全排空。 |
+| `!` | 在 segment 边界请求暂停，并关闭激光输出。 |
+| `~` | 在 service 状态允许时恢复已保留的执行上下文。 |
+| `0x18` | 停止输出、清空未执行工作、终止作业并使位置失效。 |
+| 硬限位或确认的加速度故障 | 走安全中止路径，并使位置失效。 |
+| `$H` | 执行系统归零运动，重新建立可信机器位置。 |
 
-位置仅在 STEP 脉冲实际产生后更新。硬复位、已确认的安全故障或执行异常会清空未执行
-运动并使位置失效；之后必须通过 `$H` 重建可信坐标。
+SD 作业活动期间，无论命令来自 UART、HTTP 还是 WebSocket，普通 G-code 和系统配置
+命令都会被统一门控。实时控制仍保持独立路径。
 
-## 作业与安全控制
+## 本地网络
 
-`service` 将不同介质的“输入结束”和“安全中止”区分处理：SD 文件读完或拔卡只停止
-继续供料，已冻结的 block/segment 会自然排空；硬限位、确认的异常加速度和 `0x18` 则
-立即切断激光、停止执行、清理未执行作业并使位置失效。
+Wi-Fi 设置保存在 `laserctl_wifi` NVS 命名空间。首次初始化默认 STA 模式；上电或执行
+`$WIFI/BEGIN` 时，应用已保存的 `AP`、`STA` 或 `AP_STA` 模式。网络生命周期在 Wi-Fi
+事件回调之外启动和停止 HTTP、WebSocket 服务。
 
-| 命令 | 语义 |
-| --- | --- |
-| `?` | 返回实时状态，不进入普通行解析 |
-| `!` | 在 segment 边界暂停，关闭激光并保留未执行上下文 |
-| `~` | 从已保留的上下文继续执行 |
-| `0x18` | 硬复位：终止作业、清空待执行数据并使位置失效 |
-| `$H` | 独立归零运动；成功后建立可信坐标 |
+| 服务 | 端口 | 作用 |
+| --- | ---: | --- |
+| HTTP | 8848 | 本地网页门户、命令请求和存储 API |
+| WebSocket | 8849 | 单个活跃门户会话的命令、响应和实时状态 |
 
-作业活动期间，普通 G-code 和系统配置命令经过统一输入门控；外部来源不能绕过当前
-作业直接改变执行队列。实时命令仍保持独立快速路径。
+WebSocket 服务是显式的非阻塞 socket/select 实现，不依赖 ESP-IDF HTTPD WebSocket
+升级支持。新接入的连接会替换先前活跃门户会话；有界发送队列确保慢速浏览器不会阻塞
+protocol 或运动路径。
 
-## 网络与网页
+HTTP 上传先写入同级临时文件，完整正文写入并刷盘后才通过重命名提交。SD 文件访问与
+活跃 SD 作业互斥。上传接收和 SD 写入使用有界 DMA 缓冲，以避免短暂 SD 写入抖动立刻
+停止 socket 读取。
 
-Wi-Fi 配置保存在 NVS 中。设备始终建立 SoftAP，STA 是否连接外部路由器由已保存的
-连接策略决定。网络生命周期模块负责在 Wi-Fi 可用时创建传输服务，并在 STA 断开或
-重新获得 IP 后有序停止和重建服务，避免在 Wi-Fi 事件回调中直接操作 socket。
+## 模块地图
 
-| 服务 | 端口 | 用途 |
+| 模块 | 职责 | 主要边界 |
 | --- | --- | --- |
-| HTTP | `8848` | 网页门户、命令、文件与存储接口 |
-| WebSocket | `8849` | 网页会话、命令输入与实时状态/响应推送 |
+| `command` | G-code 解析、模态状态和圆弧离散 | 产生运动请求，不直接驱动硬件。 |
+| `motion` | 请求校验和运动几何构造 | 向 planner 提交有效运动。 |
+| `planner` | block 队列、前瞻和 junction/速度限制 | 产生可执行 block 意图。 |
+| `stepper` | 梯形计划、预处理、segment 和执行 | 以不可变 segment 驱动 Timer/RMT。 |
+| `driver` | UART、Timer、RMT、SDIO、限位和 I2C 硬件适配 | 包含面向板级外设的访问。 |
+| `protocol` | 行组装、实时字节分流、命令分派和报告 | 所有客户端共享的输入边界。 |
+| `service` | 生命周期、安全、暂停/继续、复位和输入门控 | 拥有任务级状态转换。 |
+| `sd` | 文件系统访问、上传事务和作业供料 | 拥有 SD 文件访问协调。 |
+| `homing` | `$H` 系统运动和可信位置恢复 | 使用 service 与运动安全路径。 |
+| `laser` | 激光输出许可和 planner 联动功率 | 在暂停、复位和故障时关闭输出。 |
+| `accelerometer` | 非实时 LIS2DH12 异常运动检测 | 请求安全中止，不是反馈控制器。 |
+| `machine` | 机器几何、引脚和工艺限制 | 读取构建期 JSON 生成的机器参数。 |
+| `wifi` | NVS 设置、AP/STA 射频状态和 Wi-Fi 事件 | 仅提供网络传输可用性。 |
+| `network` | HTTP/WebSocket 生命周期和网络命令适配 | 将网络请求桥接到 protocol。 |
+| `httpd` | 门户资源、HTTP 命令和存储路由 | 不直接调用 motion 或 timer 代码。 |
+| `websocket` | 单门户 socket 会话和有界通知 | 经网络适配层提交命令。 |
 
-网页是设备自身的控制门户，不依赖外部 App。HTTP 与 WebSocket 都只是客户端适配层，
-不会直接访问 planner、stepper、Timer/RMT 或激光控制。
+每个目录都包含模块 README，描述自身的状态所有权和验收条件。修改跨模块契约前，应先
+阅读对应模块 README。
 
-## 模块说明
+## 机器配置
 
-| 模块 | 说明 |
-| --- | --- |
-| `command` | G-code 解析、模态状态维护与圆弧离散 |
-| `motion` | 运动请求校验、运动几何构造与 planner 提交 |
-| `planner` | block 队列、前瞻计算和速度边界 |
-| `stepper` | profile、segment 生成、DDA/AMASS 与 Timer/RMT 执行适配 |
-| `driver` | UART、Timer、RMT、SD、限位和 I2C 等底层外设驱动 |
-| `protocol` | 行组装、实时字节分流、统一输入门控、响应与状态报告 |
-| `service` | 作业生命周期、安全状态机、暂停/继续、复位与输入源协调 |
-| `sd` | SD 热插拔、文件读写、作业供料与进度统计 |
-| `homing` | `$H` 系统运动与可信坐标建立 |
-| `laser` | 激光输出及其与 planner 的工艺联动 |
-| `accelerometer` | LIS2DH12 非实时异常加速度检测与安全中止请求 |
-| `wifi` | NVS 配网数据、AP/STA 射频状态和连接事件 |
-| `network` | 网络命令适配与 HTTP/WebSocket 生命周期管理 |
-| `httpd` | 网页静态资源、命令和存储 HTTP 接口 |
-| `websocket` | 独立 socket WebSocket 会话与异步状态推送 |
-| `machine` | 机器行程、运动和工艺参数 |
+板级 GPIO、轴几何和激光工艺限制定义在 `config/machine_profile.json`。构建前，
+`cmake/generate_machine_profile.py` 会校验双轴结构、重复 GPIO、引脚范围、布尔极性和
+有限的正运动参数，再生成仅供编译使用的 `machine_profile_generated.hpp`。运行期不解析
+JSON，也不允许网页修改硬件拓扑。
 
-各模块的详细约束见对应目录下的 `README.md`。涉及运动行为的修改必须保持
-parser、planner、profile、prep、segment transport 和 Timer/RMT 的职责边界。
+因此 `machine` 模块仍向实时路径提供编译期常量；修改配置后必须重新构建、烧录并验证
+方向、归零、限位与激光输出。JSON 是单一机器 profile 的可审查源文件，而不是远程配置
+接口。
 
-## 构建
+## 构建与烧录
 
-在 ESP-IDF 5.5.1 环境中执行：
+使用 ESP-IDF 5.5.1 和 ESP32-S3 目标：
 
 ```powershell
 idf.py build
+idf.py -p COMx flash monitor
 ```
 
-首次烧录后，应先通过 `$H` 建立位置，再执行普通运动或启动 SD 作业。Wi-Fi 不可用时，
-UART、SD 和运动执行链仍应独立工作。
+生成的 `sdkconfig` 是本地构建状态；仓库默认配置位于 `sdkconfig.defaults`。不要提交
+机器本地 IDE 路径、串口日志、抓包文件或临时传输测试脚本。
+
+## 上电验收
+
+1. 构建并烧录目标 ESP32-S3。
+2. 确认 UART 启动输出、激光安全空闲状态和 SD 卡挂载状态。
+3. 发送 `$I` 与 `$RAM`，记录构建身份和内部/DMA 堆可用量。
+4. 执行 `$H`，在普通运动或 SD 作业前确认位置可信。
+5. 经 UART 验证短 G0/G1 作业，再测试 `!`、`~` 与 `0x18`。
+6. 验证 SD 列表、上传、下载和一个未压缩 SD 作业。
+7. 应用 Wi-Fi 设置并执行 `$WIFI/BEGIN`，在选定网络接口上验证 HTTP 门户和一个
+   WebSocket 客户端。
+8. 在禁用激光输出或采取适当安全措施后，验证硬限位和加速度故障行为。
+
+## 项目边界
+
+本仓库展示固件和相应的工程决策，不包含量产 App、云服务、专有作业文件或硬件制造
+资料。后续加入 BLE、Telnet 等传输层时，应作为客户端适配层通过 `protocol` 提交请求，
+而不是新增平行的运动控制路径。

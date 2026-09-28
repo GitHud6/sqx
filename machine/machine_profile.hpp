@@ -36,7 +36,14 @@ struct LaserHardware {
 };
 
 constexpr std::size_t kAxisCount = 2;
-constexpr unsigned int kStepPulseMicroseconds = 3;
+
+}  // namespace laserctl::machine
+
+#include "machine_profile_generated.hpp"
+
+namespace laserctl::machine {
+
+constexpr unsigned int kStepPulseMicroseconds = generated::kStepPulseMicroseconds;
 
 const AxisHardware& machine_axis(Axis axis);
 const LaserHardware& machine_laser();

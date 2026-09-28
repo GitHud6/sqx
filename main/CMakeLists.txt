@@ -1,3 +1,9 @@
+set(MACHINE_PROFILE_JSON "${CMAKE_CURRENT_LIST_DIR}/../config/machine_profile.json")
+set(MACHINE_PROFILE_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/../cmake/generate_machine_profile.py")
+set(MACHINE_PROFILE_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(MACHINE_PROFILE_GENERATED_HEADER "${MACHINE_PROFILE_GENERATED_DIR}/machine_profile_generated.hpp")
+file(MAKE_DIRECTORY "${MACHINE_PROFILE_GENERATED_DIR}")
+
 idf_component_register(SRCS "app_main.cpp"
                             "../command/command_executor.cpp"
                             "../driver/rmt_step_pulse_driver.cpp"
@@ -45,6 +51,7 @@ idf_component_register(SRCS "app_main.cpp"
                                     "../identity"
                                     "../laser"
                                     "../machine"
+                                    "${MACHINE_PROFILE_GENERATED_DIR}"
                                     "../motion"
                                     "../network"
                                     "../planner"
@@ -73,3 +80,14 @@ idf_component_register(SRCS "app_main.cpp"
                                 mbedtls
                                 nvs_flash
                                 lwip)
+
+add_custom_command(
+    OUTPUT "${MACHINE_PROFILE_GENERATED_HEADER}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MACHINE_PROFILE_GENERATED_DIR}"
+    COMMAND "${PYTHON}" "${MACHINE_PROFILE_GENERATOR}"
+            --input "${MACHINE_PROFILE_JSON}"
+            --output "${MACHINE_PROFILE_GENERATED_HEADER}"
+    DEPENDS "${MACHINE_PROFILE_JSON}" "${MACHINE_PROFILE_GENERATOR}"
+    VERBATIM)
+add_custom_target(machine_profile_generated DEPENDS "${MACHINE_PROFILE_GENERATED_HEADER}")
+add_dependencies(${COMPONENT_LIB} machine_profile_generated)
