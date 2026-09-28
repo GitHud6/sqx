@@ -243,7 +243,7 @@ esp_err_t wifi_start() {
         s_state.store(State::Error, std::memory_order_release);
         return result;
     }
-    ESP_LOGI(kLogTag, "starting saved mode=%s sta_ssid=%s",
+    ESP_LOGI(kLogTag, "starting mode=%s sta_ssid=%s",
              wifi_radio_mode_text(saved_settings.radio_mode),
              saved_settings.ssid[0] == '\0' ? "<unset>" : "<set>");
 

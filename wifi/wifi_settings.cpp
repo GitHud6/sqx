@@ -72,7 +72,7 @@ esp_err_t wifi_settings_init() {
     std::uint8_t radio_mode = 0;
     result = nvs_get_u8(handle, kNvsKeyRadioMode, &radio_mode);
     if (result == ESP_ERR_NVS_NOT_FOUND) {
-        result = nvs_set_u8(handle, kNvsKeyRadioMode, static_cast<std::uint8_t>(RadioMode::Ap));
+        result = nvs_set_u8(handle, kNvsKeyRadioMode, static_cast<std::uint8_t>(RadioMode::Sta));
         needs_commit = result == ESP_OK;
     }
     if (result == ESP_OK && valid_radio_mode(radio_mode)) {

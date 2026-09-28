@@ -43,8 +43,8 @@ struct RuntimeInfo {
     char sta_mac[kWifiMacTextCapacity] = {};
 };
 
-// Starts the saved AP, STA, or AP+STA radio configuration. The service only
-// owns radio transport; it has no G-code or socket handling.
+// Starts Wi-Fi in the radio mode and with the STA credentials saved in NVS.
+// The service only owns radio transport; it has no G-code or socket handling.
 esp_err_t wifi_start();
 esp_err_t wifi_stop();
 esp_err_t wifi_restart();

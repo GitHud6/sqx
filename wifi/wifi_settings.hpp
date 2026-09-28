@@ -21,7 +21,7 @@ enum class RadioMode : std::uint8_t {
 struct WifiSettings {
     char ssid[kStaSsidCapacity] = {};
     char password[kStaPasswordCapacity] = {};
-    RadioMode radio_mode = RadioMode::Ap;
+    RadioMode radio_mode = RadioMode::Sta;
 };
 
 // Creates the `laserctl_wifi` NVS namespace defaults on first use. The namespace
