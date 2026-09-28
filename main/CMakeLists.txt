@@ -22,7 +22,6 @@ idf_component_register(SRCS "app_main.cpp"
                             "../protocol/realtime_command.cpp"
                             "../sd/sd_command_handler.cpp"
                             "../sd/plain_file_reader.cpp"
-                            "../sd/gzip_file_reader.cpp"
                             "../sd/sd_file_service.cpp"
                             "../sd/sd_job_service.cpp"
                             "../service/service.cpp"
@@ -69,6 +68,7 @@ idf_component_register(SRCS "app_main.cpp"
                                 esp_event
                                 esp_netif
                                 esp_http_server
+                                esp_timer
                                 log
                                 mbedtls
                                 nvs_flash

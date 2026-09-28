@@ -900,6 +900,9 @@ bool command_dispatch_impl(const char* line, std::size_t length, bool& capacity_
                     }
                     return write_text("error:sd-job-active\r\n");
                 }
+                if (result == ESP_ERR_NOT_SUPPORTED) {
+                    return write_text("error:sd-gzip-unsupported\r\n");
+                }
                 if (result != ESP_OK) {
                     return write_text("error:sd-run-failed\r\n");
                 }

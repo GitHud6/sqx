@@ -12,7 +12,7 @@
 - 支持 G0/G1 直线和 G2/G3 圆弧；圆弧在 `command` 层离散为短直线后复用同一条运动链。
 - 支持 32 个 `PlannerBlock` 前瞻窗口、梯形 profile、AMASS/DDA 量化和 64 个
   `StepSegment` 环形队列。
-- 支持 SD 卡 `.gc`、`.gc.gz` 文件的列举、上传、删除、目录操作与作业执行。
+- 支持 SD 卡未压缩 G-code 文件的列举、上传、删除、目录操作与作业执行。
 - 支持 `$H` 归零、`?` 状态查询、`!` 暂停、`~` 继续和 `0x18` 硬复位。
 - 支持 UART、HTTP 和 WebSocket 命令入口；所有普通命令最终进入同一个 `protocol`
   和 `service` 门控。
@@ -112,7 +112,7 @@ Wi-Fi 配置保存在 NVS 中。设备始终建立 SoftAP，STA 是否连接外�
 | `driver` | UART、Timer、RMT、SD、限位和 I2C 等底层外设驱动 |
 | `protocol` | 行组装、实时字节分流、统一输入门控、响应与状态报告 |
 | `service` | 作业生命周期、安全状态机、暂停/继续、复位与输入源协调 |
-| `sd` | SD 热插拔、文件读写、gzip 解压、作业供料与进度统计 |
+| `sd` | SD 热插拔、文件读写、作业供料与进度统计 |
 | `homing` | `$H` 系统运动与可信坐标建立 |
 | `laser` | 激光输出及其与 planner 的工艺联动 |
 | `accelerometer` | LIS2DH12 非实时异常加速度检测与安全中止请求 |

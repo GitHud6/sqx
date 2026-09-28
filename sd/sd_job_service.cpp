@@ -11,7 +11,6 @@
 #include "runtime_affinity.hpp"
 #include "planner.hpp"
 #include "plain_file_reader.hpp"
-#include "gzip_file_reader.hpp"
 #include "sd_file_service.hpp"
 #include "sdcard_driver.hpp"
 #include "stepper_driver.hpp"
@@ -35,10 +34,7 @@ std::atomic<bool> s_input_end_requested = false;
 std::atomic<bool> s_job_file_access_claimed = false;
 char s_job_path[kJobPathCapacity] = {};
 
-// The gzip dictionary is 32 KiB. Keep reader storage outside the 4 KiB job
-// task stack; only one SD job can be active at a time.
 PlainFileReader s_plain_reader;
-GzipFileReader s_gzip_reader;
 
 bool copy_path(char* destination, const char* source) {
     if (destination == nullptr || source == nullptr || source[0] != '/') {
@@ -122,9 +118,7 @@ void sd_job_task(void*) {
     std::memcpy(path, s_job_path, sizeof(path));
     portEXIT_CRITICAL(&s_job_lock);
 
-    FileReader* reader = has_gzip_suffix(path)
-                             ? static_cast<FileReader*>(&s_gzip_reader)
-                             : static_cast<FileReader*>(&s_plain_reader);
+    FileReader* reader = &s_plain_reader;
     s_job_state.store(JobState::Starting);
     log_position("starting");
     if (!reader->open(path)) {
@@ -242,6 +236,11 @@ esp_err_t sd_job_start(const char* path) {
         s_job_file_access_claimed.store(false, std::memory_order_release);
         laserctl::sd::file_service_release_job_access();
         return ESP_ERR_INVALID_ARG;
+    }
+    if (has_gzip_suffix(normalized_path)) {
+        s_job_file_access_claimed.store(false, std::memory_order_release);
+        laserctl::sd::file_service_release_job_access();
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     portENTER_CRITICAL(&s_job_lock);
