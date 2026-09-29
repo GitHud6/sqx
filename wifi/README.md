@@ -1,64 +1,62 @@
 # Wi-Fi 模块
 
-`wifi` 负责 ESP-IDF 网络栈和基础无线接口初始化，为后续 Telnet、HTTP 和 WebSocket 提供网络承载。它不解析 G-code，不直接调用 planner、stepper、Timer/RMT 或激光模块。
+`wifi` 只管理 ESP-IDF 无线电、AP/STA 链路状态和持久化的无线设置。它不解析 G-code，
+不直接启动 HTTP/WebSocket 服务，也不能访问 `planner`、`stepper`、Timer/RMT 或激光输出。
 
-## 当前实现
+## 状态与所有权
 
-- 使用 ESP-IDF 5.5.1 的 `esp_netif`、`esp_event` 和 `esp_wifi`。
-- `app_main` 会在 Wi-Fi 前初始化默认 NVS 分区；只有 NVS 空页耗尽或版本不兼容时才擦除并重建。
-- 使用 NVS 命名空间 `laserctl_wifi` 保存三类配网数据：`sta_ssid`、`sta_password` 和
-  `radio_mode`。旧命名空间不会迁移；升级后必须重新配置 STA 凭证。
-- `radio_mode` 表示用户保存的 STA 连接策略（`AP` / `STA` / `AP_STA`），不记录瞬时连接结果；实际 AP/STA 链路状态由 `wifi_service` 在运行时维护。
-- 物理无线模式固定为 `WIFI_MODE_APSTA`。SoftAP 始终启动，SSID 为 `LongerLaser_XXXX`，后缀取 AP MAC 的最后两个字节。
-- 当 `radio_mode=AP` 时不调用 STA 连接；当 `radio_mode=STA` 或 `AP_STA` 时，使用 NVS 中的 SSID/密码发起 STA 连接。
-- SoftAP 密码为 `12345678`，地址固定为 `192.168.0.1/24`，最多 3 个客户端。
-- 事件回调只更新 Wi-Fi 状态并输出必要日志，不执行文件操作或运动控制。
-- 当前已实现 AP、STA 和 AP+STA 的基础无线承载，以及 `httpd` 的 HTTP 命令入口和
-  独立 `websocket` 的命令结果观察通道。Telnet、WebSocket 命令输入和 MQTT 仍未接入。
+| 所有者 | 职责 |
+| --- | --- |
+| `wifi_settings` | 初始化和读写 `laserctl_wifi` NVS 命名空间。 |
+| `wifi_service` | 创建 ESP-NETIF、配置 ESP Wi-Fi、维护运行期 AP/STA 状态。 |
+| `network_lifecycle` | 根据链路事件在普通任务上下文中串行停止或启动 HTTP 与 WebSocket 服务。 |
 
-## 与现有架构的关系
+Wi-Fi 事件回调只更新轻量状态并发布 `StaDisconnected` 或 `StaGotIp` 通知。回调上下文
+不得执行 socket 停止、socket 创建、文件系统访问、动态内存申请或运动控制。
 
-```text
-wifi（网络承载和连接状态）
-        ↓
-httpd:8848（HTTP 命令输入） → protocol → service → planner → stepper
-        ↓
-websocket:8849（命令结果广播，仅观察）
-```
+## 持久化设置
 
-Wi-Fi 任务默认固定到 non-realtime core 1，避免与当前 core 0 上的 Timer/RMT 实时运动路径争用 CPU。Wi-Fi 连接丢失只影响网络客户端，不应直接改变已提交的运动；网络输入生命周期由 `service` 统一处理。
+首次使用时，`wifi_settings_init()` 在 NVS 中初始化以下键，并将目标无线模式设为 `STA`：
 
-## 后续验收
+| 键 | 含义 |
+| --- | --- |
+| `sta_ssid` | STA 关联的网络名称；默认为空。 |
+| `sta_password` | STA 密码；默认为空。 |
+| `radio_mode` | 期望无线模式：`AP`、`STA` 或 `AP_STA`。 |
 
-1. 任意有效配置上电日志都出现 SoftAP SSID 和 `192.168.0.1`。
-2. 手机或电脑能连接该 SSID，并获得 `192.168.0.x` 地址。
-3. 网络栈启动失败时，UART/SD 雕刻仍能独立工作。
-4. 后续接入 Telnet 后，网络 G-code 与 UART 共用 protocol/service 控制和安全语义。
+SSID 和密码以有界 ASCII 文本保存。它们用于本地设备配网，不是凭据保险库；公开仓库、
+示例配置、串口日志和测试脚本中不得出现真实凭据。
 
-## 串口设置协议
+## 启动行为
 
-本阶段兼容 `ray2-main` 的三个持久化设置路径，命令和值均不区分大小写：
+`wifi_start()` 读取已保存的设置，并只创建目标模式需要的 ESP-NETIF：
 
-- `$STA/SSID` 查询已保存 SSID；`$STA/SSID=<ssid>` 校验可打印 ASCII 字符和长度后保存 SSID。
-- `$STA/PASSWORD` 查询和设置保存的明文密码。该本地开源门户没有凭据保密目标；`$STA/PASSWORD=<password>` 校验可打印 ASCII 字符和长度后保存密码。
-- `$RADIO/MODE` 查询目标模式；`$RADIO/MODE=AP|STA|AP_STA` 保存目标模式。
-- `$WIFI/BEGIN` 不接受参数。它先停止当前 Wi-Fi，再读取 NVS 并按已保存模式重启无线模块。
+| 模式 | 无线接口 | 服务可用条件 |
+| --- | --- | --- |
+| `AP` | 仅 SoftAP | AP 启动后可提供本地网络服务。 |
+| `STA` | 仅 STA | 获得 DHCP 地址后提供网络服务。 |
+| `AP_STA` | SoftAP 与 STA | AP 可立即提供服务；STA 获取地址后继续使用该链路。 |
 
-设置命令只更新 NVS，不会停止或重启当前 Wi-Fi；仅 `$WIFI/BEGIN` 应用已保存的连接策略，并确认 HTTP 与 WebSocket 服务已经启动。实际射频始终是 APSTA；`AP` 只关闭 STA 关联动作，`STA` 和 `AP_STA` 都会尝试连接外部路由器。STA 未配置 SSID 时仍保留 AP 并输出警告。`$RADIO/STATE`、蓝牙、Telnet、WebSocket 命令输入和 MQTT 均不属于本阶段。
+AP 标识由通用 `identity` 配置和 AP MAC 派生，不属于机器 profile。STA 仅在 SSID 非空时
+发起关联；空凭据不会阻塞 Wi-Fi 服务启动。无线省电在启动后关闭，以减少本地控制和文件
+传输期间的额外延迟。
 
-## `$I` 设备信息
+链路断开时，`wifi` 清除 STA 已获取 IP 的运行期状态并通知 `network_lifecycle`。后者负责
+销毁旧 HTTP/WebSocket 监听器、请求重新关联，并在新链路可用时重建传输服务。这样不会让
+失效的 STA socket 跨 DHCP 地址变化继续存活。
 
-`$I` 使用 Grbl 风格逐行返回固件、板卡、机型、软件版本、激光波长/功率和当前工作尺寸。Wi-Fi 已启动时，它追加运行时网络信息：
+## 修改步骤
 
-- STA：`[MSG:Mode=STA:SSID=...:Status=Connected|Connecting:IP=...:MAC=...]`
-- AP：`[MSG:Mode=AP:SSDI=LongerLaser_XXXX:IP=...:MAC=...]`。`SSDI` 是为兼容量产协议保留的历史字段拼写；`XXXX` 为 AP MAC 的最后两字节。
+1. 仅在 `wifi_settings` 中增加或修改持久化设置键；保持 NVS 初始化、读取和写入语义一致。
+2. 仅在 `wifi_service` 中改动 ESP-IDF Wi-Fi 或 ESP-NETIF 配置。
+3. 需要改变 HTTP/WebSocket 启停条件时，修改 `network_lifecycle`，不要在 Wi-Fi 事件回调
+   中直接操作 socket。
+4. 修改后清除测试设备的相关 NVS 键，分别验证首次启动和已有设置启动。
 
-实际射频始终是 APSTA；当连接策略为 `STA` 或 `AP_STA` 时，若 STA 已启用则同时输出 STA 行和 AP 行。连接策略为 `AP` 时只输出 AP 行。STA 仅在收到 DHCP 地址后报告 `Connected`；在关联中、断链或尚未获得地址时报告 `Connecting`，且 IP 固定输出 `0.0.0.0`。IP 与 MAC 来自实际 ESP-IDF 接口；Wi-Fi 未启动时输出 `[MSG:Mode=OFF]`。
+## 验收标准
 
-## 本阶段验收
-
-1. 三个查询命令均返回对应持久化值，密码不以明文出现。
-2. 三个写入命令返回 `ok`，断电重启后查询值不变。
-3. 非法 SSID、超长密码或未知模式返回错误，原有值不被覆盖。
-4. 设置命令执行期间不改变 AP、planner、stepper 或现有雕刻任务状态。
-5. `$WIFI/BEGIN` 后，`AP` 能重新建 AP，`STA` 能发起入网，`AP_STA` 在 STA 入网失败时仍保留 AP。
+- 首次启动时，空 STA 凭据不会阻塞 UART、SD 或核心运动服务。
+- `AP`、`STA`、`AP_STA` 三种模式均只创建各自需要的接口。
+- STA 获取地址、断开和重新获取地址期间，HTTP/WebSocket 服务由网络生命周期任务有序重建。
+- Wi-Fi 回调不调用运动、SD 或 socket 生命周期代码。
+- 应用新的无线设置后，页面断开是预期行为；重连后 HTTP 和唯一 WebSocket 门户会话可恢复。
