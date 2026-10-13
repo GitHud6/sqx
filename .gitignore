@@ -1,0 +1,11 @@
+# Documentation and local editor settings
+/doc/
+/.vscode/
+
+# ESP-IDF generated build output and local configuration
+/build/
+/sdkconfig
+/sdkconfig.old
+
+# Local tooling metadata
+/.clangd
