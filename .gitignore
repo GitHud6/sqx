@@ -9,3 +9,8 @@
 
 # Local tooling metadata
 /.clangd
+
+# Keep source fixtures and helper scripts; ignore generated ESP-IDF output.
+/test_devices/*/build/
+/test_devices/*/sdkconfig
+/test_devices/*/sdkconfig.old
