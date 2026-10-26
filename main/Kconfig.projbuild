@@ -1,0 +1,68 @@
+menu "NETGATE Configuration"
+
+config NETGATE_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "changlang"
+    help
+        SSID used by the NETGATE Wi-Fi station interface.
+
+config NETGATE_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default "changlang"
+    help
+        Password used by the NETGATE Wi-Fi station interface.
+
+config NETGATE_MQTT_BROKER_URI
+    string "MQTT broker URI"
+    default ""
+    help
+        MQTT URI accepted by esp-mqtt, for example mqtt://host:1883.
+
+config NETGATE_MQTT_TOPIC_PREFIX
+    string "MQTT event topic prefix"
+    default "netgate/devices"
+    help
+        Prefix for event topics. Events are published as
+        <prefix>/<device_id>/<event_type>.
+
+config NETGATE_MQTT_STATUS_TOPIC
+    string "MQTT status subscription topic"
+    default "netgate/status"
+    help
+        Topic subscribed after MQTT connects. Its command handling is reserved
+        for a later configuration-control stage.
+
+config NETGATE_MQTT_CONFIG_TOPIC
+    string "MQTT BLE configuration topic"
+    default "netgate/config/ble"
+    help
+        Complete schema v3 BLE device JSON documents are received on this topic.
+        Results are published to the same topic with /result appended.
+
+config NETGATE_MQTT_CONFIG_MAX_BYTES
+    int "Maximum MQTT BLE configuration size"
+    range 512 4096
+    default 4096
+    help
+        Maximum reassembled JSON payload size accepted from MQTT.
+
+config NETGATE_MQTT_OTA_TOPIC
+    string "MQTT OTA command topic"
+    default "netgate/ota"
+    help
+        HTTP firmware update commands are received on this topic.
+
+config NETGATE_MQTT_OTA_STATUS_TOPIC
+    string "MQTT OTA status topic"
+    default "netgate/ota/status"
+    help
+        OTA progress and result messages are published on this topic.
+
+config NETGATE_MQTT_OTA_MAX_BYTES
+    int "Maximum MQTT OTA command size"
+    range 64 512
+    default 256
+    help
+        Maximum reassembled JSON payload size accepted for an OTA command.
+
+endmenu
