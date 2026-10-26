@@ -1,0 +1,75 @@
+{
+  "schema_version": 3,
+  "devices": [
+    {
+      "device_id": "Ble_device0",
+      "advertising_name": "Netgate-C3-Device0",
+      "advertised_service_uuid": "b3a5f6c0-1f3d-4d91-8a50-53d0a4a07301",
+      "driver": "generic_gatt",
+      "services": [
+        {
+          "uuid": "b3a5f6c0-1f3d-4d91-8a50-53d0a4a07301",
+          "characteristics": [
+            {
+              "id": "command",
+              "uuid": "b3a5f6c0-1f3d-4d91-8a50-53d0a4a07302",
+              "properties": ["write", "write_without_response"],
+              "callback_set": "generic_gatt.io",
+              "event_type": "command",
+              "topic": "command",
+              "decoder": {
+                "type": "raw"
+              }
+            },
+            {
+              "id": "telemetry",
+              "uuid": "b3a5f6c0-1f3d-4d91-8a50-53d0a4a07303",
+              "properties": ["notify"],
+              "callback_set": "generic_gatt.io",
+              "event_type": "telemetry",
+              "topic": "telemetry",
+              "decoder": {
+                "type": "raw"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "device_id": "Ble_device1",
+      "advertising_name": "Netgate-C3-Device1",
+      "advertised_service_uuid": "c4b6f7d1-2f4e-5e92-9b61-64e1b5b08412",
+      "driver": "generic_gatt",
+      "services": [
+        {
+          "uuid": "c4b6f7d1-2f4e-5e92-9b61-64e1b5b08412",
+          "characteristics": [
+            {
+              "id": "command",
+              "uuid": "c4b6f7d1-2f4e-5e92-9b61-64e1b5b08413",
+              "properties": ["write", "write_without_response"],
+              "callback_set": "generic_gatt.io",
+              "event_type": "command",
+              "topic": "command",
+              "decoder": {
+                "type": "raw"
+              }
+            },
+            {
+              "id": "telemetry",
+              "uuid": "c4b6f7d1-2f4e-5e92-9b61-64e1b5b08414",
+              "properties": ["notify"],
+              "callback_set": "generic_gatt.io",
+              "event_type": "telemetry",
+              "topic": "telemetry",
+              "decoder": {
+                "type": "raw"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
